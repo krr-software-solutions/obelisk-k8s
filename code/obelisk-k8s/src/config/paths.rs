@@ -161,51 +161,53 @@ impl RepoConfig {
         self.unit_target_names(unit).contains(&target.name.as_str())
     }
 
+    /// `unit`'s config paths on `target`, in merge order.
     pub(crate) fn resolve<'a>(
         &'a self,
         repo_root: &Path,
         target: &'a Target,
         unit: &'a Unit,
     ) -> Result<Vec<ResolvedPath<'a>>, ObeliskK8sError> {
-        let params = InterpolationParams {
-            target: Some(&target.name),
-            unit: Some(&unit.name),
+        let declared = [
+            (
+                Level::Repo,
+                Path::new(REPO_FILE),
+                self.config_paths.iter().collect(),
+            ),
+            (
+                Level::Target,
+                target.file.as_path(),
+                target.config_paths.iter().collect(),
+            ),
+            (
+                Level::Unit,
+                unit.file.as_path(),
+                unit.config_paths.iter().collect(),
+            ),
+        ];
+        resolve_declared(repo_root, target, unit, declared)
+    }
+
+    /// `unit`'s generators on `target`, in the same order (and with the same rules) as config paths.
+    pub(crate) fn resolve_generators<'a>(
+        &'a self,
+        repo_root: &Path,
+        target: &'a Target,
+        unit: &'a Unit,
+    ) -> Result<Vec<ResolvedPath<'a>>, ObeliskK8sError> {
+        let paths = |generators: &'a [crate::config::repo::Generator]| {
+            generators.iter().map(|g| &g.path).collect()
         };
         let declared = [
-            (Level::Repo, Path::new(REPO_FILE), &self.config_paths),
-            (Level::Target, target.file.as_path(), &target.config_paths),
-            (Level::Unit, unit.file.as_path(), &unit.config_paths),
+            (Level::Repo, Path::new(REPO_FILE), paths(&self.generators)),
+            (
+                Level::Target,
+                target.file.as_path(),
+                paths(&target.generators),
+            ),
+            (Level::Unit, unit.file.as_path(), paths(&unit.generators)),
         ];
-
-        let mut resolved = Vec::new();
-        for (level, declared_in, paths) in declared {
-            for written in paths {
-                let interpolated =
-                    written
-                        .interpolate(&params)
-                        .map_err(|var| ObeliskK8sError::Config {
-                            file: declared_in.to_owned(),
-                            at: None,
-                            message: format!(
-                                "`{written}`: `${{{{obelisk:{}}}}}` has no value here",
-                                var.name()
-                            ),
-                        })?;
-                // Every config path starts with `./` (checked at load), relative to `.obelisk-k8s/`.
-                let relative = interpolated.strip_prefix("./").unwrap_or(&interpolated);
-                let path = Path::new(REPO_CONFIG_DIR).join(relative);
-                resolved.push(ResolvedPath {
-                    found: repo_root.join(&path).is_file(),
-                    written,
-                    declared_in,
-                    scope: scope(level, written),
-                    path,
-                });
-            }
-        }
-        // Stable: `declared` is already in level order, and each file in the order written.
-        resolved.sort_by_key(|r| r.scope);
-        Ok(resolved)
+        resolve_declared(repo_root, target, unit, declared)
     }
 
     fn target(&self, name: &str) -> Result<&Target, ObeliskK8sError> {
@@ -227,6 +229,49 @@ impl RepoConfig {
             ))
         })
     }
+}
+
+/// Interpolates and orders paths declared at each level (repo, target, unit).
+fn resolve_declared<'a>(
+    repo_root: &Path,
+    target: &Target,
+    unit: &Unit,
+    declared: [(Level, &'a Path, Vec<&'a InterpString>); 3],
+) -> Result<Vec<ResolvedPath<'a>>, ObeliskK8sError> {
+    let params = InterpolationParams {
+        target: Some(&target.name),
+        unit: Some(&unit.name),
+    };
+
+    let mut resolved = Vec::new();
+    for (level, declared_in, paths) in declared {
+        for written in paths {
+            let interpolated =
+                written
+                    .interpolate(&params)
+                    .map_err(|var| ObeliskK8sError::Config {
+                        file: declared_in.to_owned(),
+                        at: None,
+                        message: format!(
+                            "`{written}`: `${{{{obelisk:{}}}}}` has no value here",
+                            var.name()
+                        ),
+                    })?;
+            // Every config path starts with `./` (checked at load), relative to `.obelisk-k8s/`.
+            let relative = interpolated.strip_prefix("./").unwrap_or(&interpolated);
+            let path = Path::new(REPO_CONFIG_DIR).join(relative);
+            resolved.push(ResolvedPath {
+                found: repo_root.join(&path).is_file(),
+                written,
+                declared_in,
+                scope: scope(level, written),
+                path,
+            });
+        }
+    }
+    // Stable: `declared` is already in level order, and each file in the order written.
+    resolved.sort_by_key(|r| r.scope);
+    Ok(resolved)
 }
 
 fn scope(level: Level, path: &InterpString) -> Scope {
@@ -329,7 +374,7 @@ impl fmt::Display for PathsReport<'_> {
 
 /// `path` (relative to the repo root) as the user should see it.
 fn shown(shown_root: Option<&Path>, path: &Path) -> PathBuf {
-    shown_root.map_or_else(|| path.to_owned(), |root| root.join(path))
+    crate::config::values::shown_under(shown_root, path)
 }
 
 fn or_none(names: &[&str]) -> String {
@@ -790,6 +835,50 @@ mod tests {
             explain.contains("found\n\n[ target=t2, unit=u2 ]\n  RAW"),
             "{explain}"
         );
+    }
+
+    #[test]
+    fn orders_generators_like_config_paths() {
+        let dir = repo(&[
+            (
+                "repo.yaml",
+                "repo:\n  name: r\n  generators:\n    - { type: gotmpl, path: \"./${{obelisk:unit}}.gen\" }\n    - { type: gotmpl, path: ./global.gen }\n",
+            ),
+            (
+                "targets/prod/target.yaml",
+                "target:\n  cluster: c\n  generators: [{ type: gotmpl, path: ./prod.gen }]\n",
+            ),
+            (
+                "units/app/unit.yaml",
+                "unit:\n  generators: [{ type: gotmpl, path: \"./${{obelisk:target}}-app.gen\" }]\n",
+            ),
+            ("global.gen", ""),
+            ("prod-app.gen", ""),
+        ]);
+        let config = RepoConfig::load(dir.path()).unwrap();
+        let target = &config.targets[0];
+        let unit = &config.units[0];
+        let order: Vec<_> = config
+            .resolve_generators(dir.path(), target, unit)
+            .unwrap()
+            .into_iter()
+            .map(|p| (p.scope, p.path.display().to_string(), p.found))
+            .collect();
+        assert_eq!(
+            order,
+            [
+                (Scope::Repo, ".obelisk-k8s/global.gen".to_owned(), true),
+                (Scope::Target, ".obelisk-k8s/prod.gen".to_owned(), false),
+                (Scope::Unit, ".obelisk-k8s/app.gen".to_owned(), false),
+                (
+                    Scope::TargetUnit,
+                    ".obelisk-k8s/prod-app.gen".to_owned(),
+                    true
+                ),
+            ]
+        );
+        // Config paths and generators are separate lists.
+        assert_eq!(config.resolve(dir.path(), target, unit).unwrap(), []);
     }
 
     #[test]

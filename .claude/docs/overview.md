@@ -45,6 +45,14 @@ ip-allocator.
   (`0755` is `493`), with known limits listed in `config/values.rs`. Same selection as
   `config repo paths`; several cases print as a YAML stream, each under a `# [ target=…, unit=… ]`
   comment. Takes `--repo` too.
+- `obelisk-k8s template generated-values [-t …]… [-u …]…`: the merged values with each of the unit's
+  generators deep-merged on top, in merge order. `generators:` (in `repo.yaml`, `target.yaml`,
+  `unit.yaml`) lists `{ type: gotmpl, path }` like config paths (interpolated, missing files skipped).
+  Each renders through a throwaway Helm chart (`helm` must be installed) with the merged config values
+  as `.Values` (`.Release` is the unit / `default`: use `.Values.obelisk`); all see the same input. An
+  output must be one mapping or nothing, and may set `obelisk.release.{name, namespace}` like a config
+  file. Takes `--repo` too. Each generator is its own `helm` run (targets × units × generators of them
+  for a full run). A unit with generators needs a name Helm accepts as a release name (≤ 53 chars).
 - Targets and units may have `release: { name, namespace }` (both optional, interpolated): parsed, not
   used yet. They'll be where a unit's Helm release name and namespace can come from, along with config
   files and generators, with every given value required to agree.

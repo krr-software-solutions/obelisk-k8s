@@ -1,0 +1,14 @@
+stuff:
+  ab: {{ add .Values.stuff.a .Values.stuff.b }}
+
+long-name: {{ printf "%s-%s-%s" .Values.obelisk.repo .Values.obelisk.unit .Values.obelisk.target }}
+
+{{- if eq .Values.obelisk.target "prod" }}
+prod:
+  replicas: 3
+  region: us-east-2
+  features: [billing, audit]
+  limits:
+    cpu: "2"
+    memory: 1Gi
+{{- end }}

@@ -4,6 +4,10 @@ use std::path::PathBuf;
 /// Every error obelisk-k8s can fail with.
 #[derive(Debug, thiserror::Error)]
 pub enum ObeliskK8sError {
+    /// Running `helm` failed, or it said no.
+    #[error("{0}")]
+    Helm(String),
+
     /// The command was asked for something that isn't there (e.g. an unknown target).
     #[error("{0}")]
     Usage(String),

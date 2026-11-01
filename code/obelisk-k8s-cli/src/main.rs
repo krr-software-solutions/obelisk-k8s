@@ -182,6 +182,16 @@ enum TemplateCommand {
         #[arg(short, long = "unit", value_name = "UNIT")]
         units: Vec<String>,
     },
+    /// The values after each unit's generators: its merged values, with every generator's output
+    /// deep-merged on top (generators are Go templates, rendered by `helm`)
+    GeneratedValues {
+        /// Only these targets (repeatable; default: all)
+        #[arg(short, long = "target", value_name = "TARGET")]
+        targets: Vec<String>,
+        /// Only these units (repeatable; default: all)
+        #[arg(short, long = "unit", value_name = "UNIT")]
+        units: Vec<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -311,6 +321,15 @@ fn main_impl() -> Result<(), ObeliskK8sError> {
             repo,
             command: TemplateCommand::Values { targets, units },
         } => commands::run_template_values(repo.as_deref(), cli.global_root, &targets, &units),
+        Command::Template {
+            repo,
+            command: TemplateCommand::GeneratedValues { targets, units },
+        } => commands::run_template_generated_values(
+            repo.as_deref(),
+            cli.global_root,
+            &targets,
+            &units,
+        ),
         Command::Completions { shell } => {
             run_completions(shell);
             Ok(())

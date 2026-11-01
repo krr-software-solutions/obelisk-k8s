@@ -30,6 +30,9 @@ defines the CLI (the clap types, `--help` headings, completions) and dispatches 
   Behind `config repo show`.
 - `config/values.rs`: the merged values for a unit on a target (`template values`), as a
   `serde_json::Value` tree (`preserve_order`); YAML in and out still goes through `yaml.rs`.
+- `config/generate.rs`: the generated values (`template generated-values`): generators rendered and
+  merged over the config values.
+- `helm.rs`: running `helm template` on a throwaway chart (for Go templates).
 - `config/paths.rs`: which config files a unit gets on a target, and their merge order. Behind
   `config repo paths`.
 

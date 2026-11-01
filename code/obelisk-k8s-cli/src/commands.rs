@@ -174,6 +174,21 @@ pub fn run_template_values(
     Ok(())
 }
 
+pub fn run_template_generated_values(
+    repo: Option<&str>,
+    global_root_arg: Option<PathBuf>,
+    targets: &[String],
+    units: &[String],
+) -> Result<(), ObeliskK8sError> {
+    let (repo_root, shown_root) = repo_root(repo, global_root_arg)?;
+    let config = load_repo_config(&repo_root)?;
+    let selection = config.select(targets, units)?;
+    let report = config.generated_values_report(&repo_root, &selection, shown_root.as_deref())?;
+    // anstream drops the colors when stdout isn't a terminal, or with NO_COLOR set.
+    anstream::print!("{report}");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

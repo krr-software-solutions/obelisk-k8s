@@ -7,6 +7,7 @@ use crate::ObeliskK8sError;
 use crate::error::LineCol;
 use crate::yaml::Spanned;
 
+pub mod generate;
 pub mod global;
 pub mod paths;
 pub mod repo;

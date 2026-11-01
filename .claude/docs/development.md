@@ -10,6 +10,9 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 ```
 
+The tests that render Go templates run `helm`, so they need it on the `PATH`; without it they fail
+unless `OBELISK_TEST_SKIP_HELM=1` is set.
+
 `--locked` matches what CI will run: if `Cargo.lock` needs to change, commit the change.
 
 ## CI (`.gitlab-ci.yml`)

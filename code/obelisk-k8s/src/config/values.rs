@@ -41,7 +41,7 @@ pub struct ValuesCase<'a> {
     pub yaml: String,
     /// What each config file (relative to the repo root) set under `obelisk.release`, in merge order;
     /// files that set nothing are left out. Parsed, not used yet (it's not in `values`).
-    pub releases: Vec<(PathBuf, FileRelease)>,
+    pub releases: Releases,
 }
 
 /// What `template values` prints: a single case's values as plain YAML, or several as a YAML stream,
@@ -84,56 +84,39 @@ impl RepoConfig {
         target: &'a Target,
         unit: &'a Unit,
     ) -> Result<ValuesCase<'a>, ObeliskK8sError> {
-        let shown =
-            |path: &Path| shown_root.map_or_else(|| path.to_owned(), |root| root.join(path));
-        let error = |file: PathBuf, message: String| ObeliskK8sError::Config {
-            file,
-            at: None,
-            message,
-        };
-        let mut merged = Map::new();
+        let (values, releases) = self.config_values(repo_root, shown_root, target, unit)?;
+        ValuesCase::new(target, unit, values, releases)
+    }
+
+    /// The `obelisk:` block, then `unit`'s config files on `target` merged; and what the files set
+    /// under `obelisk.release`.
+    pub(crate) fn config_values(
+        &self,
+        repo_root: &Path,
+        shown_root: Option<&Path>,
+        target: &Target,
+        unit: &Unit,
+    ) -> Result<(Map<String, Value>, Releases), ObeliskK8sError> {
+        let mut values = Map::new();
+        values.insert(OBELISK_KEY.to_owned(), self.obelisk_block(target, unit));
         let mut releases = Vec::new();
         for path in self
             .resolve(repo_root, target, unit)?
             .iter()
             .filter(|p| p.found)
         {
-            let file = shown(&path.path);
-            match yaml::read_values(&repo_root.join(&path.path), &file)? {
-                Value::Null => {}
-                Value::Object(mut values) => {
-                    if let Some(obelisk) = values.remove(OBELISK_KEY) {
-                        let release =
-                            release_in_file(&obelisk).map_err(|m| error(file.clone(), m))?;
-                        if release != FileRelease::default() {
-                            releases.push((path.path.clone(), release));
-                        }
-                    }
-                    merge(&mut merged, values);
-                }
-                _ => {
-                    return Err(error(
-                        file,
-                        "a config file must be a mapping (or empty)".to_owned(),
-                    ));
-                }
-            }
+            let shown = shown_under(shown_root, &path.path);
+            let file = yaml::read_values(&repo_root.join(&path.path), &shown)?;
+            absorb(
+                &mut values,
+                &mut releases,
+                file,
+                &path.path,
+                &shown,
+                "a config file",
+            )?;
         }
-        let mut values = Map::new();
-        values.insert(OBELISK_KEY.to_owned(), self.obelisk_block(target, unit));
-        values.extend(merged);
-        let name = format!(
-            "values for unit `{}` on target `{}`",
-            unit.name, target.name
-        );
-        let yaml = yaml::to_string(&values, Path::new(&name))?;
-        Ok(ValuesCase {
-            target: &target.name,
-            unit: &unit.name,
-            values,
-            yaml,
-            releases,
-        })
+        Ok((values, releases))
     }
 
     /// What the tool knows about the case.
@@ -146,6 +129,77 @@ impl RepoConfig {
     }
 }
 
+/// What each file set under `obelisk.release` (relative to the repo root), in merge order.
+pub type Releases = Vec<(PathBuf, FileRelease)>;
+
+impl<'a> ValuesCase<'a> {
+    pub(crate) fn new(
+        target: &'a Target,
+        unit: &'a Unit,
+        values: Map<String, Value>,
+        releases: Releases,
+    ) -> Result<Self, ObeliskK8sError> {
+        let yaml = values_yaml(&values, target, unit)?;
+        Ok(Self {
+            target: &target.name,
+            unit: &unit.name,
+            values,
+            yaml,
+            releases,
+        })
+    }
+}
+
+/// `values` (a case's) as YAML.
+pub(crate) fn values_yaml(
+    values: &Map<String, Value>,
+    target: &Target,
+    unit: &Unit,
+) -> Result<String, ObeliskK8sError> {
+    let name = format!(
+        "values for unit `{}` on target `{}`",
+        unit.name, target.name
+    );
+    yaml::to_string(values, Path::new(&name))
+}
+
+/// `path` (relative to the repo root) as the user should see it.
+pub(crate) fn shown_under(shown_root: Option<&Path>, path: &Path) -> PathBuf {
+    shown_root.map_or_else(|| path.to_owned(), |root| root.join(path))
+}
+
+/// Merges one file's values (a config file, or a generator's output) into `values`: it must be a
+/// mapping or nothing, and may only set `obelisk.release.{name, namespace}` under `obelisk:`, which is
+/// recorded in `releases` (as `path`) and kept out of `values`. `what` names the kind of file.
+pub(crate) fn absorb(
+    values: &mut Map<String, Value>,
+    releases: &mut Releases,
+    file: Value,
+    path: &Path,
+    shown: &Path,
+    what: &str,
+) -> Result<(), ObeliskK8sError> {
+    let error = |message: String| ObeliskK8sError::Config {
+        file: shown.to_owned(),
+        at: None,
+        message,
+    };
+    match file {
+        Value::Null => Ok(()),
+        Value::Object(mut file) => {
+            if let Some(obelisk) = file.remove(OBELISK_KEY) {
+                let release = release_in_file(&obelisk, what).map_err(error)?;
+                if release != FileRelease::default() {
+                    releases.push((path.to_owned(), release));
+                }
+            }
+            merge(values, file);
+            Ok(())
+        }
+        _ => Err(error(format!("{what} must be a mapping (or empty)"))),
+    }
+}
+
 /// What a config file says about the Helm release, under `obelisk.release`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FileRelease {
@@ -155,9 +209,9 @@ pub struct FileRelease {
 
 /// The `obelisk:` a config file set: `null`, or `{ release: null | { name?, namespace? } }`, where both
 /// are strings (or `null`). Values files are typed, so a plain `123` is a number: quote it.
-fn release_in_file(obelisk: &Value) -> Result<FileRelease, String> {
+fn release_in_file(obelisk: &Value, what: &str) -> Result<FileRelease, String> {
     let only = format!(
-        "`{OBELISK_KEY}:` is reserved; a config file may only set `{OBELISK_KEY}.release.name` and `{OBELISK_KEY}.release.namespace`"
+        "`{OBELISK_KEY}:` is reserved; {what} may only set `{OBELISK_KEY}.release.name` and `{OBELISK_KEY}.release.namespace`"
     );
     let obelisk = match obelisk {
         Value::Null => return Ok(FileRelease::default()),

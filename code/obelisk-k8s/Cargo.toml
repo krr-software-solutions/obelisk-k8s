@@ -16,12 +16,13 @@ indexmap.workspace = true
 serde.workspace = true
 serde-saphyr.workspace = true
 serde_json.workspace = true
+# The throwaway charts Go templates render through.
+tempfile.workspace = true
 thiserror.workspace = true
 yaml-edit.workspace = true
 
 [dev-dependencies]
 anstream.workspace = true
-tempfile.workspace = true
 
 [lints]
 workspace = true

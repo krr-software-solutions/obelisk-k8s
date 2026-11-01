@@ -2,9 +2,9 @@
 //!
 //! ```text
 //! .obelisk-k8s/
-//!   repo.yaml                 repo: { name, helmRepos, configPaths }
-//!   targets/<dir>/target.yaml target: { name, cluster, configPaths, release: { name, namespace } }
-//!   units/<dir>/unit.yaml     unit: { name, configPaths, targets, release: { name, namespace } }
+//!   repo.yaml                 repo: { name, helmRepos, configPaths, generators }
+//!   targets/<dir>/target.yaml target: { name, cluster, configPaths, generators, release: { name, namespace } }
+//!   units/<dir>/unit.yaml     unit: { name, configPaths, generators, targets, release: { name, namespace } }
 //! ```
 //!
 //! A target's or unit's name defaults to its directory's name. `null` and missing mean the same thing
@@ -34,6 +34,7 @@ pub struct RepoConfig {
     /// Helm repo name → URL, in file order.
     pub helm_repos: IndexMap<String, String>,
     pub config_paths: Vec<InterpString>,
+    pub generators: Vec<Generator>,
     /// Sorted by name.
     pub targets: Vec<Target>,
     /// Sorted by name.
@@ -50,6 +51,7 @@ pub struct Target {
     /// The name of a cluster in the global config (not checked yet).
     pub cluster: String,
     pub config_paths: Vec<InterpString>,
+    pub generators: Vec<Generator>,
     pub release: Release,
 }
 
@@ -59,8 +61,24 @@ pub struct Unit {
     /// Relative to the repo root, e.g. `.obelisk-k8s/units/my-app/unit.yaml`.
     pub file: PathBuf,
     pub config_paths: Vec<InterpString>,
+    pub generators: Vec<Generator>,
     pub targets: UnitTargets,
     pub release: Release,
+}
+
+/// A file that generates more values from the merged config values (`generators:`). Its path is a
+/// config path: it starts with `./`, is interpolated, and is skipped if it's missing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Generator {
+    pub kind: GeneratorKind,
+    pub path: InterpString,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GeneratorKind {
+    /// A Go template, rendered by Helm.
+    Gotmpl,
 }
 
 /// What a target or unit says about the Helm release its units become: `release: { name, namespace }`,
@@ -100,6 +118,7 @@ impl RepoConfig {
         let RepoFile { repo } = yaml::read_file(&repo_root.join(REPO_FILE), repo_file)?;
         check_name(repo_file, &repo.name)?;
         let config_paths = check_config_paths(repo_file, repo.config_paths)?;
+        let generators = check_generators(repo_file, repo.generators)?;
 
         let mut targets = Vec::new();
         for entry in read_entries(&dir, shown, "targets", "target.yaml", &mut warnings)? {
@@ -107,6 +126,7 @@ impl RepoConfig {
             targets.push(Target {
                 name: name_or_dir(&entry, target.name)?,
                 config_paths: check_config_paths(&entry.file, target.config_paths)?,
+                generators: check_generators(&entry.file, target.generators)?,
                 cluster: target.cluster,
                 release: target.release.unwrap_or_default(),
                 file: entry.file,
@@ -123,6 +143,7 @@ impl RepoConfig {
             units.push(Unit {
                 name: name_or_dir(&entry, unit.name)?,
                 config_paths: check_config_paths(&entry.file, unit.config_paths)?,
+                generators: check_generators(&entry.file, unit.generators)?,
                 targets: check_unit_targets(&entry.file, unit.targets, &targets)?,
                 release: unit.release.unwrap_or_default(),
                 file: entry.file,
@@ -139,6 +160,7 @@ impl RepoConfig {
             name: repo.name.value,
             helm_repos: repo.helm_repos.unwrap_or_default(),
             config_paths,
+            generators,
             targets,
             units,
             warnings,
@@ -223,6 +245,7 @@ struct RepoSection {
     name: Spanned<String>,
     helm_repos: Option<IndexMap<String, String>>,
     config_paths: Option<Vec<Spanned<InterpString>>>,
+    generators: Option<Vec<GeneratorIn>>,
 }
 
 #[derive(Deserialize)]
@@ -237,6 +260,7 @@ struct TargetSection {
     name: Option<Spanned<String>>,
     cluster: String,
     config_paths: Option<Vec<Spanned<InterpString>>>,
+    generators: Option<Vec<GeneratorIn>>,
     release: Option<Release>,
 }
 
@@ -251,14 +275,48 @@ struct UnitFile {
 struct UnitSection {
     name: Option<Spanned<String>>,
     config_paths: Option<Vec<Spanned<InterpString>>>,
+    generators: Option<Vec<GeneratorIn>>,
     targets: Option<Vec<Spanned<String>>>,
     release: Option<Release>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GeneratorIn {
+    #[serde(rename = "type")]
+    kind: GeneratorKind,
+    path: Spanned<InterpString>,
+}
+
 /// Every config path must start with `./` (it resolves from `.obelisk-k8s/`).
+fn check_generators(
+    file: &Path,
+    generators: Option<Vec<GeneratorIn>>,
+) -> Result<Vec<Generator>, ObeliskK8sError> {
+    let generators = generators.unwrap_or_default();
+    let paths = generators.iter().map(|g| g.path.clone()).collect();
+    check_paths(file, Some(paths), "generator path")?;
+    Ok(generators
+        .into_iter()
+        .map(|g| Generator {
+            kind: g.kind,
+            path: g.path.value,
+        })
+        .collect())
+}
+
 fn check_config_paths(
     file: &Path,
     paths: Option<Vec<Spanned<InterpString>>>,
+) -> Result<Vec<InterpString>, ObeliskK8sError> {
+    check_paths(file, paths, "config path")
+}
+
+/// Every such path must start with `./` (it resolves from `.obelisk-k8s/`). `what` names them.
+fn check_paths(
+    file: &Path,
+    paths: Option<Vec<Spanned<InterpString>>>,
+    what: &str,
 ) -> Result<Vec<InterpString>, ObeliskK8sError> {
     let paths = paths.unwrap_or_default();
     if let Some(bad) = paths.iter().find(|p| !p.value.raw().starts_with("./")) {
@@ -266,7 +324,7 @@ fn check_config_paths(
             file,
             Some(bad.at),
             format!(
-                "config path `{}` must start with `./` (paths resolve from `{REPO_CONFIG_DIR}/`)",
+                "{what} `{}` must start with `./` (paths resolve from `{REPO_CONFIG_DIR}/`)",
                 bad.value
             ),
         ));
@@ -441,6 +499,34 @@ mod tests {
         let release = &repo.units[0].release;
         assert_eq!(release.name.as_ref().unwrap().raw(), "123");
         assert_eq!(release.namespace.as_ref().unwrap().raw(), "0755");
+    }
+
+    #[test]
+    fn loads_generators() {
+        let repo = base()
+            .file(
+                "repo.yaml",
+                "repo:\n  name: r\n  generators: [{ type: gotmpl, path: ./g.gotmpl }]\n",
+            )
+            .file("units/app/unit.yaml", "unit:\n  generators: null\n")
+            .load()
+            .unwrap();
+        assert_eq!(repo.generators[0].kind, GeneratorKind::Gotmpl);
+        assert_eq!(repo.generators[0].path.raw(), "./g.gotmpl");
+        assert_eq!(repo.units[0].generators, []);
+
+        let error = |text: &str| base().file("units/app/unit.yaml", text).error();
+        let e = error("unit:\n  generators: [{ type: gotmpl, path: g.gotmpl }]\n");
+        assert_eq!(
+            e,
+            ".obelisk-k8s/units/app/unit.yaml:2:38: generator path `g.gotmpl` must start with `./` (paths resolve from `.obelisk-k8s/`)"
+        );
+        let e = error("unit:\n  generators: [{ type: helm, path: ./g }]\n");
+        assert!(e.contains("helm") && e.contains("gotmpl"), "{e}");
+        let e = error("unit:\n  generators: [{ type: gotmpl, path: ./g, extra: 1 }]\n");
+        assert!(e.contains("extra"), "{e}");
+        let e = error("unit:\n  generators: [{ path: ./g }]\n");
+        assert!(e.contains("type"), "{e}");
     }
 
     #[test]

@@ -69,23 +69,42 @@ fn read_with<T: DeserializeOwned>(
         path: display.to_owned(),
         source,
     })?;
-    serde_saphyr::from_str_with_options(&text, options).map_err(|error| {
-        let name = display.display().to_string();
-        let rendered = error.render_with_options(serde_saphyr::render_options! {
-            source_name: Some(name.as_str()),
-        });
-        // With a snippet, the rendering names the file itself (`--> <file>:<line>:<col>`); without
-        // one (e.g. an empty file) it doesn't.
-        let message = if rendered.contains(&name) {
-            rendered
-        } else {
-            format!("{name}: {rendered}")
-        };
-        ObeliskK8sError::Yaml {
-            path: display.to_owned(),
-            message,
-        }
-    })
+    serde_saphyr::from_str_with_options(&text, options).map_err(|error| yaml_error(&error, display))
+}
+
+fn yaml_error(error: &serde_saphyr::Error, display: &Path) -> ObeliskK8sError {
+    let name = display.display().to_string();
+    let rendered = error.render_with_options(serde_saphyr::render_options! {
+        source_name: Some(name.as_str()),
+    });
+    // With a snippet, the rendering names the file itself (`--> <file>:<line>:<col>`); without
+    // one (e.g. an empty file) it doesn't.
+    let message = if rendered.contains(&name) {
+        rendered
+    } else {
+        format!("{name}: {rendered}")
+    };
+    ObeliskK8sError::Yaml {
+        path: display.to_owned(),
+        message,
+    }
+}
+
+/// Parses `text` (named `display` in errors) as a stream of values documents, read like a values file
+/// ([`read_values`]). An empty stream (or one with only comments) is no documents.
+///
+/// # Errors
+///
+/// [`ObeliskK8sError::Yaml`] if it isn't valid YAML.
+pub fn parse_values_stream(
+    text: &str,
+    display: &Path,
+) -> Result<Vec<serde_json::Value>, ObeliskK8sError> {
+    serde_saphyr::from_str_multiple_with_options(
+        text,
+        serde_saphyr::options! { legacy_octal_numbers: true },
+    )
+    .map_err(|error| yaml_error(&error, display))
 }
 
 /// `value` as YAML. `display` names what it is, for the error.
