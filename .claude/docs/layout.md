@@ -11,6 +11,11 @@ Keep the binary thin. Logic goes in the `obelisk-k8s` library, where it can be t
 in `main.rs` parses its arguments, calls into the library, and prints the result; failures come
 back as `ObeliskK8sError` and `main` reports them (`ERROR - …`, exit code 1).
 
+## The library (`code/obelisk-k8s/src/`)
+
+- `error.rs`: `ObeliskK8sError`, every error the library can fail with.
+- `hello.rs`: `greet`, the placeholder command's logic.
+
 ## Adding a crate
 
 Put it under `code/<name>`, add it to `members` in the root `Cargo.toml`, take shared metadata
