@@ -1,0 +1,19 @@
+# Build output
+/target/
+
+# Backup files from rustfmt
+**/*.rs.bk
+
+# MSVC debug info
+*.pdb
+
+# IDE / editor
+.idea/
+.vscode/
+*.iml
+*.swp
+.DS_Store
+
+# Release artifacts (CI)
+/dist/
+.cargo-home/
