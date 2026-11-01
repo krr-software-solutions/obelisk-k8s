@@ -30,6 +30,15 @@ enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+    /// Render what a unit deploys, step by step, without touching a cluster
+    Template {
+        /// The repo, by its name in the global `repos.yaml` [default: the one in the current directory]
+        #[arg(long, global = true, help_heading = SPECIAL, value_name = "NAME")]
+        repo: Option<String>,
+
+        #[command(subcommand)]
+        command: TemplateCommand,
+    },
     /// Print a shell completion script, e.g. `source <(obelisk-k8s completions bash)`
     Completions {
         /// The shell to complete for
@@ -162,6 +171,20 @@ impl From<ClusterAdd> for NewCluster {
 }
 
 #[derive(Debug, Subcommand)]
+enum TemplateCommand {
+    /// The merged values each unit gets on each target: its config files, deep-merged in merge order,
+    /// with the `obelisk:` block on top (SSM refs not resolved)
+    Values {
+        /// Only these targets (repeatable; default: all)
+        #[arg(short, long = "target", value_name = "TARGET")]
+        targets: Vec<String>,
+        /// Only these units (repeatable; default: all)
+        #[arg(short, long = "unit", value_name = "UNIT")]
+        units: Vec<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum RepoCommand {
     /// Load and check the repo's config, then print its targets and units
     Show,
@@ -284,6 +307,10 @@ fn main_impl() -> Result<(), ObeliskK8sError> {
             &units,
             explain,
         ),
+        Command::Template {
+            repo,
+            command: TemplateCommand::Values { targets, units },
+        } => commands::run_template_values(repo.as_deref(), cli.global_root, &targets, &units),
         Command::Completions { shell } => {
             run_completions(shell);
             Ok(())

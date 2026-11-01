@@ -39,11 +39,37 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for Spanned<T> {
 ///
 /// [`ObeliskK8sError::Io`] if the file can't be read, [`ObeliskK8sError::Yaml`] if it isn't a `T`.
 pub fn read_file<T: DeserializeOwned>(path: &Path, display: &Path) -> Result<T, ObeliskK8sError> {
+    read_with(path, display, serde_saphyr::Options::default())
+}
+
+/// Reads a values file (`path`, shown as `display`) into a generic tree.
+///
+/// Its consumers (generators, Helm) read YAML 1.1, so plain numbers with a leading `0` are octal
+/// here too (`0755` is 493), not YAML 1.2 decimals; without that, serde-saphyr reads `0755` as the
+/// float `755.0`. Other plain scalars still go through the generic tree's types: see
+/// `config::values` for what that changes.
+///
+/// # Errors
+///
+/// As [`read_file`].
+pub fn read_values(path: &Path, display: &Path) -> Result<serde_json::Value, ObeliskK8sError> {
+    read_with(
+        path,
+        display,
+        serde_saphyr::options! { legacy_octal_numbers: true },
+    )
+}
+
+fn read_with<T: DeserializeOwned>(
+    path: &Path,
+    display: &Path,
+    options: serde_saphyr::Options,
+) -> Result<T, ObeliskK8sError> {
     let text = std::fs::read_to_string(path).map_err(|source| ObeliskK8sError::Io {
         path: display.to_owned(),
         source,
     })?;
-    serde_saphyr::from_str(&text).map_err(|error| {
+    serde_saphyr::from_str_with_options(&text, options).map_err(|error| {
         let name = display.display().to_string();
         let rendered = error.render_with_options(serde_saphyr::render_options! {
             source_name: Some(name.as_str()),
@@ -59,6 +85,18 @@ pub fn read_file<T: DeserializeOwned>(path: &Path, display: &Path) -> Result<T, 
             path: display.to_owned(),
             message,
         }
+    })
+}
+
+/// `value` as YAML. `display` names what it is, for the error.
+///
+/// # Errors
+///
+/// [`ObeliskK8sError::Yaml`] if it can't be serialized.
+pub fn to_string<T: Serialize>(value: &T, display: &Path) -> Result<String, ObeliskK8sError> {
+    serde_saphyr::to_string(value).map_err(|error| ObeliskK8sError::Yaml {
+        path: display.to_owned(),
+        message: format!("{}: {error}", display.display()),
     })
 }
 

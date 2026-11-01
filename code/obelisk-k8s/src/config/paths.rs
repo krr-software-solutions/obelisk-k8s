@@ -161,7 +161,7 @@ impl RepoConfig {
         self.unit_target_names(unit).contains(&target.name.as_str())
     }
 
-    fn resolve<'a>(
+    pub(crate) fn resolve<'a>(
         &'a self,
         repo_root: &Path,
         target: &'a Target,
@@ -288,7 +288,7 @@ pub struct PathsReport<'a> {
     pub shown_root: Option<PathBuf>,
 }
 
-const CASE_HEADER: Style = AnsiColor::Magenta.on_default().bold();
+pub(crate) const CASE_HEADER: Style = AnsiColor::Magenta.on_default().bold();
 
 impl fmt::Display for PathsReport<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

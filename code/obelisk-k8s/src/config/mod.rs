@@ -10,6 +10,7 @@ use crate::yaml::Spanned;
 pub mod global;
 pub mod paths;
 pub mod repo;
+pub mod values;
 
 /// One `<kind>/<dir>/<file>` to load.
 pub(crate) struct Entry {

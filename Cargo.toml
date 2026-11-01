@@ -27,6 +27,8 @@ indexmap = { version = "2", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 # 2.x moves fast (1.0 → 2.0 in ~2.5 months); stay on 2.0.x until we choose to migrate.
 serde-saphyr = "~2.0"
+# The generic tree for values files (merging, the `obelisk:` block); YAML stays in serde-saphyr.
+serde_json = { version = "1", features = ["preserve_order"] }
 tempfile = "3"
 thiserror = "2"
 # Lossless YAML edits (comments and formatting kept). Pinned: it's 0.x, with one maintainer, and moves fast.

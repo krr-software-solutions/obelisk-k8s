@@ -28,6 +28,8 @@ defines the CLI (the clap types, `--help` headings, completions) and dispatches 
   `remove`). A child of `global.rs`, so it uses its private helpers.
 - `config/repo.rs`: `RepoConfig`, a repo's `.obelisk-k8s/` (repo, targets, units), loaded and checked.
   Behind `config repo show`.
+- `config/values.rs`: the merged values for a unit on a target (`template values`), as a
+  `serde_json::Value` tree (`preserve_order`); YAML in and out still goes through `yaml.rs`.
 - `config/paths.rs`: which config files a unit gets on a target, and their merge order. Behind
   `config repo paths`.
 

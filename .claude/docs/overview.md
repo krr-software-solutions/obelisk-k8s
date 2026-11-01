@@ -35,6 +35,14 @@ ip-allocator.
   A block entry takes the comment lines directly above it (same indent, no blank line between) with
   it. Both edit the file in place with yaml-edit, keeping its comments and formatting, and put it
   back if the result won't load.
+- `obelisk-k8s template values [-t <target>]... [-u <unit>]...`: the merged values each selected unit
+  gets on each selected target: its found config files deep-merged in merge order (maps key by key;
+  lists, scalars and `null` replace), with the tool's `obelisk: { repo, target, unit }` block on top.
+  `obelisk:` is reserved (a config file that sets it is an error). SSM refs aren't resolved yet.
+  Quoted strings stay as written; plain scalars come out parsed, the YAML 1.1 way where it matters
+  (`0755` is `493`), with known limits listed in `config/values.rs`. Same selection as
+  `config repo paths`; several cases print as a YAML stream, each under a `# [ target=…, unit=… ]`
+  comment. Takes `--repo` too.
 - `config repo …` works on the repo in the current directory, or with `--repo <name>`, on the one with
   that name in the global `repos.yaml` (paths are then shown under it, so they work from anywhere).
 - `--help` groups options under Core, Extra and Special headings (as obeliskd does).
