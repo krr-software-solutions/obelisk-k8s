@@ -44,8 +44,12 @@ enum ConfigCommand {
         #[command(subcommand)]
         command: GlobalCommand,
     },
-    /// The repo's own config (`.obelisk-k8s/`, in the current directory)
+    /// The repo's own config (`.obelisk-k8s/`, in the current directory or `--repo`)
     Repo {
+        /// The repo, by its name in the global `repos.yaml` [default: the one in the current directory]
+        #[arg(long, global = true, help_heading = SPECIAL, value_name = "NAME")]
+        repo: Option<String>,
+
         #[command(subcommand)]
         command: RepoCommand,
     },
@@ -256,13 +260,16 @@ fn main_impl() -> Result<(), ObeliskK8sError> {
                 },
         } => commands::run_config_global_repo(cli.global_root, command),
         Command::Config {
-            command: ConfigCommand::Repo {
-                command: RepoCommand::Show,
-            },
-        } => commands::run_config_repo_show(),
+            command:
+                ConfigCommand::Repo {
+                    repo,
+                    command: RepoCommand::Show,
+                },
+        } => commands::run_config_repo_show(repo.as_deref(), cli.global_root),
         Command::Config {
             command:
                 ConfigCommand::Repo {
+                    repo,
                     command:
                         RepoCommand::Paths {
                             targets,
@@ -270,7 +277,13 @@ fn main_impl() -> Result<(), ObeliskK8sError> {
                             explain,
                         },
                 },
-        } => commands::run_config_repo_paths(&targets, &units, explain),
+        } => commands::run_config_repo_paths(
+            repo.as_deref(),
+            cli.global_root,
+            &targets,
+            &units,
+            explain,
+        ),
         Command::Completions { shell } => {
             run_completions(shell);
             Ok(())

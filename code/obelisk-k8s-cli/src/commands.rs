@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use obelisk_k8s::ObeliskK8sError;
 use obelisk_k8s::config::global::edit::{self as global_edit, Change};
-use obelisk_k8s::config::global::{GLOBAL_ROOT_ENV, GlobalConfig, default_global_root};
+use obelisk_k8s::config::global::{GLOBAL_ROOT_ENV, GlobalConfig, default_global_root, tilde};
 use obelisk_k8s::config::repo::RepoConfig;
 
 use crate::{ClusterCommand, GlobalRepoCommand};
@@ -25,8 +25,37 @@ fn load_repo_config(repo_root: &Path) -> Result<RepoConfig, ObeliskK8sError> {
     Ok(config)
 }
 
-pub fn run_config_repo_show() -> Result<(), ObeliskK8sError> {
-    print!("{}", load_repo_config(&cwd()?)?);
+/// The repo to work on: the one named `repo` in the global config, else the current directory. With a
+/// name, also where it is, as the user should see it.
+fn repo_root(
+    repo: Option<&str>,
+    global_root_arg: Option<PathBuf>,
+) -> Result<(PathBuf, Option<PathBuf>), ObeliskK8sError> {
+    let Some(name) = repo else {
+        return Ok((cwd()?, None));
+    };
+    let (root, home) = global_root(global_root_arg)?;
+    let config = GlobalConfig::load(&root, home.as_deref())?;
+    let found = config.repos.iter().find(|r| r.name == name).ok_or_else(|| {
+        let known: Vec<_> = config.repos.iter().map(|r| r.name.as_str()).collect();
+        let known = if known.is_empty() { "none".to_owned() } else { known.join(", ") };
+        ObeliskK8sError::Usage(format!(
+            "no repo `{name}` in {} (repos: {known}; `config global show` lists any that didn't load)",
+            config.root.join("repos.yaml").display()
+        ))
+    })?;
+    Ok((
+        found.path.clone(),
+        Some(tilde(&found.path, home.as_deref())),
+    ))
+}
+
+pub fn run_config_repo_show(
+    repo: Option<&str>,
+    global_root_arg: Option<PathBuf>,
+) -> Result<(), ObeliskK8sError> {
+    let (repo_root, _) = repo_root(repo, global_root_arg)?;
+    print!("{}", load_repo_config(&repo_root)?);
     Ok(())
 }
 
@@ -114,15 +143,19 @@ fn expand_tilde(path: PathBuf, home: Option<&Path>) -> PathBuf {
 }
 
 pub fn run_config_repo_paths(
+    repo: Option<&str>,
+    global_root_arg: Option<PathBuf>,
     targets: &[String],
     units: &[String],
     explain: bool,
 ) -> Result<(), ObeliskK8sError> {
-    let repo_root = cwd()?;
+    let (repo_root, shown_root) = repo_root(repo, global_root_arg)?;
     let config = load_repo_config(&repo_root)?;
     let selection = config.select(targets, units)?;
+    let mut report = config.paths_report(&repo_root, &selection, explain)?;
+    report.shown_root = shown_root;
     // anstream drops the colors when stdout isn't a terminal, or with NO_COLOR set.
-    anstream::print!("{}", config.paths_report(&repo_root, &selection, explain)?);
+    anstream::print!("{report}");
     Ok(())
 }
 

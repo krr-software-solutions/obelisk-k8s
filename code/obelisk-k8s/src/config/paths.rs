@@ -153,6 +153,7 @@ impl RepoConfig {
             cases,
             single: selection.single,
             explain,
+            shown_root: None,
         })
     }
 
@@ -282,6 +283,9 @@ pub struct PathsReport<'a> {
     pub cases: Vec<Case<'a>>,
     pub single: bool,
     pub explain: bool,
+    /// Where the repo is, as the user should see it, when that isn't the current directory: paths are
+    /// shown under it. `None` shows them relative to the repo root (`.obelisk-k8s/…`).
+    pub shown_root: Option<PathBuf>,
 }
 
 const CASE_HEADER: Style = AnsiColor::Magenta.on_default().bold();
@@ -296,6 +300,7 @@ impl fmt::Display for PathsReport<'_> {
                 target: case.target,
                 unit: case.unit,
                 paths: &case.paths,
+                shown_root: self.shown_root.as_deref(),
             };
             if !self.single {
                 writeln!(
@@ -309,13 +314,22 @@ impl fmt::Display for PathsReport<'_> {
                 (true, false) => explain.write_table(f)?,
                 (false, _) => {
                     for path in case.paths.iter().filter(|p| p.found) {
-                        writeln!(f, "{}", path.path.display())?;
+                        writeln!(
+                            f,
+                            "{}",
+                            shown(self.shown_root.as_deref(), &path.path).display()
+                        )?;
                     }
                 }
             }
         }
         Ok(())
     }
+}
+
+/// `path` (relative to the repo root) as the user should see it.
+fn shown(shown_root: Option<&Path>, path: &Path) -> PathBuf {
+    shown_root.map_or_else(|| path.to_owned(), |root| root.join(path))
 }
 
 fn or_none(names: &[&str]) -> String {
@@ -333,6 +347,8 @@ pub struct Explain<'a> {
     pub target: &'a str,
     pub unit: &'a str,
     pub paths: &'a [ResolvedPath<'a>],
+    /// As [`PathsReport::shown_root`].
+    pub shown_root: Option<&'a Path>,
 }
 
 const HEADER: Style = Style::new().bold().underline();
@@ -406,10 +422,11 @@ impl Explain<'_> {
             }
             .to_owned()
         });
-        // Show it as `path` does: from the repo root, without the `./` (every config path starts with one).
+        // Show it as `path` is shown: under the repo, without the `./` (every config path starts with one).
+        let base = shown(self.shown_root, Path::new(REPO_CONFIG_DIR));
         for text in [&mut cell.plain, &mut cell.styled] {
             let rest = text.strip_prefix("./").unwrap_or(text);
-            *text = format!("{REPO_CONFIG_DIR}/{rest}");
+            *text = format!("{}/{rest}", base.display());
         }
         cell
     }
@@ -557,6 +574,7 @@ mod tests {
             target: "prod",
             unit: "app",
             paths: &paths[..3],
+            shown_root: None,
         }
         .to_string();
         assert_eq!(
@@ -582,6 +600,7 @@ mod tests {
             target: "prod",
             unit: "app",
             paths: &[],
+            shown_root: None,
         }
         .to_string();
         assert!(
@@ -608,6 +627,7 @@ mod tests {
             target: "t",
             unit: "u",
             paths: &paths,
+            shown_root: None,
         }
         .to_string();
         let text = anstream::adapter::strip_str(&text).to_string();

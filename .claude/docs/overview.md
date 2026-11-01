@@ -35,6 +35,8 @@ ip-allocator.
   A block entry takes the comment lines directly above it (same indent, no blank line between) with
   it. Both edit the file in place with yaml-edit, keeping its comments and formatting, and put it
   back if the result won't load.
+- `config repo …` works on the repo in the current directory, or with `--repo <name>`, on the one with
+  that name in the global `repos.yaml` (paths are then shown under it, so they work from anywhere).
 - `--help` groups options under Core, Extra and Special headings (as obeliskd does).
 - `obelisk-k8s completions <bash|zsh|fish|elvish|powershell>`: prints a shell completion script.
 

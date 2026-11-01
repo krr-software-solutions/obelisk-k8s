@@ -316,7 +316,8 @@ fn list(names: &[String]) -> String {
 }
 
 /// `path` with the home directory shown as `~`.
-fn tilde(path: &Path, home: Option<&Path>) -> PathBuf {
+#[must_use]
+pub fn tilde(path: &Path, home: Option<&Path>) -> PathBuf {
     match home.and_then(|home| path.strip_prefix(home).ok()) {
         Some(rest) => Path::new("~").join(rest),
         None => path.to_owned(),

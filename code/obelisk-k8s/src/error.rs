@@ -8,7 +8,9 @@ pub enum ObeliskK8sError {
     #[error("{0}")]
     Usage(String),
 
-    #[error("no `.obelisk-k8s` directory here: run obelisk-k8s from the repo root")]
+    #[error(
+        "no `.obelisk-k8s` directory here: run obelisk-k8s from the repo root, or pass `--repo <name>`"
+    )]
     NoRepoConfig,
 
     #[error(
