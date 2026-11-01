@@ -9,6 +9,7 @@ use crate::yaml::Spanned;
 
 pub mod generate;
 pub mod global;
+pub mod manifests;
 pub mod paths;
 pub mod repo;
 pub mod values;
@@ -164,5 +165,39 @@ pub(crate) fn config_error(
         file: file.to_owned(),
         at,
         message: message.into(),
+    }
+}
+
+/// Writing `.obelisk-k8s/` fixtures, and the `helm` gate, for tests across the config modules.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::repo::REPO_CONFIG_DIR;
+
+    /// A temp repo root with `files` (paths relative to `.obelisk-k8s/`) written.
+    pub(crate) fn write_repo(files: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for (path, text) in files {
+            let path = dir.path().join(REPO_CONFIG_DIR).join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        dir
+    }
+
+    /// For tests that run `helm`: without it they fail, unless `OBELISK_TEST_SKIP_HELM=1` says to skip
+    /// them (then this is `false`, and the test returns early).
+    pub(crate) fn helm_installed() -> bool {
+        if std::process::Command::new("helm")
+            .arg("version")
+            .output()
+            .is_ok()
+        {
+            return true;
+        }
+        assert!(
+            std::env::var_os("OBELISK_TEST_SKIP_HELM").is_some_and(|v| v == "1"),
+            "these tests need `helm` on the PATH (or OBELISK_TEST_SKIP_HELM=1 to skip them)"
+        );
+        false
     }
 }

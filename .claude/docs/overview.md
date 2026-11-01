@@ -45,6 +45,13 @@ ip-allocator.
   (`0755` is `493`), with known limits listed in `config/values.rs`. Same selection as
   `config repo paths`; several cases print as a YAML stream, each under a `# [ target=…, unit=… ]`
   comment. Takes `--repo` too.
+- `obelisk-k8s template manifests [-t …]… [-u …]…`: the k8s resources each unit renders: its
+  `templates:` (listed like `generators:`, `{ type: gotmpl, path }`), each rendered on its own through a
+  throwaway Helm chart with the generated values as `.Values`, joined in merge order as Helm prints
+  them (each document under a `# Source:` comment naming the template; Helm orders the documents
+  *within* one template by kind). A template may print any number of documents. No shared `define`s
+  across files for now (tentative). `.Release` is the unit / `default` until the release check
+  lands. Takes `--repo` too.
 - `obelisk-k8s template generated-values [-t …]… [-u …]…`: the merged values with each of the unit's
   generators deep-merged on top, in merge order. `generators:` (in `repo.yaml`, `target.yaml`,
   `unit.yaml`) lists `{ type: gotmpl, path }` like config paths (interpolated, missing files skipped).
@@ -63,19 +70,25 @@ ip-allocator.
 
 ## The design
 
-A deployment goes through a few layers:
+A unit on a target goes through a few stages, each one inspectable with `template …`:
 
 ```text
-instance spec → generator → values.yaml → plain Helm chart → k8s resources
+config files ─▶ values ─▶ generators ─▶ generated values ─▶ templates ─▶ k8s resources ─▶ (apply)
+               (merge +    (gotmpl,                         (gotmpl,
+                obelisk:)   rendered by Helm)                 rendered by Helm)
 ```
 
-- **Generator:** any executable that takes inputs and writes a values file. Python is the default.
-  Logic lives here, not in Helm Go templates.
-- **Helm:** templates, deep-merges the values files (`-f` … `-f`), and applies
-  (`helm upgrade --install`, still tentative). Raw YAML and YAML from a URL are wrapped into throwaway
-  charts, so every unit is a Helm release.
-- **obelisk-k8s:** orders units (CRDs before what uses them, across namespaces), waits for
-  readiness, and resolves `ref+awsssm` refs before values reach Helm.
+- **Config files** (`configPaths`) deep-merge into the values, with the tool's `obelisk:` block on top.
+- **Generators** (`generators:`) are Go templates that compute more values from those. Logic lives
+  here, in the repo's own `.gotmpl` files.
+- **Templates** (`templates:`) are Go templates that render k8s resources from the generated values.
+  Generators and templates each render on their own through a throwaway Helm chart, so they get all of
+  Helm's functions.
+- **Helm** renders, and will apply (`helm upgrade --install`, still tentative): every unit is a Helm
+  release. Upstream charts, raw YAML and YAML from a URL (wrapped into throwaway charts), and
+  executable generators are planned, not built.
+- **obelisk-k8s** will order units (CRDs before what uses them, across namespaces), wait for
+  readiness, and resolve `ref+awsssm` refs (on the generated values, before templates).
 
 ## Roadmap
 

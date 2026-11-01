@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Map, Value};
 
 use crate::ObeliskK8sError;
-use crate::config::paths::{CASE_HEADER, Selection};
+use crate::config::paths::{Selection, write_yaml_cases};
 use crate::config::repo::{RepoConfig, Target, Unit};
 use crate::yaml;
 
@@ -260,36 +260,21 @@ fn merge(into: &mut Map<String, Value>, from: Map<String, Value>) {
 
 impl fmt::Display for ValuesReport<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (i, case) in self.cases.iter().enumerate() {
-            if !self.single {
-                if i > 0 {
-                    writeln!(f, "---")?;
-                }
-                writeln!(
-                    f,
-                    "{CASE_HEADER}# [ target={}, unit={} ]{CASE_HEADER:#}",
-                    case.target, case.unit
-                )?;
-            }
-            f.write_str(&case.yaml)?;
-        }
-        Ok(())
+        let cases = self
+            .cases
+            .iter()
+            .map(|c| (c.target, c.unit, c.yaml.as_str()));
+        write_yaml_cases(f, self.single, "---\n", cases)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::repo::REPO_CONFIG_DIR;
+    use crate::config::test_support::write_repo;
 
     fn repo(files: &[(&str, &str)]) -> tempfile::TempDir {
-        let dir = tempfile::tempdir().unwrap();
-        for (path, text) in files {
-            let path = dir.path().join(REPO_CONFIG_DIR).join(path);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, text).unwrap();
-        }
-        dir
+        write_repo(files)
     }
 
     const REPO: &str = "repo:\n  name: r\n  configPaths:\n    - ./global.yaml\n    - \"./${{obelisk:target}}.yaml\"\n    - \"./${{obelisk:unit}}.yaml\"\n";

@@ -192,6 +192,16 @@ enum TemplateCommand {
         #[arg(short, long = "unit", value_name = "UNIT")]
         units: Vec<String>,
     },
+    /// The k8s resources each unit renders on each target: its templates, rendered with its generated
+    /// values and joined in merge order (templates are Go templates, rendered by `helm`)
+    Manifests {
+        /// Only these targets (repeatable; default: all)
+        #[arg(short, long = "target", value_name = "TARGET")]
+        targets: Vec<String>,
+        /// Only these units (repeatable; default: all)
+        #[arg(short, long = "unit", value_name = "UNIT")]
+        units: Vec<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -321,6 +331,10 @@ fn main_impl() -> Result<(), ObeliskK8sError> {
             repo,
             command: TemplateCommand::Values { targets, units },
         } => commands::run_template_values(repo.as_deref(), cli.global_root, &targets, &units),
+        Command::Template {
+            repo,
+            command: TemplateCommand::Manifests { targets, units },
+        } => commands::run_template_manifests(repo.as_deref(), cli.global_root, &targets, &units),
         Command::Template {
             repo,
             command: TemplateCommand::GeneratedValues { targets, units },

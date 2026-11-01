@@ -2,9 +2,9 @@
 //!
 //! ```text
 //! .obelisk-k8s/
-//!   repo.yaml                 repo: { name, helmRepos, configPaths, generators }
-//!   targets/<dir>/target.yaml target: { name, cluster, configPaths, generators, release: { name, namespace } }
-//!   units/<dir>/unit.yaml     unit: { name, configPaths, generators, targets, release: { name, namespace } }
+//!   repo.yaml                 repo: { name, helmRepos, configPaths, generators, templates }
+//!   targets/<dir>/target.yaml target: { name, cluster, configPaths, generators, templates, release: { name, namespace } }
+//!   units/<dir>/unit.yaml     unit: { name, configPaths, generators, templates, targets, release: { name, namespace } }
 //! ```
 //!
 //! A target's or unit's name defaults to its directory's name. `null` and missing mean the same thing
@@ -24,6 +24,10 @@ use crate::yaml::{self, Spanned};
 /// The directory, at the repo root, that holds a repo's config.
 pub const REPO_CONFIG_DIR: &str = ".obelisk-k8s";
 
+/// What generator and template paths are called in errors.
+const GENERATOR_PATH: &str = "generator path";
+const TEMPLATE_PATH: &str = "template path";
+
 /// `repo.yaml`, relative to the repo root.
 pub const REPO_FILE: &str = ".obelisk-k8s/repo.yaml";
 
@@ -34,7 +38,8 @@ pub struct RepoConfig {
     /// Helm repo name → URL, in file order.
     pub helm_repos: IndexMap<String, String>,
     pub config_paths: Vec<InterpString>,
-    pub generators: Vec<Generator>,
+    pub generators: Vec<RenderFile>,
+    pub templates: Vec<RenderFile>,
     /// Sorted by name.
     pub targets: Vec<Target>,
     /// Sorted by name.
@@ -51,7 +56,8 @@ pub struct Target {
     /// The name of a cluster in the global config (not checked yet).
     pub cluster: String,
     pub config_paths: Vec<InterpString>,
-    pub generators: Vec<Generator>,
+    pub generators: Vec<RenderFile>,
+    pub templates: Vec<RenderFile>,
     pub release: Release,
 }
 
@@ -61,22 +67,24 @@ pub struct Unit {
     /// Relative to the repo root, e.g. `.obelisk-k8s/units/my-app/unit.yaml`.
     pub file: PathBuf,
     pub config_paths: Vec<InterpString>,
-    pub generators: Vec<Generator>,
+    pub generators: Vec<RenderFile>,
+    pub templates: Vec<RenderFile>,
     pub targets: UnitTargets,
     pub release: Release,
 }
 
-/// A file that generates more values from the merged config values (`generators:`). Its path is a
-/// config path: it starts with `./`, is interpolated, and is skipped if it's missing.
+/// A file obelisk-k8s renders: a generator (`generators:`, more values from the merged config values)
+/// or a template (`templates:`, k8s resources from the generated values). Its path is like a config
+/// path: it starts with `./`, is interpolated, and is skipped if it's missing.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Generator {
-    pub kind: GeneratorKind,
+pub struct RenderFile {
+    pub kind: RenderKind,
     pub path: InterpString,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum GeneratorKind {
+pub enum RenderKind {
     /// A Go template, rendered by Helm.
     Gotmpl,
 }
@@ -118,7 +126,8 @@ impl RepoConfig {
         let RepoFile { repo } = yaml::read_file(&repo_root.join(REPO_FILE), repo_file)?;
         check_name(repo_file, &repo.name)?;
         let config_paths = check_config_paths(repo_file, repo.config_paths)?;
-        let generators = check_generators(repo_file, repo.generators)?;
+        let generators = check_render_files(repo_file, repo.generators, GENERATOR_PATH)?;
+        let templates = check_render_files(repo_file, repo.templates, TEMPLATE_PATH)?;
 
         let mut targets = Vec::new();
         for entry in read_entries(&dir, shown, "targets", "target.yaml", &mut warnings)? {
@@ -126,7 +135,8 @@ impl RepoConfig {
             targets.push(Target {
                 name: name_or_dir(&entry, target.name)?,
                 config_paths: check_config_paths(&entry.file, target.config_paths)?,
-                generators: check_generators(&entry.file, target.generators)?,
+                generators: check_render_files(&entry.file, target.generators, GENERATOR_PATH)?,
+                templates: check_render_files(&entry.file, target.templates, TEMPLATE_PATH)?,
                 cluster: target.cluster,
                 release: target.release.unwrap_or_default(),
                 file: entry.file,
@@ -143,7 +153,8 @@ impl RepoConfig {
             units.push(Unit {
                 name: name_or_dir(&entry, unit.name)?,
                 config_paths: check_config_paths(&entry.file, unit.config_paths)?,
-                generators: check_generators(&entry.file, unit.generators)?,
+                generators: check_render_files(&entry.file, unit.generators, GENERATOR_PATH)?,
+                templates: check_render_files(&entry.file, unit.templates, TEMPLATE_PATH)?,
                 targets: check_unit_targets(&entry.file, unit.targets, &targets)?,
                 release: unit.release.unwrap_or_default(),
                 file: entry.file,
@@ -161,6 +172,7 @@ impl RepoConfig {
             helm_repos: repo.helm_repos.unwrap_or_default(),
             config_paths,
             generators,
+            templates,
             targets,
             units,
             warnings,
@@ -245,7 +257,8 @@ struct RepoSection {
     name: Spanned<String>,
     helm_repos: Option<IndexMap<String, String>>,
     config_paths: Option<Vec<Spanned<InterpString>>>,
-    generators: Option<Vec<GeneratorIn>>,
+    generators: Option<Vec<RenderFileIn>>,
+    templates: Option<Vec<RenderFileIn>>,
 }
 
 #[derive(Deserialize)]
@@ -260,7 +273,8 @@ struct TargetSection {
     name: Option<Spanned<String>>,
     cluster: String,
     config_paths: Option<Vec<Spanned<InterpString>>>,
-    generators: Option<Vec<GeneratorIn>>,
+    generators: Option<Vec<RenderFileIn>>,
+    templates: Option<Vec<RenderFileIn>>,
     release: Option<Release>,
 }
 
@@ -275,32 +289,34 @@ struct UnitFile {
 struct UnitSection {
     name: Option<Spanned<String>>,
     config_paths: Option<Vec<Spanned<InterpString>>>,
-    generators: Option<Vec<GeneratorIn>>,
+    generators: Option<Vec<RenderFileIn>>,
+    templates: Option<Vec<RenderFileIn>>,
     targets: Option<Vec<Spanned<String>>>,
     release: Option<Release>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct GeneratorIn {
+struct RenderFileIn {
     #[serde(rename = "type")]
-    kind: GeneratorKind,
+    kind: RenderKind,
     path: Spanned<InterpString>,
 }
 
 /// Every config path must start with `./` (it resolves from `.obelisk-k8s/`).
-fn check_generators(
+fn check_render_files(
     file: &Path,
-    generators: Option<Vec<GeneratorIn>>,
-) -> Result<Vec<Generator>, ObeliskK8sError> {
-    let generators = generators.unwrap_or_default();
-    let paths = generators.iter().map(|g| g.path.clone()).collect();
-    check_paths(file, Some(paths), "generator path")?;
-    Ok(generators
+    files: Option<Vec<RenderFileIn>>,
+    what: &str,
+) -> Result<Vec<RenderFile>, ObeliskK8sError> {
+    let files = files.unwrap_or_default();
+    let paths = files.iter().map(|f| f.path.clone()).collect();
+    check_paths(file, Some(paths), what)?;
+    Ok(files
         .into_iter()
-        .map(|g| Generator {
-            kind: g.kind,
-            path: g.path.value,
+        .map(|f| RenderFile {
+            kind: f.kind,
+            path: f.path.value,
         })
         .collect())
 }
@@ -511,9 +527,24 @@ mod tests {
             .file("units/app/unit.yaml", "unit:\n  generators: null\n")
             .load()
             .unwrap();
-        assert_eq!(repo.generators[0].kind, GeneratorKind::Gotmpl);
+        assert_eq!(repo.generators[0].kind, RenderKind::Gotmpl);
         assert_eq!(repo.generators[0].path.raw(), "./g.gotmpl");
         assert_eq!(repo.units[0].generators, []);
+        let repo = base()
+            .file(
+                "repo.yaml",
+                "repo:\n  name: r\n  templates: [{ type: gotmpl, path: ./t.gotmpl }]\n",
+            )
+            .load()
+            .unwrap();
+        assert_eq!(repo.templates[0].path.raw(), "./t.gotmpl");
+        let e = base()
+            .file(
+                "units/app/unit.yaml",
+                "unit:\n  templates: [{ type: gotmpl, path: t }]\n",
+            )
+            .error();
+        assert!(e.contains("template path `t` must start with `./`"), "{e}");
 
         let error = |text: &str| base().file("units/app/unit.yaml", text).error();
         let e = error("unit:\n  generators: [{ type: gotmpl, path: g.gotmpl }]\n");

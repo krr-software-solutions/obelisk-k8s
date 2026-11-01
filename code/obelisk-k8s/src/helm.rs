@@ -6,6 +6,28 @@ use std::process::Command;
 
 use crate::ObeliskK8sError;
 
+/// Helm's limit on release names.
+const RELEASE_NAME_MAX: usize = 53;
+
+/// `name` is what files will render as a Helm release named: Helm wants at most 53 characters. `kind`
+/// says what it names (e.g. `unit`), `what` what renders (e.g. `generators`).
+///
+/// # Errors
+///
+/// [`ObeliskK8sError::Usage`] if it's too long.
+pub(crate) fn check_release_name(
+    name: &str,
+    kind: &str,
+    what: &str,
+) -> Result<(), ObeliskK8sError> {
+    if name.len() > RELEASE_NAME_MAX {
+        return Err(ObeliskK8sError::Usage(format!(
+            "{kind} `{name}` has {what}, which render as a Helm release named after it, but Helm release names are at most {RELEASE_NAME_MAX} characters"
+        )));
+    }
+    Ok(())
+}
+
 /// The throwaway chart's name; Helm names templates `<chart>/templates/<file>` in its errors.
 const CHART: &str = "obelisk-render";
 const TEMPLATE: &str = "templates/template.yaml";
@@ -70,10 +92,16 @@ pub(crate) fn render(
             message.join("\n").trim()
         )));
     }
-    String::from_utf8(output.stdout).map_err(|_| {
+    let text = String::from_utf8(output.stdout).map_err(|_| {
         ObeliskK8sError::Helm(format!(
             "{}: helm printed something that isn't UTF-8",
             shown.display()
         ))
-    })
+    })?;
+    // Helm's `# Source:` comments name the throwaway chart's file: name the real one. Anchored to the
+    // `---` line Helm always puts before them, so the same text in a value isn't touched.
+    Ok(text.replace(
+        &format!("---\n# Source: {CHART}/{TEMPLATE}\n"),
+        &format!("---\n# Source: {}\n", shown.display()),
+    ))
 }

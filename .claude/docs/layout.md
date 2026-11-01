@@ -32,6 +32,8 @@ defines the CLI (the clap types, `--help` headings, completions) and dispatches 
   `serde_json::Value` tree (`preserve_order`); YAML in and out still goes through `yaml.rs`.
 - `config/generate.rs`: the generated values (`template generated-values`): generators rendered and
   merged over the config values.
+- `config/manifests.rs`: the rendered resources (`template manifests`): templates rendered with the
+  generated values.
 - `helm.rs`: running `helm template` on a throwaway chart (for Go templates).
 - `config/paths.rs`: which config files a unit gets on a target, and their merge order. Behind
   `config repo paths`.

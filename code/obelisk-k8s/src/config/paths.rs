@@ -18,7 +18,7 @@ use std::fmt::{self, Write as _};
 use std::path::{Path, PathBuf};
 
 use crate::ObeliskK8sError;
-use crate::config::repo::{REPO_CONFIG_DIR, REPO_FILE, RepoConfig, Target, Unit};
+use crate::config::repo::{REPO_CONFIG_DIR, REPO_FILE, RenderFile, RepoConfig, Target, Unit};
 use anstyle::{AnsiColor, Style};
 
 use crate::interp::{InterpString, InterpolationParams, StringPart, Var};
@@ -195,19 +195,19 @@ impl RepoConfig {
         target: &'a Target,
         unit: &'a Unit,
     ) -> Result<Vec<ResolvedPath<'a>>, ObeliskK8sError> {
-        let paths = |generators: &'a [crate::config::repo::Generator]| {
-            generators.iter().map(|g| &g.path).collect()
-        };
-        let declared = [
-            (Level::Repo, Path::new(REPO_FILE), paths(&self.generators)),
-            (
-                Level::Target,
-                target.file.as_path(),
-                paths(&target.generators),
-            ),
-            (Level::Unit, unit.file.as_path(), paths(&unit.generators)),
-        ];
-        resolve_declared(repo_root, target, unit, declared)
+        let lists = [&self.generators, &target.generators, &unit.generators];
+        resolve_render_files(repo_root, target, unit, lists)
+    }
+
+    /// `unit`'s templates on `target`, in the same order (and with the same rules) as config paths.
+    pub(crate) fn resolve_templates<'a>(
+        &'a self,
+        repo_root: &Path,
+        target: &'a Target,
+        unit: &'a Unit,
+    ) -> Result<Vec<ResolvedPath<'a>>, ObeliskK8sError> {
+        let lists = [&self.templates, &target.templates, &unit.templates];
+        resolve_render_files(repo_root, target, unit, lists)
     }
 
     fn target(&self, name: &str) -> Result<&Target, ObeliskK8sError> {
@@ -229,6 +229,22 @@ impl RepoConfig {
             ))
         })
     }
+}
+
+/// Resolves render files declared at the repo, target and unit levels (`lists`, in that order).
+fn resolve_render_files<'a>(
+    repo_root: &Path,
+    target: &'a Target,
+    unit: &'a Unit,
+    [repo, target_files, unit_files]: [&'a Vec<RenderFile>; 3],
+) -> Result<Vec<ResolvedPath<'a>>, ObeliskK8sError> {
+    let paths = |files: &'a Vec<RenderFile>| files.iter().map(|f| &f.path).collect();
+    let declared = [
+        (Level::Repo, Path::new(REPO_FILE), paths(repo)),
+        (Level::Target, target.file.as_path(), paths(target_files)),
+        (Level::Unit, unit.file.as_path(), paths(unit_files)),
+    ];
+    resolve_declared(repo_root, target, unit, declared)
 }
 
 /// Interpolates and orders paths declared at each level (repo, target, unit).
@@ -334,6 +350,29 @@ pub struct PathsReport<'a> {
 }
 
 pub(crate) const CASE_HEADER: Style = AnsiColor::Magenta.on_default().bold();
+
+/// Writes several cases' YAML as one stream: each under a magenta `# [ target=…, unit=… ]` comment,
+/// with `between` written between them (`single`: just the one case's text).
+pub(crate) fn write_yaml_cases<'a>(
+    f: &mut fmt::Formatter<'_>,
+    single: bool,
+    between: &str,
+    cases: impl IntoIterator<Item = (&'a str, &'a str, &'a str)>,
+) -> fmt::Result {
+    for (i, (target, unit, text)) in cases.into_iter().enumerate() {
+        if !single {
+            if i > 0 {
+                f.write_str(between)?;
+            }
+            writeln!(
+                f,
+                "{CASE_HEADER}# [ target={target}, unit={unit} ]{CASE_HEADER:#}"
+            )?;
+        }
+        f.write_str(text)?;
+    }
+    Ok(())
+}
 
 impl fmt::Display for PathsReport<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -532,15 +571,10 @@ impl Explain<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::test_support::write_repo;
 
     fn repo(files: &[(&str, &str)]) -> tempfile::TempDir {
-        let dir = tempfile::tempdir().unwrap();
-        for (path, text) in files {
-            let path = dir.path().join(REPO_CONFIG_DIR).join(path);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, text).unwrap();
-        }
-        dir
+        write_repo(files)
     }
 
     /// Every combination of declaring file and vars.
@@ -877,8 +911,12 @@ mod tests {
                 ),
             ]
         );
-        // Config paths and generators are separate lists.
+        // Config paths, generators and templates are separate lists.
         assert_eq!(config.resolve(dir.path(), target, unit).unwrap(), []);
+        assert_eq!(
+            config.resolve_templates(dir.path(), target, unit).unwrap(),
+            []
+        );
     }
 
     #[test]

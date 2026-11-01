@@ -1,0 +1,43 @@
+{{- /* code-app on every target: a Deployment and a Service, two documents from one template. */ -}}
+{{- $replicas := 1 }}
+{{- with .Values.prod }}{{ $replicas = .replicas }}{{ end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.obelisk.unit }}
+  labels:
+    app.kubernetes.io/name: {{ .Values.obelisk.unit }}
+spec:
+  replicas: {{ $replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Values.obelisk.unit }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ .Values.obelisk.unit }}
+    spec:
+      containers:
+        - name: app
+          image: "registry.example.com/{{ .Values.obelisk.repo }}/{{ .Values.obelisk.unit }}:{{ .Values.stuff.b }}"
+          env:
+            - name: LONG_NAME
+              value: {{ index .Values "long-name" | quote }}
+            - name: TARGET
+              value: {{ .Values.obelisk.target | quote }}
+          {{- with .Values.prod }}
+          resources:
+            limits:
+              {{- toYaml .limits | nindent 14 }}
+          {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.obelisk.unit }}
+spec:
+  selector:
+    app.kubernetes.io/name: {{ .Values.obelisk.unit }}
+  ports:
+    - port: 80
+      targetPort: 8080

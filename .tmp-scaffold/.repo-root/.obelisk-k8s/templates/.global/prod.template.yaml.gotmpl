@@ -1,0 +1,10 @@
+{{- /* Only found on prod (the file name is interpolated with the target). */ -}}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ .Values.obelisk.unit }}
+spec:
+  minAvailable: {{ sub .Values.prod.replicas 1 }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Values.obelisk.unit }}

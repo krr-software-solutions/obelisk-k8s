@@ -1,0 +1,13 @@
+{{- /* code-app on local-ephemeral only: expose it on a NodePort, for poking at locally. */ -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.obelisk.unit }}-local
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: {{ .Values.obelisk.unit }}
+  ports:
+    - port: 80
+      targetPort: 8080
+      nodePort: 30080

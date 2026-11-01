@@ -21,9 +21,6 @@ use crate::config::repo::{RepoConfig, Target, Unit};
 use crate::config::values::{ValuesCase, ValuesReport, absorb, shown_under, values_yaml};
 use crate::{helm, yaml};
 
-/// Helm's limit on release names.
-const HELM_RELEASE_NAME_MAX: usize = 53;
-
 /// What `.Release.Namespace` is while a generator renders.
 const GENERATOR_NAMESPACE: &str = "default";
 
@@ -53,7 +50,7 @@ impl RepoConfig {
         })
     }
 
-    fn generated_for<'a>(
+    pub(crate) fn generated_for<'a>(
         &'a self,
         repo_root: &Path,
         shown_root: Option<&Path>,
@@ -63,11 +60,8 @@ impl RepoConfig {
         let (mut values, mut releases) = self.config_values(repo_root, shown_root, target, unit)?;
         let input = values_yaml(&values, target, unit)?;
         let generators = self.resolve_generators(repo_root, target, unit)?;
-        if generators.iter().any(|p| p.found) && unit.name.len() > HELM_RELEASE_NAME_MAX {
-            return Err(ObeliskK8sError::Usage(format!(
-                "unit `{}` has generators, which render as a Helm release named after it, but Helm release names are at most {HELM_RELEASE_NAME_MAX} characters",
-                unit.name
-            )));
+        if generators.iter().any(|p| p.found) {
+            helm::check_release_name(&unit.name, "unit", "generators")?;
         }
         for path in generators.iter().filter(|p| p.found) {
             let shown = shown_under(shown_root, &path.path);
@@ -108,25 +102,9 @@ impl RepoConfig {
 mod tests {
     use super::*;
     use crate::config::repo::REPO_CONFIG_DIR;
-
-    /// These run `helm`. Without it they fail, unless `OBELISK_TEST_SKIP_HELM=1` says to skip them.
-    fn helm_installed() -> bool {
-        if std::process::Command::new("helm")
-            .arg("version")
-            .output()
-            .is_ok()
-        {
-            return true;
-        }
-        assert!(
-            std::env::var_os("OBELISK_TEST_SKIP_HELM").is_some_and(|v| v == "1"),
-            "these tests need `helm` on the PATH (or OBELISK_TEST_SKIP_HELM=1 to skip them)"
-        );
-        false
-    }
+    use crate::config::test_support::{helm_installed, write_repo};
 
     fn repo(extra: &[(&str, &str)]) -> tempfile::TempDir {
-        let dir = tempfile::tempdir().unwrap();
         let mut files = vec![
             (
                 "repo.yaml",
@@ -144,12 +122,7 @@ mod tests {
             ),
         ];
         files.extend_from_slice(extra);
-        for (path, text) in files {
-            let path = dir.path().join(REPO_CONFIG_DIR).join(path);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, text).unwrap();
-        }
-        dir
+        write_repo(&files)
     }
 
     /// The one case for unit `app` on `target`: (its YAML, what its files set under `obelisk.release`).
