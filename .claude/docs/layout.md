@@ -7,9 +7,10 @@ A Cargo workspace; every crate lives under `code/`.
 | `code/obelisk-k8s`     | `obelisk-k8s`     | lib                       | everything: model, rendering, logic     |
 | `code/obelisk-k8s-cli` | `obelisk-k8s-cli` | bin (named `obelisk-k8s`) | the CLI: argument parsing, wiring, error reporting only |
 
-Keep the binary thin. Logic goes in the `obelisk-k8s` library, where it can be tested. A command
-in `main.rs` parses its arguments, calls into the library, and prints the result; failures come
-back as `ObeliskK8sError` and `main` reports them (`ERROR - …`, exit code 1).
+Keep the binary thin. Logic goes in the `obelisk-k8s` library, where it can be tested. `main.rs`
+defines the CLI (the clap types, `--help` headings, completions) and dispatches each command to
+`commands.rs`, which calls into the library and prints the result. Failures come back as
+`ObeliskK8sError` and `main` reports them (`ERROR - …`, exit code 1).
 
 ## The library (`code/obelisk-k8s/src/`)
 
