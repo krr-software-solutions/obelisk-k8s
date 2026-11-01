@@ -24,6 +24,17 @@ ip-allocator.
   absolute; a trailing `/*` for every repo in a directory; names come from each repo's `repo.yaml`) and
   `clusters/<dir>/cluster.yaml`. Prints the repos and clusters. A repo that won't load, or a target
   naming a cluster that isn't there, is a `WARN`.
+- `obelisk-k8s config global init`: creates the global root, an empty `repos.yaml` and `clusters/`
+  (whichever are missing), then loads it.
+- `obelisk-k8s config global cluster add <NAME> --k8s … --location … [--managed] […]` writes
+  `clusters/<NAME>/cluster.yaml`; `cluster remove <NAME>` deletes its directory, only if that holds
+  nothing but its `cluster.yaml`. Both check the result by loading the global config again.
+- `obelisk-k8s config global repo add <PATH>` appends an entry to `repos.yaml` as written (creating
+  the file if it's missing); an entry for a place already listed, however it's spelled, is a no-op.
+  `repo remove <NAME|PATH>` removes the entry for that place, or the one listing that repo by path.
+  A block entry takes the comment lines directly above it (same indent, no blank line between) with
+  it. Both edit the file in place with yaml-edit, keeping its comments and formatting, and put it
+  back if the result won't load.
 - `--help` groups options under Core, Extra and Special headings (as obeliskd does).
 - `obelisk-k8s completions <bash|zsh|fish|elvish|powershell>`: prints a shell completion script.
 

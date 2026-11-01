@@ -29,6 +29,8 @@ serde = { version = "1", features = ["derive"] }
 serde-saphyr = "~2.0"
 tempfile = "3"
 thiserror = "2"
+# Lossless YAML edits (comments and formatting kept). Pinned: it's 0.x, with one maintainer, and moves fast.
+yaml-edit = "=0.3.6"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

@@ -16,6 +16,7 @@ indexmap.workspace = true
 serde.workspace = true
 serde-saphyr.workspace = true
 thiserror.workspace = true
+yaml-edit.workspace = true
 
 [dev-dependencies]
 anstream.workspace = true

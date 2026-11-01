@@ -1,10 +1,13 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 use obelisk_k8s::ObeliskK8sError;
-use obelisk_k8s::config::global::{GLOBAL_ROOT_ENV, GlobalConfig, default_global_root};
+use obelisk_k8s::config::global::edit::{self as global_edit, Change, NewCluster};
+use obelisk_k8s::config::global::{
+    GLOBAL_ROOT_ENV, GlobalConfig, K8s, Location, Obeliskd, default_global_root,
+};
 use obelisk_k8s::config::repo::RepoConfig;
 
 //
@@ -53,6 +56,106 @@ enum ConfigCommand {
 enum GlobalCommand {
     /// Load and check the global config, then print its repos and clusters
     Show,
+    /// Create the global root, an empty `repos.yaml` and `clusters/` (whichever are missing)
+    Init,
+    /// Repos: the entries in `repos.yaml`
+    Repo {
+        #[command(subcommand)]
+        command: GlobalRepoCommand,
+    },
+    /// Clusters: `clusters/<name>/cluster.yaml`
+    Cluster {
+        #[command(subcommand)]
+        command: ClusterCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum GlobalRepoCommand {
+    /// Add an entry to `repos.yaml`, as written (relative to the global root, `~/…`, or absolute;
+    /// `dir/*` for every repo in a directory)
+    Add {
+        /// The entry
+        path: String,
+    },
+    /// Remove an entry from `repos.yaml`: the one written exactly so, else the one listing that repo
+    Remove {
+        /// A repo's name, or an entry as written
+        name_or_path: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ClusterCommand {
+    /// Write a new `clusters/<NAME>/cluster.yaml`
+    Add(ClusterAdd),
+    /// Delete a cluster's directory (only if it holds nothing but its `cluster.yaml`)
+    Remove {
+        /// The cluster
+        name: String,
+    },
+}
+
+#[derive(Debug, Args)]
+struct ClusterAdd {
+    /// The cluster's name (also its directory's)
+    name: String,
+    /// What runs it
+    #[arg(long, value_enum)]
+    k8s: K8sArg,
+    /// Where it runs
+    #[arg(long, value_enum)]
+    location: LocationArg,
+    /// obelisk-k8s creates and destroys it (not acted on yet)
+    #[arg(long)]
+    managed: bool,
+    /// The obeliskd supernet its addresses come from (managed only; needs `--obeliskd-subnet`)
+    #[arg(long, requires_all = ["obeliskd_subnet", "managed"], value_name = "SUPERNET")]
+    obeliskd_supernet: Option<String>,
+    /// The obeliskd subnet its addresses come from (managed only; needs `--obeliskd-supernet`)
+    #[arg(long, requires_all = ["obeliskd_supernet", "managed"], value_name = "SUBNET")]
+    obeliskd_subnet: Option<String>,
+    /// Its cluster in your kubeconfig
+    #[arg(long, value_name = "CLUSTER")]
+    kubectl_cluster: Option<String>,
+    /// Its context in your kubeconfig
+    #[arg(long, value_name = "CONTEXT")]
+    kubectl_context: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum K8sArg {
+    K3d,
+    Talos,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum LocationArg {
+    Local,
+    Remote,
+}
+
+impl From<ClusterAdd> for NewCluster {
+    fn from(a: ClusterAdd) -> Self {
+        Self {
+            name: a.name,
+            k8s: match a.k8s {
+                K8sArg::K3d => K8s::K3d,
+                K8sArg::Talos => K8s::Talos,
+            },
+            location: match a.location {
+                LocationArg::Local => Location::Local,
+                LocationArg::Remote => Location::Remote,
+            },
+            managed: a.managed,
+            obeliskd: a
+                .obeliskd_supernet
+                .zip(a.obeliskd_subnet)
+                .map(|(supernet, subnet)| Obeliskd { supernet, subnet }),
+            kubectl_cluster: a.kubectl_cluster,
+            kubectl_context: a.kubectl_context,
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -101,7 +204,10 @@ fn home() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-fn run_config_global_show(global_root: Option<PathBuf>) -> Result<(), ObeliskK8sError> {
+/// The global root, and the home directory (for `~`).
+fn global_root(
+    global_root: Option<PathBuf>,
+) -> Result<(PathBuf, Option<PathBuf>), ObeliskK8sError> {
     let home = home();
     let root = global_root
         .map(|root| expand_tilde(root, home.as_deref()))
@@ -111,11 +217,59 @@ fn run_config_global_show(global_root: Option<PathBuf>) -> Result<(), ObeliskK8s
                 "no home directory for the default global root: set `--global-root` or `{GLOBAL_ROOT_ENV}`"
             ))
         })?;
-    let config = GlobalConfig::load(&root, home.as_deref())?;
-    for warning in &config.warnings {
+    Ok((root, home))
+}
+
+fn warn(warnings: &[String]) {
+    for warning in warnings {
         eprintln!("WARN - {warning}");
     }
+}
+
+fn run_config_global_show(root: Option<PathBuf>) -> Result<(), ObeliskK8sError> {
+    let (root, home) = global_root(root)?;
+    let config = GlobalConfig::load(&root, home.as_deref())?;
+    warn(&config.warnings);
     print!("{config}");
+    Ok(())
+}
+
+fn print_change(change: &Change) {
+    warn(&change.warnings);
+    println!("{}", change.message);
+}
+
+fn run_config_global_init(root: Option<PathBuf>) -> Result<(), ObeliskK8sError> {
+    let (root, home) = global_root(root)?;
+    print_change(&global_edit::init(&root, home.as_deref())?);
+    Ok(())
+}
+
+fn run_config_global_repo(
+    root: Option<PathBuf>,
+    command: GlobalRepoCommand,
+) -> Result<(), ObeliskK8sError> {
+    let (root, home) = global_root(root)?;
+    let home = home.as_deref();
+    print_change(&match command {
+        GlobalRepoCommand::Add { path } => global_edit::add_repo(&root, home, &path)?,
+        GlobalRepoCommand::Remove { name_or_path } => {
+            global_edit::remove_repo(&root, home, &name_or_path)?
+        }
+    });
+    Ok(())
+}
+
+fn run_config_global_cluster(
+    root: Option<PathBuf>,
+    command: ClusterCommand,
+) -> Result<(), ObeliskK8sError> {
+    let (root, home) = global_root(root)?;
+    let home = home.as_deref();
+    print_change(&match command {
+        ClusterCommand::Add(add) => global_edit::add_cluster(&root, home, &add.into())?,
+        ClusterCommand::Remove { name } => global_edit::remove_cluster(&root, home, &name)?,
+    });
     Ok(())
 }
 
@@ -200,6 +354,24 @@ fn main_impl() -> Result<(), ObeliskK8sError> {
                     command: GlobalCommand::Show,
                 },
         } => run_config_global_show(cli.global_root),
+        Command::Config {
+            command:
+                ConfigCommand::Global {
+                    command: GlobalCommand::Init,
+                },
+        } => run_config_global_init(cli.global_root),
+        Command::Config {
+            command:
+                ConfigCommand::Global {
+                    command: GlobalCommand::Cluster { command },
+                },
+        } => run_config_global_cluster(cli.global_root, command),
+        Command::Config {
+            command:
+                ConfigCommand::Global {
+                    command: GlobalCommand::Repo { command },
+                },
+        } => run_config_global_repo(cli.global_root, command),
         Command::Config {
             command: ConfigCommand::Repo {
                 command: RepoCommand::Show,

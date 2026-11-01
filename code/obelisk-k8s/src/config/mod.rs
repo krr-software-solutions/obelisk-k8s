@@ -13,6 +13,8 @@ pub mod repo;
 
 /// One `<kind>/<dir>/<file>` to load.
 pub(crate) struct Entry {
+    /// The real path to the entry's directory.
+    pub(crate) dir: PathBuf,
     /// The real path to the file.
     pub(crate) path: PathBuf,
     /// The path to show the user, relative to the repo root.
@@ -69,6 +71,7 @@ pub(crate) fn read_entries(
             continue;
         }
         entries.push(Entry {
+            dir: dir_entry.path(),
             path,
             file: shown_entry.join(file_name),
             dir_name: os_name.to_str().map(str::to_owned),

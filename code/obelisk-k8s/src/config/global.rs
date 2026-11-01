@@ -12,13 +12,15 @@
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::ObeliskK8sError;
 use crate::config::repo::REPO_CONFIG_DIR;
 use crate::config::repo::RepoConfig;
 use crate::config::{check_unique, config_error, name_or_dir, read_entries};
 use crate::yaml::{self, Spanned};
+
+pub mod edit;
 
 /// The env var that overrides the default global root.
 pub const GLOBAL_ROOT_ENV: &str = "OBELISK_K8S_GLOBAL_ROOT";
@@ -68,6 +70,8 @@ pub struct Cluster {
     pub name: String,
     /// As the user should see it.
     pub file: PathBuf,
+    /// The real `clusters/<dir>/`.
+    pub dir: PathBuf,
     pub k8s: K8s,
     pub location: Location,
     /// Whether obelisk-k8s creates and destroys it (not acted on yet).
@@ -77,14 +81,14 @@ pub struct Cluster {
     pub kubectl_context: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum K8s {
     K3d,
     Talos,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Location {
     Local,
@@ -92,7 +96,7 @@ pub enum Location {
 }
 
 /// Where a managed cluster's addresses come from.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Obeliskd {
     pub supernet: String,
@@ -111,11 +115,7 @@ impl GlobalConfig {
     /// (including two repos with the same name).
     pub fn load(root: &Path, home: Option<&Path>) -> Result<Self, ObeliskK8sError> {
         let shown = tilde(root, home);
-        let absolute = std::path::absolute(root).map_err(|source| ObeliskK8sError::Io {
-            path: shown.clone(),
-            source,
-        })?;
-        let root = &normalize(&absolute);
+        let root = &absolute_root(root, &shown)?;
         if !root.is_dir() {
             return Err(ObeliskK8sError::NoGlobalConfig(shown));
         }
@@ -156,12 +156,8 @@ fn load_repos(
     warnings: &mut Vec<String>,
 ) -> Result<Vec<Repo>, ObeliskK8sError> {
     let repos_file = shown.join("repos.yaml");
-    if !root.join("repos.yaml").is_file() {
-        return Ok(Vec::new());
-    }
-    let ReposFile { repos: entries } = yaml::read_file(&root.join("repos.yaml"), &repos_file)?;
     let mut repos: Vec<Repo> = Vec::new();
-    for entry in entries.unwrap_or_default() {
+    for entry in read_repo_entries(root, shown)? {
         for path in expand(&repos_file, &entry, root, home, warnings)? {
             if repos.iter().any(|r| r.path == path) {
                 continue;
@@ -229,6 +225,7 @@ fn load_clusters(
         clusters.push(Cluster {
             name: name_or_dir(&entry, c.name)?,
             file: entry.file,
+            dir: entry.dir,
             k8s: c.k8s,
             location: c.location,
             managed: c.managed,
@@ -357,29 +354,10 @@ fn expand(
     warnings: &mut Vec<String>,
 ) -> Result<Vec<PathBuf>, ObeliskK8sError> {
     let raw = entry.value.as_str();
-    let error = |message: String| config_error(file, Some(entry.at), message);
-    let (raw_dir, wildcard) = match raw.strip_suffix("/*") {
-        Some(dir) => (dir, true),
-        None => (raw, false),
-    };
-    if raw_dir.contains('*') {
-        return Err(error(format!(
-            "`{raw}`: `*` is only allowed as a whole last component (`dir/*`)"
-        )));
-    }
-    let dir = if raw_dir == "~" || raw_dir.starts_with("~/") {
-        let home =
-            home.ok_or_else(|| error(format!("`{raw}`: no home directory to expand `~` with")))?;
-        home.join(raw_dir.trim_start_matches('~').trim_start_matches('/'))
-    } else {
-        // Relative paths resolve from the global root (`root` is absolute).
-        root.join(raw_dir)
-    };
-    let dir = normalize(&dir);
-
-    let has_config = |path: &Path| path.join(REPO_CONFIG_DIR).is_dir();
+    let EntryTarget { dir, wildcard } = resolve_entry(raw, root, home)
+        .map_err(|message| config_error(file, Some(entry.at), message))?;
     if !wildcard {
-        if has_config(&dir) {
+        if is_repo(&dir) {
             return Ok(vec![dir]);
         }
         warnings.push(format!(
@@ -389,7 +367,7 @@ fn expand(
         ));
         return Ok(Vec::new());
     }
-    let Ok(read) = std::fs::read_dir(&dir) else {
+    let Some(found) = list_repos(&dir) else {
         warnings.push(format!(
             "{}: skipped `{raw}`: can't read {}",
             file.display(),
@@ -397,13 +375,77 @@ fn expand(
         ));
         return Ok(Vec::new());
     };
-    let mut found: Vec<PathBuf> = read
+    Ok(found)
+}
+
+/// Where a `repos.yaml` entry points: a directory, and whether it's every repo in it (`dir/*`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EntryTarget {
+    dir: PathBuf,
+    wildcard: bool,
+}
+
+/// Resolves an entry: `~/` from `home`, a relative path from `root` (absolute), normalized.
+///
+/// # Errors
+///
+/// A message naming the entry, for a misplaced `*` or a `~` with no home directory.
+fn resolve_entry(raw: &str, root: &Path, home: Option<&Path>) -> Result<EntryTarget, String> {
+    let (raw_dir, wildcard) = match raw.strip_suffix("/*") {
+        Some(dir) => (dir, true),
+        None => (raw, false),
+    };
+    if raw_dir.contains('*') {
+        return Err(format!(
+            "`{raw}`: `*` is only allowed as a whole last component (`dir/*`)"
+        ));
+    }
+    let dir = if raw_dir == "~" || raw_dir.starts_with("~/") {
+        let home = home.ok_or_else(|| format!("`{raw}`: no home directory to expand `~` with"))?;
+        home.join(raw_dir.trim_start_matches('~').trim_start_matches('/'))
+    } else {
+        root.join(raw_dir)
+    };
+    Ok(EntryTarget {
+        dir: normalize(&dir),
+        wildcard,
+    })
+}
+
+/// Whether `path` is a repo (holds a `.obelisk-k8s/`).
+fn is_repo(path: &Path) -> bool {
+    path.join(REPO_CONFIG_DIR).is_dir()
+}
+
+/// The repos directly in `dir`, sorted; `None` if it can't be read.
+fn list_repos(dir: &Path) -> Option<Vec<PathBuf>> {
+    let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
+        .ok()?
         .filter_map(Result::ok)
         .map(|e| e.path())
-        .filter(|p| p.is_dir() && has_config(p))
+        .filter(|p| p.is_dir() && is_repo(p))
         .collect();
     found.sort();
-    Ok(found)
+    Some(found)
+}
+
+/// `root`, absolute and normalized.
+fn absolute_root(root: &Path, shown: &Path) -> Result<PathBuf, ObeliskK8sError> {
+    let absolute = std::path::absolute(root).map_err(|source| ObeliskK8sError::Io {
+        path: shown.to_owned(),
+        source,
+    })?;
+    Ok(normalize(&absolute))
+}
+
+/// `repos.yaml`'s entries, as written (none without the file).
+fn read_repo_entries(root: &Path, shown: &Path) -> Result<Vec<Spanned<String>>, ObeliskK8sError> {
+    let path = root.join("repos.yaml");
+    if !path.is_file() {
+        return Ok(Vec::new());
+    }
+    let ReposFile { repos } = yaml::read_file(&path, &shown.join("repos.yaml"))?;
+    Ok(repos.unwrap_or_default())
 }
 
 // The files, as written.
