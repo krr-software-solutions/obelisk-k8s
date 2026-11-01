@@ -1,8 +1,8 @@
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+use obelisk_k8s::ObeliskK8sError;
 use obelisk_k8s::config::repo::RepoConfig;
-use obelisk_k8s::{ObeliskK8sError, hello};
 
 //
 
@@ -16,12 +16,6 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Print a greeting
-    Hello {
-        /// Who to greet
-        #[arg(long, default_value = "world")]
-        name: String,
-    },
     /// Read and check config files
     Config {
         #[command(subcommand)]
@@ -46,11 +40,6 @@ enum RepoCommand {
 
 //
 
-fn run_hello(name: &str) -> Result<(), ObeliskK8sError> {
-    println!("{}", hello::greet(name)?);
-    Ok(())
-}
-
 fn run_config_repo_show() -> Result<(), ObeliskK8sError> {
     let cwd = std::env::current_dir().map_err(|source| ObeliskK8sError::Io {
         path: ".".into(),
@@ -66,7 +55,6 @@ fn run_config_repo_show() -> Result<(), ObeliskK8sError> {
 
 fn main_impl() -> Result<(), ObeliskK8sError> {
     match Cli::parse().command {
-        Command::Hello { name } => run_hello(&name),
         Command::Config {
             command: ConfigCommand::Repo {
                 command: RepoCommand::Show,

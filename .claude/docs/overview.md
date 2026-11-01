@@ -13,7 +13,6 @@ ip-allocator.
   `targets/<dir>/target.yaml`, `units/<dir>/unit.yaml`), then prints the targets and units. Config paths
   are plain strings for now (no interpolation yet). Names must be DNS labels; stray entries in `targets/`
   and `units/` are skipped with a `WARN`.
-- `obelisk-k8s hello [--name …]`, the original placeholder.
 
 ## The design
 

@@ -18,7 +18,6 @@ back as `ObeliskK8sError` and `main` reports them (`ERROR - …`, exit code 1).
   YAML crate (serde-saphyr), so it can be swapped here.
 - `config/repo.rs`: `RepoConfig`, a repo's `.obelisk-k8s/` (repo, targets, units), loaded and checked.
   Behind `config repo show`.
-- `hello.rs`: `greet`, the placeholder command's logic.
 
 ## Adding a crate
 
