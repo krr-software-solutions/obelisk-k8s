@@ -1,0 +1,17 @@
+[package]
+name = "obelisk-k8s"
+description = "Kubernetes deploy tooling for prod/dev and local k3d clusters: the library"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+
+[lints]
+workspace = true

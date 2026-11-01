@@ -1,0 +1,29 @@
+[workspace]
+resolver = "3"
+members = [
+    "code/obelisk-k8s",
+    "code/obelisk-k8s-cli",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://gitlab.krr-software-solutions.com/oss/obelisk-k8s"
+homepage = "https://gitlab.krr-software-solutions.com/oss/obelisk-k8s"
+readme = "README.md"
+keywords = ["kubernetes", "helm", "k3d", "deployment"]
+
+[workspace.dependencies]
+# workspace crates: published together, so each pins the others exactly.
+obelisk-k8s = { path = "code/obelisk-k8s", version = "=0.0.0" }
+
+clap = { version = "4", features = ["derive"] }
+thiserror = "2"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }

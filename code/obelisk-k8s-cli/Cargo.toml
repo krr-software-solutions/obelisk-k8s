@@ -1,0 +1,26 @@
+[package]
+name = "obelisk-k8s-cli"
+description = "Kubernetes deploy tooling for prod/dev and local k3d clusters: the CLI"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "obelisk-k8s"
+path = "src/main.rs"
+# The library is also called `obelisk-k8s`; documenting both collides in target/doc (cargo#6313).
+doc = false
+
+[dependencies]
+obelisk-k8s.workspace = true
+
+clap.workspace = true
+
+[lints]
+workspace = true
