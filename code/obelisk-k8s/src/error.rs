@@ -11,6 +11,12 @@ pub enum ObeliskK8sError {
     #[error("no `.obelisk-k8s` directory here: run obelisk-k8s from the repo root")]
     NoRepoConfig,
 
+    #[error(
+        "no global config directory at {}: create it, or point `--global-root` / `OBELISK_K8S_GLOBAL_ROOT` elsewhere",
+        .0.display()
+    )]
+    NoGlobalConfig(PathBuf),
+
     #[error("{}: {source}", .path.display())]
     Io {
         path: PathBuf,

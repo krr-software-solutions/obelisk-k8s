@@ -19,6 +19,12 @@ ip-allocator.
   merge by scope (repo < target < unit < target + unit), then by declaring file (repo < target < unit),
   then in the order written. Missing files are skipped; `--explain` prints a table of every path (as written, as
   evaluated, found or skipped), colored on a terminal.
+- `obelisk-k8s config global show`: loads and checks the machine-wide config (`~/.obelisk-k8s/`, or
+  `--global-root` / `OBELISK_K8S_GLOBAL_ROOT`): `repos.yaml` (repo paths: relative to the global root, `~/`, or
+  absolute; a trailing `/*` for every repo in a directory; names come from each repo's `repo.yaml`) and
+  `clusters/<dir>/cluster.yaml`. Prints the repos and clusters. A repo that won't load, or a target
+  naming a cluster that isn't there, is a `WARN`.
+- `--help` groups options under Core, Extra and Special headings (as obeliskd does).
 - `obelisk-k8s completions <bash|zsh|fish|elvish|powershell>`: prints a shell completion script.
 
 ## The design

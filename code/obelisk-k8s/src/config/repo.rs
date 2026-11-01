@@ -10,7 +10,6 @@
 //! A target's or unit's name defaults to its directory's name. `null` and missing mean the same thing
 //! everywhere.
 
-use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -18,7 +17,7 @@ use indexmap::IndexMap;
 use serde::Deserialize;
 
 use crate::ObeliskK8sError;
-use crate::error::LineCol;
+use crate::config::{check_name, check_unique, config_error, name_or_dir, read_entries};
 use crate::interp::InterpString;
 use crate::yaml::{self, Spanned};
 
@@ -240,121 +239,6 @@ struct UnitSection {
     targets: Option<Vec<Spanned<String>>>,
 }
 
-/// One `<kind>/<dir>/<file>` to load.
-struct Entry {
-    /// The real path to the file.
-    path: PathBuf,
-    /// The path to show the user, relative to the repo root.
-    file: PathBuf,
-    /// `None` if the directory name isn't UTF-8.
-    dir_name: Option<String>,
-}
-
-/// Every `<dir>/<kind>/<entry>/<file_name>`, in path order. Hidden entries are skipped; a stray file,
-/// or a directory without `file_name`, is skipped with a warning.
-fn read_entries(
-    dir: &Path,
-    shown: &Path,
-    kind: &str,
-    file_name: &str,
-    warnings: &mut Vec<String>,
-) -> Result<Vec<Entry>, ObeliskK8sError> {
-    let kind_dir = dir.join(kind);
-    if !kind_dir.exists() {
-        return Ok(Vec::new());
-    }
-    let shown_kind_dir = shown.join(kind);
-    let io_error = |source| ObeliskK8sError::Io {
-        path: shown_kind_dir.clone(),
-        source,
-    };
-
-    let mut dir_entries = std::fs::read_dir(&kind_dir)
-        .map_err(io_error)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(io_error)?;
-    dir_entries.sort_by_key(std::fs::DirEntry::file_name);
-
-    let mut entries = Vec::new();
-    for dir_entry in dir_entries {
-        let os_name = dir_entry.file_name();
-        if os_name.as_encoded_bytes().starts_with(b".") {
-            continue;
-        }
-        let shown_entry = shown_kind_dir.join(&os_name);
-        if !dir_entry.path().is_dir() {
-            warnings.push(format!(
-                "{}: ignored: not a directory (expected {kind}/<name>/{file_name})",
-                shown_entry.display()
-            ));
-            continue;
-        }
-        let path = dir_entry.path().join(file_name);
-        if !path.is_file() {
-            warnings.push(format!(
-                "{}: ignored: no `{file_name}` in this directory",
-                shown_entry.display()
-            ));
-            continue;
-        }
-        entries.push(Entry {
-            path,
-            file: shown_entry.join(file_name),
-            dir_name: os_name.to_str().map(str::to_owned),
-        });
-    }
-    Ok(entries)
-}
-
-fn name_or_dir(entry: &Entry, name: Option<Spanned<String>>) -> Result<String, ObeliskK8sError> {
-    if let Some(name) = name {
-        check_name(&entry.file, &name)?;
-        return Ok(name.value);
-    }
-    let Some(dir_name) = &entry.dir_name else {
-        return Err(config_error(
-            &entry.file,
-            None,
-            "the directory name isn't UTF-8: rename it or set `name`",
-        ));
-    };
-    if !is_valid_name(dir_name) {
-        return Err(config_error(
-            &entry.file,
-            None,
-            format!(
-                "the directory name `{dir_name}` isn't a valid name ({NAME_RULE}): rename it or set `name`"
-            ),
-        ));
-    }
-    Ok(dir_name.clone())
-}
-
-const NAME_RULE: &str =
-    "at most 63 lowercase letters, digits and `-`, starting and ending with a letter or digit";
-
-/// A DNS label: names end up in paths and Helm release names.
-fn is_valid_name(name: &str) -> bool {
-    let bytes = name.as_bytes();
-    let alnum = |b: &u8| b.is_ascii_lowercase() || b.is_ascii_digit();
-    bytes.len() <= 63
-        && bytes.iter().all(|b| alnum(b) || *b == b'-')
-        && bytes.first().is_some_and(alnum)
-        && bytes.last().is_some_and(alnum)
-}
-
-fn check_name(file: &Path, name: &Spanned<String>) -> Result<(), ObeliskK8sError> {
-    if is_valid_name(&name.value) {
-        Ok(())
-    } else {
-        Err(config_error(
-            file,
-            Some(name.at),
-            format!("`{}` isn't a valid name ({NAME_RULE})", name.value),
-        ))
-    }
-}
-
 /// Every config path must start with `./` (it resolves from `.obelisk-k8s/`).
 fn check_config_paths(
     file: &Path,
@@ -409,38 +293,10 @@ fn check_unit_targets(
     ))
 }
 
-/// Errors on the first name used twice, at the later file (in path order).
-fn check_unique<'a>(
-    items: impl Iterator<Item = (&'a str, &'a Path)>,
-    kind: &str,
-) -> Result<(), ObeliskK8sError> {
-    let mut seen = HashMap::new();
-    for (name, file) in items {
-        if let Some(first) = seen.insert(name, file) {
-            return Err(config_error(
-                file,
-                None,
-                format!(
-                    "{kind} name `{name}` is already used by {}",
-                    first.display()
-                ),
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn config_error(file: &Path, at: Option<LineCol>, message: impl Into<String>) -> ObeliskK8sError {
-    ObeliskK8sError::Config {
-        file: file.to_owned(),
-        at,
-        message: message.into(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{NAME_RULE, is_valid_name};
 
     struct Repo(tempfile::TempDir);
 
