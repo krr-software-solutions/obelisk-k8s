@@ -20,6 +20,7 @@ keywords = ["kubernetes", "helm", "k3d", "deployment"]
 obelisk-k8s = { path = "code/obelisk-k8s", version = "=0.0.0" }
 
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 indexmap = { version = "2", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 # 2.x moves fast (1.0 → 2.0 in ~2.5 months); stay on 2.0.x until we choose to migrate.
