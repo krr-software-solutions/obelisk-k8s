@@ -1,0 +1,23 @@
+
+repos:
+  - name: "repo-1"
+    path: "/home/me/dev/repo/current/my-repo-1"
+    fromPath: "~/dev/repo/current/my-repo-1" # path in other repos.yaml
+    targets:
+      - "release-target-1"
+      - "release-target-2"
+      - "release-target-3"
+    units:
+      - "unit-1"
+      - "unit-2"
+      - "unit-3"
+  - name: "wr-1"
+    path: "/home/me/dev/repo/work/wr-1"
+    fromPath: "~/dev/repo/work/*" # path in other repos.yaml
+    targets: []
+    units: []
+  - name: "wr-2"
+    path: "/home/me/dev/repo/work/wr-1"
+    fromPath: "~/dev/repo/work/*" # path in other repos.yaml
+    targets: []
+    units: []

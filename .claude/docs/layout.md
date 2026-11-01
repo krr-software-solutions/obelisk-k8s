@@ -14,6 +14,10 @@ back as `ObeliskK8sError` and `main` reports them (`ERROR - …`, exit code 1).
 ## The library (`code/obelisk-k8s/src/`)
 
 - `error.rs`: `ObeliskK8sError`, every error the library can fail with.
+- `yaml.rs`: all YAML, including `Spanned` (a value plus its line and column). Nothing else names the
+  YAML crate (serde-saphyr), so it can be swapped here.
+- `config/repo.rs`: `RepoConfig`, a repo's `.obelisk-k8s/` (repo, targets, units), loaded and checked.
+  Behind `config repo show`.
 - `hello.rs`: `greet`, the placeholder command's logic.
 
 ## Adding a crate

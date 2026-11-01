@@ -14,7 +14,7 @@ categories = ["command-line-utilities"]
 [[bin]]
 name = "obelisk-k8s"
 path = "src/main.rs"
-# The library is also called `obelisk-k8s`; documenting both collides in target/doc (cargo#6313).
+# The library is also called `obelisk-k8s`; documenting both collides in release-target/doc (cargo#6313).
 doc = false
 
 [dependencies]

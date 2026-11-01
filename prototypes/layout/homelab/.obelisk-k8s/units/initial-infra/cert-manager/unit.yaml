@@ -1,0 +1,4 @@
+chart: { repo: jetstack, name: cert-manager, version: v1.17.4 }
+namespace: { name: cert-manager, create: true }
+values:
+  global: [values.yaml]

@@ -1,0 +1,11 @@
+
+cluster:
+  k8s: k3d
+  location: local # local|remote
+  name: my-cluster-1
+  managed: true
+  obeliskd: # must be null/ommitted if `managed = false`
+    supernet: "my-supernet"
+    subnet: "my-subnet"
+  kubectlCluster: null # if null/undefined, guess based on `k8s/location/name` or `kubectlContext`, potentially try multiple options?
+  kubectlContext: null # if null/undefined, attempt to resolve based one only having 1 context for that cluster

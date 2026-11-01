@@ -1,0 +1,4 @@
+
+repos:
+  - "~/dev/repo/current/my-repo-1"
+  - "~/dev/repo/work/*" # Allow 1 wildcard at the end for now

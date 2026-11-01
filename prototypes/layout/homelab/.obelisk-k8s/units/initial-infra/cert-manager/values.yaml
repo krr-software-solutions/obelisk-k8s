@@ -1,0 +1,2 @@
+installCRDs: true
+# ... rest of today's global-helm-values.yaml

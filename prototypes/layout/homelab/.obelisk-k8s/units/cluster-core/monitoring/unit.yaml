@@ -1,0 +1,5 @@
+chart: { repo: prometheus-community, name: kube-prometheus-stack, version: 92.14.1 }
+namespace: { name: monitoring, create: true, privileged: true }
+dependsOn: [prometheus-operator-crds]   # replaces the "bump together with monitoring" comment's ordering half
+values:
+  global: [values.yaml]

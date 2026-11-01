@@ -1,0 +1,7 @@
+# One root replaces today's four (initial-infra, cluster-core, toys, aquinnah). The categories become
+# group directories under units/, purely for humans: each unit lists its own values files.
+name: homelab
+helmRepos:                     # name → url, repo-wide (was per category)
+  metallb: https://metallb.github.io/metallb
+  jetstack: https://charts.jetstack.io
+  prometheus-community: https://prometheus-community.github.io/helm-charts

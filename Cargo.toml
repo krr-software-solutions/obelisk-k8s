@@ -8,7 +8,7 @@ members = [
 [workspace.package]
 version = "0.0.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.89" # serde-saphyr 2.0 needs 1.89
 license = "MIT OR Apache-2.0"
 repository = "https://gitlab.krr-software-solutions.com/oss/obelisk-k8s"
 homepage = "https://gitlab.krr-software-solutions.com/oss/obelisk-k8s"
@@ -20,6 +20,11 @@ keywords = ["kubernetes", "helm", "k3d", "deployment"]
 obelisk-k8s = { path = "code/obelisk-k8s", version = "=0.0.0" }
 
 clap = { version = "4", features = ["derive"] }
+indexmap = { version = "2", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+# 2.x moves fast (1.0 → 2.0 in ~2.5 months); stay on 2.0.x until we choose to migrate.
+serde-saphyr = "~2.0"
+tempfile = "3"
 thiserror = "2"
 
 [workspace.lints.rust]

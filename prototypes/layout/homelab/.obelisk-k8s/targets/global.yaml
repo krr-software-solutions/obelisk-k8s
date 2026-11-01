@@ -1,0 +1,3 @@
+kubeContext: homelab-1
+aws: { profile: homelab-1 }
+# No default namespace: every unit names its own (or its manifests carry their own).

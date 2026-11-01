@@ -1,0 +1,8 @@
+# v1.3 (paper): "give me a whole cluster that looks like this". Each entry is just a repo + release-target
+# (+ instance, + optional unit subset): the same thing `obelisk-k8s up` does in one repo.
+# The cluster spec owns the cluster, so it overrides each release-target's kubeContext.
+kubeContext: k3d-dev
+deploy:
+  - { repo: mission-control, target: ephemeral-global }
+  - { repo: mission-control, target: ephemeral, instance: alice }
+  - { repo: food-app, target: ephemeral, instance: alice, units: [api] }

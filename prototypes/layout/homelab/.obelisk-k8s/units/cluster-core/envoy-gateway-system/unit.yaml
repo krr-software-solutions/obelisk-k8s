@@ -1,0 +1,3 @@
+chart: { oci: oci://docker.io/envoyproxy/gateway-helm, version: v1.7.2 }
+namespace: { name: envoy-gateway-system, create: true }
+dependsOn: [gateway-api]

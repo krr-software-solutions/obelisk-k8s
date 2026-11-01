@@ -1,0 +1,7 @@
+# Shared values: every generated unit lists this first (today's .obelisk/krrss-mc/values.yaml, unchanged).
+global:
+  host:
+    publicDomainBase: "krr-software-solutions.com"
+    privateDomainBase: "private.homelab-1.krr-software-solutions.com"
+  db: { database: "krrss_mc", serviceName: "krrss-mc-database", port: 5432 }
+  # ... the rest exactly as today

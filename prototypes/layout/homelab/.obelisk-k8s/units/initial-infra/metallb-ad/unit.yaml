@@ -1,0 +1,3 @@
+# Raw YAML in the repo. The files sit next to unit.yaml; the manifests carry their own metadata.namespace.
+manifests: [manifests.yaml]
+dependsOn: [metallb-system]

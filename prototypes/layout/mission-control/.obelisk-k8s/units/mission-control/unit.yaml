@@ -1,0 +1,13 @@
+generate:
+  command: java
+  args: [-jar, release-target/obelisk-build.jar, mission-control]
+# Values files per release-target, merged in order. Paths are relative to this unit dir.
+values:
+  prod: [../../values.yaml, ../../values.prod.yaml, values.yaml, values.prod.yaml]
+dependsOn: [infra]
+
+# v1.2 (paper): a hook runs after the release is ready, with the same context file the generator gets.
+# hooks:
+#   afterUp:
+#     - command: python3
+#       args: [env/ephemeral/exec.py, seed]

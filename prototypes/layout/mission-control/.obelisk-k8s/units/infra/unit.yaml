@@ -1,0 +1,9 @@
+# No chart: the generator writes plain k8s manifests, which the tool wraps into a throwaway chart.
+generate:
+  command: java
+  args: [-jar, release-target/obelisk-build.jar, infra]
+# Values files per release-target, merged in order. Paths are relative to this unit dir.
+values:
+  prod: [../../values.yaml, ../../values.prod.yaml, values.yaml, values.prod.yaml]
+namespace:
+  create: true           # today's `managed`; the tool renders the Namespace object

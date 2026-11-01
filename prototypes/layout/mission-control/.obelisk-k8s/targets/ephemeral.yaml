@@ -1,0 +1,6 @@
+# v1.1 (paper). One release-target, many instances: `obelisk-k8s up -t ephemeral -i alice`.
+# The instance only picks the namespace, so Helm release names stay `<unit>` (they're unique per namespace),
+# and `down -i alice` means uninstall every release in that namespace.
+kubeContext: k3d-dev
+instance: required
+namespace: krrss-mc-eph-${instance}   # the only substitution the tool does, and only in release-target files

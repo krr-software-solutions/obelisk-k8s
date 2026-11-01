@@ -1,0 +1,3 @@
+# YAML from a URL, pinned by the URL path (as today). `sha256` is optional: if set, a changed upstream file fails.
+url: https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.4.1/standard-install.yaml
+# sha256: ...

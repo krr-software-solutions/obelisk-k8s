@@ -1,0 +1,7 @@
+
+cluster:
+  k8s: talos
+  location: remote
+  name: my-cluster-2
+  managed: false
+  kubectlCluster: my-talos-cluster

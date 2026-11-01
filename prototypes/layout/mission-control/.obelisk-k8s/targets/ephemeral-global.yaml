@@ -1,0 +1,6 @@
+# v1.1 (paper). The "global" half of the global-vs-per-instance pattern: a plain second release-target with no
+# instance. Which units go where is just each unit's `targets:` list plus per-release-target values files
+# (values.ephemeral-global.yaml); the tool has no notion of "global". mission-control shares nothing
+# between stacks today, so no unit opts in yet; a shared Pulsar would list `targets: [prod, ephemeral-global]`.
+kubeContext: k3d-dev
+namespace: krrss-mc-eph-global

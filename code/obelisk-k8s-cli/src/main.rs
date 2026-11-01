@@ -1,6 +1,7 @@
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+use obelisk_k8s::config::repo::RepoConfig;
 use obelisk_k8s::{ObeliskK8sError, hello};
 
 //
@@ -21,6 +22,26 @@ enum Command {
         #[arg(long, default_value = "world")]
         name: String,
     },
+    /// Read and check config files
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ConfigCommand {
+    /// The repo's own config (`.obelisk-k8s/`, in the current directory)
+    Repo {
+        #[command(subcommand)]
+        command: RepoCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum RepoCommand {
+    /// Load and check the repo's config, then print its targets and units
+    Show,
 }
 
 //
@@ -30,9 +51,27 @@ fn run_hello(name: &str) -> Result<(), ObeliskK8sError> {
     Ok(())
 }
 
+fn run_config_repo_show() -> Result<(), ObeliskK8sError> {
+    let cwd = std::env::current_dir().map_err(|source| ObeliskK8sError::Io {
+        path: ".".into(),
+        source,
+    })?;
+    let config = RepoConfig::load(&cwd)?;
+    for warning in &config.warnings {
+        eprintln!("WARN - {warning}");
+    }
+    print!("{config}");
+    Ok(())
+}
+
 fn main_impl() -> Result<(), ObeliskK8sError> {
     match Cli::parse().command {
         Command::Hello { name } => run_hello(&name),
+        Command::Config {
+            command: ConfigCommand::Repo {
+                command: RepoCommand::Show,
+            },
+        } => run_config_repo_show(),
     }
 }
 

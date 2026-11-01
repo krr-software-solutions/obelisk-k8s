@@ -1,0 +1,2 @@
+# The repo's root manifest. `name` is the repo's address for v1.3 cluster specs (`mission-control:auth`).
+name: mission-control

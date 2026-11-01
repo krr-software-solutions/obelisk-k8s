@@ -1,0 +1,4 @@
+# Today this needs `doTemplate: true` for its SSM refs. In this layout every unit's repo-authored YAML gets
+# whole-string ref+awsssm resolution, so there's no flag.
+manifests: [manifests.yaml]
+namespace: { name: minio, create: true }

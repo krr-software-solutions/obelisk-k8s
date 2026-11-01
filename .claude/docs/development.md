@@ -4,6 +4,7 @@
 
 ```sh
 cargo run -q -p obelisk-k8s-cli -- hello --name k3d   # run the CLI
+(cd .tmp-scaffold/.repo-root && cargo run -q -p obelisk-k8s-cli -- config repo show)
 cargo fmt --all                                        # format
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked

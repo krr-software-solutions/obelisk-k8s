@@ -1,0 +1,6 @@
+# v1.1 (paper). Mock IdP/Stripe/Resend server: ephemeral only, never prod.
+targets: [ephemeral]
+values:
+  ephemeral: [values.yaml]
+chart:
+  path: ../../../env/mocks/chart   # a small in-repo chart; path relative to this unit dir
