@@ -10,9 +10,15 @@ ip-allocator.
 ## Current state
 
 - `obelisk-k8s config repo show`, run from a repo root: loads and checks `.obelisk-k8s/` (`repo.yaml`,
-  `targets/<dir>/target.yaml`, `units/<dir>/unit.yaml`), then prints the targets and units. Config paths
-  are plain strings for now (no interpolation yet). Names must be DNS labels; stray entries in `targets/`
-  and `units/` are skipped with a `WARN`.
+  `targets/<dir>/target.yaml`, `units/<dir>/unit.yaml`), then prints the targets and units. Names must be
+  DNS labels; stray entries in `targets/` and `units/` are skipped with a `WARN`.
+- `obelisk-k8s config repo paths [-t <target>]... [-u <unit>]... [--explain]`: the config files each
+  selected unit gets on each selected target (default: all of them), in merge order. One case prints as
+  is; several print one after another, each under a magenta `[ target=…, unit=… ]` header, skipping the
+  pairs where the unit doesn't deploy to the target. Config paths can use `${{obelisk:target}}` and `${{obelisk:unit}}`; they
+  merge by scope (repo < target < unit < target + unit), then by declaring file (repo < target < unit),
+  then in the order written. Missing files are skipped; `--explain` prints a table of every path (as written, as
+  evaluated, found or skipped), colored on a terminal.
 - `obelisk-k8s completions <bash|zsh|fish|elvish|powershell>`: prints a shell completion script.
 
 ## The design

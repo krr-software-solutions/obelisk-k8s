@@ -19,6 +19,8 @@ keywords = ["kubernetes", "helm", "k3d", "deployment"]
 # workspace crates: published together, so each pins the others exactly.
 obelisk-k8s = { path = "code/obelisk-k8s", version = "=0.0.0" }
 
+anstream = "1"
+anstyle = "1"
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 indexmap = { version = "2", features = ["serde"] }

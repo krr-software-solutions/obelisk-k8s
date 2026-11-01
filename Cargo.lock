@@ -293,6 +293,8 @@ dependencies = [
 name = "obelisk-k8s"
 version = "0.0.0"
 dependencies = [
+ "anstream",
+ "anstyle",
  "indexmap",
  "serde",
  "serde-saphyr",
@@ -304,6 +306,7 @@ dependencies = [
 name = "obelisk-k8s-cli"
 version = "0.0.0"
 dependencies = [
+ "anstream",
  "clap",
  "clap_complete",
  "obelisk-k8s",

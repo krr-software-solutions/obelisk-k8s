@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{CommandFactory, Parser, Subcommand};
@@ -42,20 +43,52 @@ enum ConfigCommand {
 enum RepoCommand {
     /// Load and check the repo's config, then print its targets and units
     Show,
+    /// Print the config files each unit gets on each target, in merge order (lowest priority first)
+    Paths {
+        /// Only these targets (repeatable; default: all)
+        #[arg(short, long = "target", value_name = "TARGET")]
+        targets: Vec<String>,
+        /// Only these units (repeatable; default: all)
+        #[arg(short, long = "unit", value_name = "UNIT")]
+        units: Vec<String>,
+        /// List every config path, including skipped ones (no such file), as a table
+        #[arg(long)]
+        explain: bool,
+    },
 }
 
 //
 
-fn run_config_repo_show() -> Result<(), ObeliskK8sError> {
-    let cwd = std::env::current_dir().map_err(|source| ObeliskK8sError::Io {
+fn cwd() -> Result<PathBuf, ObeliskK8sError> {
+    std::env::current_dir().map_err(|source| ObeliskK8sError::Io {
         path: ".".into(),
         source,
-    })?;
-    let config = RepoConfig::load(&cwd)?;
+    })
+}
+
+fn load_repo_config(repo_root: &Path) -> Result<RepoConfig, ObeliskK8sError> {
+    let config = RepoConfig::load(repo_root)?;
     for warning in &config.warnings {
         eprintln!("WARN - {warning}");
     }
-    print!("{config}");
+    Ok(config)
+}
+
+fn run_config_repo_show() -> Result<(), ObeliskK8sError> {
+    print!("{}", load_repo_config(&cwd()?)?);
+    Ok(())
+}
+
+fn run_config_repo_paths(
+    targets: &[String],
+    units: &[String],
+    explain: bool,
+) -> Result<(), ObeliskK8sError> {
+    let repo_root = cwd()?;
+    let config = load_repo_config(&repo_root)?;
+    let selection = config.select(targets, units)?;
+    // anstream drops the colors when stdout isn't a terminal, or with NO_COLOR set.
+    anstream::print!("{}", config.paths_report(&repo_root, &selection, explain)?);
     Ok(())
 }
 
@@ -86,6 +119,17 @@ fn main_impl() -> Result<(), ObeliskK8sError> {
                 command: RepoCommand::Show,
             },
         } => run_config_repo_show(),
+        Command::Config {
+            command:
+                ConfigCommand::Repo {
+                    command:
+                        RepoCommand::Paths {
+                            targets,
+                            units,
+                            explain,
+                        },
+                },
+        } => run_config_repo_paths(&targets, &units, explain),
         Command::Completions { shell } => {
             run_completions(shell);
             Ok(())

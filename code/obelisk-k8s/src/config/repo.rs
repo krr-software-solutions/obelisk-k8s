@@ -19,10 +19,14 @@ use serde::Deserialize;
 
 use crate::ObeliskK8sError;
 use crate::error::LineCol;
+use crate::interp::InterpString;
 use crate::yaml::{self, Spanned};
 
 /// The directory, at the repo root, that holds a repo's config.
 pub const REPO_CONFIG_DIR: &str = ".obelisk-k8s";
+
+/// `repo.yaml`, relative to the repo root.
+pub const REPO_FILE: &str = ".obelisk-k8s/repo.yaml";
 
 /// A repo's config, loaded and checked.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,7 +34,7 @@ pub struct RepoConfig {
     pub name: String,
     /// Helm repo name → URL, in file order.
     pub helm_repos: IndexMap<String, String>,
-    pub config_paths: Vec<String>,
+    pub config_paths: Vec<InterpString>,
     /// Sorted by name.
     pub targets: Vec<Target>,
     /// Sorted by name.
@@ -46,7 +50,7 @@ pub struct Target {
     pub file: PathBuf,
     /// The name of a cluster in the global config (not checked yet).
     pub cluster: String,
-    pub config_paths: Vec<String>,
+    pub config_paths: Vec<InterpString>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,7 +58,7 @@ pub struct Unit {
     pub name: String,
     /// Relative to the repo root, e.g. `.obelisk-k8s/units/my-app/unit.yaml`.
     pub file: PathBuf,
-    pub config_paths: Vec<String>,
+    pub config_paths: Vec<InterpString>,
     pub targets: UnitTargets,
 }
 
@@ -81,10 +85,10 @@ impl RepoConfig {
         let shown = Path::new(REPO_CONFIG_DIR);
         let mut warnings = Vec::new();
 
-        let repo_file = shown.join("repo.yaml");
-        let RepoFile { repo } = yaml::read_file(&dir.join("repo.yaml"), &repo_file)?;
-        check_name(&repo_file, &repo.name)?;
-        let config_paths = check_config_paths(&repo_file, repo.config_paths)?;
+        let repo_file = Path::new(REPO_FILE);
+        let RepoFile { repo } = yaml::read_file(&repo_root.join(REPO_FILE), repo_file)?;
+        check_name(repo_file, &repo.name)?;
+        let config_paths = check_config_paths(repo_file, repo.config_paths)?;
 
         let mut targets = Vec::new();
         for entry in read_entries(&dir, shown, "targets", "target.yaml", &mut warnings)? {
@@ -179,7 +183,11 @@ fn none_if(empty: bool) -> &'static str {
     if empty { " (none)" } else { "" }
 }
 
-fn write_config_paths(f: &mut fmt::Formatter<'_>, indent: &str, paths: &[String]) -> fmt::Result {
+fn write_config_paths(
+    f: &mut fmt::Formatter<'_>,
+    indent: &str,
+    paths: &[InterpString],
+) -> fmt::Result {
     writeln!(f, "{indent}config paths:{}", none_if(paths.is_empty()))?;
     for path in paths {
         writeln!(f, "{indent}  - {path}")?;
@@ -201,7 +209,7 @@ struct RepoFile {
 struct RepoSection {
     name: Spanned<String>,
     helm_repos: Option<IndexMap<String, String>>,
-    config_paths: Option<Vec<Spanned<String>>>,
+    config_paths: Option<Vec<Spanned<InterpString>>>,
 }
 
 #[derive(Deserialize)]
@@ -215,7 +223,7 @@ struct TargetFile {
 struct TargetSection {
     name: Option<Spanned<String>>,
     cluster: String,
-    config_paths: Option<Vec<Spanned<String>>>,
+    config_paths: Option<Vec<Spanned<InterpString>>>,
 }
 
 #[derive(Deserialize)]
@@ -228,7 +236,7 @@ struct UnitFile {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct UnitSection {
     name: Option<Spanned<String>>,
-    config_paths: Option<Vec<Spanned<String>>>,
+    config_paths: Option<Vec<Spanned<InterpString>>>,
     targets: Option<Vec<Spanned<String>>>,
 }
 
@@ -350,10 +358,10 @@ fn check_name(file: &Path, name: &Spanned<String>) -> Result<(), ObeliskK8sError
 /// Every config path must start with `./` (it resolves from `.obelisk-k8s/`).
 fn check_config_paths(
     file: &Path,
-    paths: Option<Vec<Spanned<String>>>,
-) -> Result<Vec<String>, ObeliskK8sError> {
+    paths: Option<Vec<Spanned<InterpString>>>,
+) -> Result<Vec<InterpString>, ObeliskK8sError> {
     let paths = paths.unwrap_or_default();
-    if let Some(bad) = paths.iter().find(|p| !p.value.starts_with("./")) {
+    if let Some(bad) = paths.iter().find(|p| !p.value.raw().starts_with("./")) {
         return Err(config_error(
             file,
             Some(bad.at),
@@ -479,7 +487,7 @@ mod tests {
         assert_eq!(repo.name, "repo-1");
         assert_eq!(repo.helm_repos["ex1"], "https://abc.com/helm");
         assert_eq!(
-            repo.config_paths[1],
+            repo.config_paths[1].raw(),
             "./config/${{obelisk:unit}}/values.yaml"
         );
         assert_eq!(names(&repo.targets, |t| &t.name), ["local", "prod"]);
@@ -513,11 +521,11 @@ mod tests {
             .load()
             .unwrap();
         assert!(repo.helm_repos.is_empty());
-        assert_eq!(repo.config_paths, Vec::<String>::new());
+        assert_eq!(repo.config_paths, []);
         assert_eq!(names(&repo.units, |u| &u.name), ["a", "b"]);
         for unit in &repo.units {
             assert_eq!(unit.targets, UnitTargets::All);
-            assert_eq!(unit.config_paths, Vec::<String>::new());
+            assert_eq!(unit.config_paths, []);
         }
     }
 

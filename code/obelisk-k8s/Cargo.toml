@@ -11,12 +11,14 @@ readme.workspace = true
 keywords.workspace = true
 
 [dependencies]
+anstyle.workspace = true
 indexmap.workspace = true
 serde.workspace = true
 serde-saphyr.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+anstream.workspace = true
 tempfile.workspace = true
 
 [lints]

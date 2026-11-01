@@ -16,8 +16,12 @@ back as `ObeliskK8sError` and `main` reports them (`ERROR - …`, exit code 1).
 - `error.rs`: `ObeliskK8sError`, every error the library can fail with.
 - `yaml.rs`: all YAML, including `Spanned` (a value plus its line and column). Nothing else names the
   YAML crate (serde-saphyr), so it can be swapped here.
+- `interp.rs`: `${{obelisk:...}}` interpolation (`InterpString`: the raw string plus its parts). Only for
+  obelisk-k8s's own config files, never values files.
 - `config/repo.rs`: `RepoConfig`, a repo's `.obelisk-k8s/` (repo, targets, units), loaded and checked.
   Behind `config repo show`.
+- `config/paths.rs`: which config files a unit gets on a target, and their merge order. Behind
+  `config repo paths`.
 
 ## Adding a crate
 

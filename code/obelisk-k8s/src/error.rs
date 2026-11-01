@@ -4,6 +4,10 @@ use std::path::PathBuf;
 /// Every error obelisk-k8s can fail with.
 #[derive(Debug, thiserror::Error)]
 pub enum ObeliskK8sError {
+    /// The command was asked for something that isn't there (e.g. an unknown target).
+    #[error("{0}")]
+    Usage(String),
+
     #[error("no `.obelisk-k8s` directory here: run obelisk-k8s from the repo root")]
     NoRepoConfig,
 
