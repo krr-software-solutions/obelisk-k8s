@@ -2,8 +2,9 @@
 //! `obelisk:` block on top. This is what a generator or chart gets.
 //!
 //! Maps merge key by key, recursively; anything else (lists, scalars, `null`) replaces what was there.
-//! A file that's empty or `null` adds nothing. A file that sets `obelisk:` is an error: that key is
-//! the tool's. `ref+awsssm` refs aren't resolved yet.
+//! A file that's empty or `null` adds nothing. `obelisk:` is the tool's: a file may only set
+//! `obelisk.release.{name, namespace}`, as strings (parsed into [`ValuesCase::releases`], and left out
+//! of the values), and anything else under it is an error. `ref+awsssm` refs aren't resolved yet.
 //!
 //! Values go through a generic tree, so quoted strings stay strings (`"0755"`, `"yes"`, `"1e3"` come out
 //! quoted) and block scalars keep their text, but plain scalars come out in their parsed form:
@@ -38,6 +39,9 @@ pub struct ValuesCase<'a> {
     pub values: Map<String, Value>,
     /// `values` as YAML.
     pub yaml: String,
+    /// What each config file (relative to the repo root) set under `obelisk.release`, in merge order;
+    /// files that set nothing are left out. Parsed, not used yet (it's not in `values`).
+    pub releases: Vec<(PathBuf, FileRelease)>,
 }
 
 /// What `template values` prints: a single case's values as plain YAML, or several as a YAML stream,
@@ -88,6 +92,7 @@ impl RepoConfig {
             message,
         };
         let mut merged = Map::new();
+        let mut releases = Vec::new();
         for path in self
             .resolve(repo_root, target, unit)?
             .iter()
@@ -96,13 +101,16 @@ impl RepoConfig {
             let file = shown(&path.path);
             match yaml::read_values(&repo_root.join(&path.path), &file)? {
                 Value::Null => {}
-                Value::Object(values) if values.contains_key(OBELISK_KEY) => {
-                    return Err(error(
-                        file,
-                        format!("`{OBELISK_KEY}:` is reserved: obelisk-k8s writes it"),
-                    ));
+                Value::Object(mut values) => {
+                    if let Some(obelisk) = values.remove(OBELISK_KEY) {
+                        let release =
+                            release_in_file(&obelisk).map_err(|m| error(file.clone(), m))?;
+                        if release != FileRelease::default() {
+                            releases.push((path.path.clone(), release));
+                        }
+                    }
+                    merge(&mut merged, values);
                 }
-                Value::Object(values) => merge(&mut merged, values),
                 _ => {
                     return Err(error(
                         file,
@@ -124,6 +132,7 @@ impl RepoConfig {
             unit: &unit.name,
             values,
             yaml,
+            releases,
         })
     }
 
@@ -135,6 +144,52 @@ impl RepoConfig {
         block.insert("unit".to_owned(), Value::String(unit.name.clone()));
         Value::Object(block)
     }
+}
+
+/// What a config file says about the Helm release, under `obelisk.release`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FileRelease {
+    pub name: Option<String>,
+    pub namespace: Option<String>,
+}
+
+/// The `obelisk:` a config file set: `null`, or `{ release: null | { name?, namespace? } }`, where both
+/// are strings (or `null`). Values files are typed, so a plain `123` is a number: quote it.
+fn release_in_file(obelisk: &Value) -> Result<FileRelease, String> {
+    let only = format!(
+        "`{OBELISK_KEY}:` is reserved; a config file may only set `{OBELISK_KEY}.release.name` and `{OBELISK_KEY}.release.namespace`"
+    );
+    let obelisk = match obelisk {
+        Value::Null => return Ok(FileRelease::default()),
+        Value::Object(map) => map,
+        _ => return Err(format!("{only}, so `{OBELISK_KEY}:` must be a mapping")),
+    };
+    if let Some(other) = obelisk.keys().find(|k| *k != "release") {
+        return Err(format!("{only}, not `{OBELISK_KEY}.{other}`"));
+    }
+    let release = match obelisk.get("release") {
+        None | Some(Value::Null) => return Ok(FileRelease::default()),
+        Some(Value::Object(map)) => map,
+        Some(_) => {
+            return Err(format!(
+                "{only}, so `{OBELISK_KEY}.release` must be a mapping"
+            ));
+        }
+    };
+    if let Some(other) = release.keys().find(|k| *k != "name" && *k != "namespace") {
+        return Err(format!("{only}, not `{OBELISK_KEY}.release.{other}`"));
+    }
+    let field = |key: &str| match release.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => Ok(Some(s.clone())),
+        Some(other) => Err(format!(
+            "`{OBELISK_KEY}.release.{key}` must be a string, not `{other}` (quote it)"
+        )),
+    };
+    Ok(FileRelease {
+        name: field("name")?,
+        namespace: field("namespace")?,
+    })
 }
 
 /// Deep-merges `from` into `into`: maps key by key, anything else replaces.
@@ -280,14 +335,103 @@ mod tests {
         assert!(error.contains(".obelisk-k8s/prod.yaml:"), "{error}");
     }
 
+    fn case_releases(dir: &tempfile::TempDir) -> Vec<(PathBuf, FileRelease)> {
+        let config = RepoConfig::load(dir.path()).unwrap();
+        let selection = config.select(&["prod".into()], &["app".into()]).unwrap();
+        let report = config.values_report(dir.path(), &selection, None).unwrap();
+        report.cases.into_iter().next().unwrap().releases
+    }
+
     #[test]
-    fn reserves_the_obelisk_key() {
-        let dir = base(&[("prod.yaml", "obelisk:\n  target: other\n")]);
-        let error = report(&dir, &["prod"], &["app"]).unwrap_err().to_string();
+    fn keeps_a_config_files_release_out_of_the_values() {
+        let dir = base(&[
+            ("global.yaml", "obelisk:\n  release:\n    namespace: ns\n"),
+            (
+                "prod.yaml",
+                "obelisk:\n  release:\n    name: app\n    namespace: ns\nenv: prod\n",
+            ),
+        ]);
         assert_eq!(
-            error,
-            ".obelisk-k8s/prod.yaml: `obelisk:` is reserved: obelisk-k8s writes it"
+            report(&dir, &["prod"], &["app"]).unwrap(),
+            "obelisk:\n  repo: r\n  target: prod\n  unit: app\nenv: prod\n"
         );
+        let release = |name: Option<&str>, namespace: &str| FileRelease {
+            name: name.map(str::to_owned),
+            namespace: Some(namespace.to_owned()),
+        };
+        assert_eq!(
+            case_releases(&dir),
+            [
+                (
+                    PathBuf::from(".obelisk-k8s/global.yaml"),
+                    release(None, "ns")
+                ),
+                (
+                    PathBuf::from(".obelisk-k8s/prod.yaml"),
+                    release(Some("app"), "ns")
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_empty_obelisk_or_release_sets_nothing() {
+        for empty in [
+            "obelisk: null\n",
+            "obelisk: {}\n",
+            "obelisk:\n  release: null\n",
+            "obelisk:\n  release: {}\n",
+            "obelisk:\n  release: { name: null }\n",
+        ] {
+            let dir = base(&[("prod.yaml", empty)]);
+            assert_eq!(case_releases(&dir), [], "{empty:?}");
+        }
+    }
+
+    #[test]
+    fn reserves_the_rest_of_the_obelisk_key() {
+        let only = "`obelisk:` is reserved; a config file may only set `obelisk.release.name` and `obelisk.release.namespace`";
+        for (bad, why) in [
+            (
+                "obelisk:\n  target: other\n",
+                format!("{only}, not `obelisk.target`"),
+            ),
+            (
+                "obelisk:\n  release: { name: app, color: red }\n",
+                format!("{only}, not `obelisk.release.color`"),
+            ),
+            (
+                "obelisk: 1\n",
+                format!("{only}, so `obelisk:` must be a mapping"),
+            ),
+            (
+                "obelisk: [a]\n",
+                format!("{only}, so `obelisk:` must be a mapping"),
+            ),
+            (
+                "obelisk:\n  release: app\n",
+                format!("{only}, so `obelisk.release` must be a mapping"),
+            ),
+            (
+                "obelisk:\n  release: { name: [a] }\n",
+                "`obelisk.release.name` must be a string, not `[\"a\"]` (quote it)".to_owned(),
+            ),
+            // Values files are typed: plain numbers are numbers (`0755` is 493).
+            (
+                "obelisk:\n  release: { name: 123 }\n",
+                "`obelisk.release.name` must be a string, not `123` (quote it)".to_owned(),
+            ),
+            (
+                "obelisk:\n  release: { namespace: true }\n",
+                "`obelisk.release.namespace` must be a string, not `true` (quote it)".to_owned(),
+            ),
+        ] {
+            let dir = base(&[("prod.yaml", bad)]);
+            let error = report(&dir, &["prod"], &["app"]).unwrap_err().to_string();
+            assert_eq!(error, format!(".obelisk-k8s/prod.yaml: {why}"), "{bad:?}");
+        }
+        let dir = base(&[("prod.yaml", "obelisk:\n  release: { name: \"123\" }\n")]);
+        assert_eq!(case_releases(&dir)[0].1.name.as_deref(), Some("123"));
     }
 
     #[test]

@@ -38,11 +38,16 @@ ip-allocator.
 - `obelisk-k8s template values [-t <target>]... [-u <unit>]...`: the merged values each selected unit
   gets on each selected target: its found config files deep-merged in merge order (maps key by key;
   lists, scalars and `null` replace), with the tool's `obelisk: { repo, target, unit }` block on top.
-  `obelisk:` is reserved (a config file that sets it is an error). SSM refs aren't resolved yet.
+  `obelisk:` is reserved: a config file may only set `obelisk.release.{name, namespace}`, as strings
+  (parsed and kept per file, not used yet, and not in the output), and anything else under it is an
+  error. SSM refs aren't resolved yet.
   Quoted strings stay as written; plain scalars come out parsed, the YAML 1.1 way where it matters
   (`0755` is `493`), with known limits listed in `config/values.rs`. Same selection as
   `config repo paths`; several cases print as a YAML stream, each under a `# [ target=…, unit=… ]`
   comment. Takes `--repo` too.
+- Targets and units may have `release: { name, namespace }` (both optional, interpolated): parsed, not
+  used yet. They'll be where a unit's Helm release name and namespace can come from, along with config
+  files and generators, with every given value required to agree.
 - `config repo …` works on the repo in the current directory, or with `--repo <name>`, on the one with
   that name in the global `repos.yaml` (paths are then shown under it, so they work from anywhere).
 - `--help` groups options under Core, Extra and Special headings (as obeliskd does).

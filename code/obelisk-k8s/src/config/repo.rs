@@ -3,8 +3,8 @@
 //! ```text
 //! .obelisk-k8s/
 //!   repo.yaml                 repo: { name, helmRepos, configPaths }
-//!   targets/<dir>/target.yaml target: { name, cluster, configPaths }
-//!   units/<dir>/unit.yaml     unit: { name, configPaths, targets }
+//!   targets/<dir>/target.yaml target: { name, cluster, configPaths, release: { name, namespace } }
+//!   units/<dir>/unit.yaml     unit: { name, configPaths, targets, release: { name, namespace } }
 //! ```
 //!
 //! A target's or unit's name defaults to its directory's name. `null` and missing mean the same thing
@@ -50,6 +50,7 @@ pub struct Target {
     /// The name of a cluster in the global config (not checked yet).
     pub cluster: String,
     pub config_paths: Vec<InterpString>,
+    pub release: Release,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,6 +60,17 @@ pub struct Unit {
     pub file: PathBuf,
     pub config_paths: Vec<InterpString>,
     pub targets: UnitTargets,
+    pub release: Release,
+}
+
+/// What a target or unit says about the Helm release its units become: `release: { name, namespace }`,
+/// both optional and interpolated. Like every value in these files, a plain scalar is read as its text
+/// (`name: 123` is `"123"`). Parsed, not used yet.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Release {
+    pub name: Option<InterpString>,
+    pub namespace: Option<InterpString>,
 }
 
 /// Which targets a unit deploys to.
@@ -96,6 +108,7 @@ impl RepoConfig {
                 name: name_or_dir(&entry, target.name)?,
                 config_paths: check_config_paths(&entry.file, target.config_paths)?,
                 cluster: target.cluster,
+                release: target.release.unwrap_or_default(),
                 file: entry.file,
             });
         }
@@ -111,6 +124,7 @@ impl RepoConfig {
                 name: name_or_dir(&entry, unit.name)?,
                 config_paths: check_config_paths(&entry.file, unit.config_paths)?,
                 targets: check_unit_targets(&entry.file, unit.targets, &targets)?,
+                release: unit.release.unwrap_or_default(),
                 file: entry.file,
             });
         }
@@ -223,6 +237,7 @@ struct TargetSection {
     name: Option<Spanned<String>>,
     cluster: String,
     config_paths: Option<Vec<Spanned<InterpString>>>,
+    release: Option<Release>,
 }
 
 #[derive(Deserialize)]
@@ -237,6 +252,7 @@ struct UnitSection {
     name: Option<Spanned<String>>,
     config_paths: Option<Vec<Spanned<InterpString>>>,
     targets: Option<Vec<Spanned<String>>>,
+    release: Option<Release>,
 }
 
 /// Every config path must start with `./` (it resolves from `.obelisk-k8s/`).
@@ -359,6 +375,72 @@ mod tests {
             Path::new(".obelisk-k8s/units/db/unit.yaml")
         );
         assert_eq!(repo.warnings, Vec::<String>::new());
+    }
+
+    #[test]
+    fn parses_optional_release_fields() {
+        let repo = base()
+            .file(
+                "targets/prod/target.yaml",
+                "target:\n  cluster: c\n  release:\n    namespace: \"mc-${{obelisk:target}}\"\n",
+            )
+            .file(
+                "units/app/unit.yaml",
+                "unit:\n  release: { name: app, namespace: null }\n",
+            )
+            .file("units/other/unit.yaml", "unit: {}\n")
+            .load()
+            .unwrap();
+        let ns = repo.targets[0].release.namespace.as_ref().unwrap();
+        assert_eq!(ns.raw(), "mc-${{obelisk:target}}");
+        assert_eq!(repo.targets[0].release.name, None);
+        assert_eq!(repo.units[0].release.name.as_ref().unwrap().raw(), "app");
+        assert_eq!(repo.units[0].release.namespace, None);
+        assert_eq!(repo.units[1].release, Release::default());
+
+        let error = base()
+            .file("units/app/unit.yaml", "unit:\n  release: { nmae: app }\n")
+            .error();
+        assert!(error.contains("nmae"), "{error}");
+        let error = base()
+            .file(
+                "targets/t/target.yaml",
+                "target:\n  cluster: c\n  release: { nmaespace: x }\n",
+            )
+            .error();
+        assert!(error.contains("nmaespace"), "{error}");
+        let error = base()
+            .file(
+                "units/app/unit.yaml",
+                "unit:\n  release: { name: \"${{obelisk:untis}}\" }\n",
+            )
+            .error();
+        assert!(error.contains("unknown var `obelisk:untis`"), "{error}");
+    }
+
+    #[test]
+    fn an_empty_release_and_plain_scalars() {
+        let repo = base()
+            .file(
+                "targets/a/target.yaml",
+                "target:\n  cluster: c\n  release: null\n",
+            )
+            .file(
+                "targets/b/target.yaml",
+                "target:\n  cluster: c\n  release: {}\n",
+            )
+            .file(
+                "units/app/unit.yaml",
+                "unit:\n  release: { name: 123, namespace: 0755 }\n",
+            )
+            .load()
+            .unwrap();
+        assert_eq!(repo.targets[0].release, Release::default());
+        assert_eq!(repo.targets[1].release, Release::default());
+        // Like every value in these files, a plain scalar is read as its text.
+        let release = &repo.units[0].release;
+        assert_eq!(release.name.as_ref().unwrap().raw(), "123");
+        assert_eq!(release.namespace.as_ref().unwrap().raw(), "0755");
     }
 
     #[test]

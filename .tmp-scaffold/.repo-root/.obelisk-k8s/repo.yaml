@@ -3,26 +3,26 @@ repo:
   name: "repo-1"
   helmRepos:
     ex1: https://abc.com/helm
-  configPaths: # all `configPaths` in all places are `String[]`, must start with `./`, and resolve from the repos `.obelisk-k8s/` dir
+  configPaths:
     - "./config/.global/values.yaml"
     - "./config/.global/${{obelisk:target}}.values.yaml"
     - "./config/${{obelisk:unit}}/values.yaml"
     - "./config/${{obelisk:unit}}/${{obelisk:target}}.values.yaml"
-
-# TODO (KR) : what is the right order for `configPaths` to merge between `repo.yaml`, `targets/*.yaml`, and `units/*.yaml`?
-#           : Initial thought would be that itd be really nice to be able to detect the `${{obelisk:...}}` in each path,
-#           : and use those to bucket.
-#           : so, high level priority (lowest->highest) is:
-#           : - repo
-#           : - target
-#           : - unit
-#           : - target+unit
-#           : then, granular priority would be (lowest->highest): (rough guess, if this seems sensible)
-#           : - `repo.yaml` (no interpolation)
-#           : - `repo.yaml` (interpolates `target`)
-#           : - `targets/*/target.yaml` (no interpolation)
-#           : - `repo.yaml` (interpolates `unit`)
-#           : - `units/*/unit.yaml` (no interpolation)
-#           : - `repo.yaml` (interpolates `target+unit`)
-#           : - `targets/*/target.yaml` (interpolates `unit`)
-#           : - `units/*/unit.yaml` (interpolates `target`)
+#   generators:
+#     - type: "gotmpl"
+#       path: "./config/.global/generate-values.yaml.gotmpl"
+#     - type: "gotmpl"
+#       path: "./config/.global/${{obelisk:target}}.generate-values.yaml.gotmpl"
+#     - type: "gotmpl"
+#       path: "./config/${{obelisk:unit}}/generate-values.yaml.gotmpl"
+#     - type: "gotmpl"
+#       path: "./config/${{obelisk:unit}}/${{obelisk:target}}.generate-values.yaml.gotmpl"
+#   templates:
+#     - type: "gotmpl"
+#       path: "./config/.global/template.yaml.gotmpl"
+#     - type: "gotmpl"
+#       path: "./config/.global/${{obelisk:target}}.template.yaml.gotmpl"
+#     - type: "gotmpl"
+#       path: "./config/${{obelisk:unit}}/template.yaml.gotmpl"
+#     - type: "gotmpl"
+#       path: "./config/${{obelisk:unit}}/${{obelisk:target}}.template.yaml.gotmpl"
