@@ -53,11 +53,22 @@ pub fn read_file<T: DeserializeOwned>(path: &Path, display: &Path) -> Result<T, 
 ///
 /// As [`read_file`].
 pub fn read_values(path: &Path, display: &Path) -> Result<serde_json::Value, ObeliskK8sError> {
-    read_with(
-        path,
-        display,
-        serde_saphyr::options! { legacy_octal_numbers: true },
-    )
+    parse_values(&read_text(path, display)?, display)
+}
+
+/// How values are read: see [`read_values`].
+fn values_options() -> serde_saphyr::Options {
+    serde_saphyr::options! { legacy_octal_numbers: true }
+}
+
+/// Parses `text` (shown as `display`) like a values file: see [`read_values`].
+///
+/// # Errors
+///
+/// [`ObeliskK8sError::Yaml`] if it isn't valid YAML.
+pub fn parse_values(text: &str, display: &Path) -> Result<serde_json::Value, ObeliskK8sError> {
+    serde_saphyr::from_str_with_options(text, values_options())
+        .map_err(|error| yaml_error(&error, display))
 }
 
 fn read_with<T: DeserializeOwned>(
@@ -65,11 +76,15 @@ fn read_with<T: DeserializeOwned>(
     display: &Path,
     options: serde_saphyr::Options,
 ) -> Result<T, ObeliskK8sError> {
-    let text = std::fs::read_to_string(path).map_err(|source| ObeliskK8sError::Io {
+    serde_saphyr::from_str_with_options(&read_text(path, display)?, options)
+        .map_err(|error| yaml_error(&error, display))
+}
+
+fn read_text(path: &Path, display: &Path) -> Result<String, ObeliskK8sError> {
+    std::fs::read_to_string(path).map_err(|source| ObeliskK8sError::Io {
         path: display.to_owned(),
         source,
-    })?;
-    serde_saphyr::from_str_with_options(&text, options).map_err(|error| yaml_error(&error, display))
+    })
 }
 
 fn yaml_error(error: &serde_saphyr::Error, display: &Path) -> ObeliskK8sError {
@@ -100,11 +115,8 @@ pub fn parse_values_stream(
     text: &str,
     display: &Path,
 ) -> Result<Vec<serde_json::Value>, ObeliskK8sError> {
-    serde_saphyr::from_str_multiple_with_options(
-        text,
-        serde_saphyr::options! { legacy_octal_numbers: true },
-    )
-    .map_err(|error| yaml_error(&error, display))
+    serde_saphyr::from_str_multiple_with_options(text, values_options())
+        .map_err(|error| yaml_error(&error, display))
 }
 
 /// `value` as YAML. `display` names what it is, for the error.

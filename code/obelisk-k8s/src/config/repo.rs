@@ -3,7 +3,7 @@
 //! ```text
 //! .obelisk-k8s/
 //!   repo.yaml                 repo: { name, helmRepos, configPaths, generators, templates }
-//!   targets/<dir>/target.yaml target: { name, cluster, configPaths, generators, templates, release: { name, namespace }, version }
+//!   targets/<dir>/target.yaml target: { name, cluster, configPaths, generators, templates, release: { name, namespace }, version, ephemeral }
 //!   units/<dir>/unit.yaml     unit: { name, configPaths, generators, templates, targets, release: { name, namespace }, version }
 //! ```
 //!
@@ -62,6 +62,9 @@ pub struct Target {
     /// The version its units' Helm releases get (`obelisk.version`), interpolated. Parsed here, agreed
     /// on after generation.
     pub version: Option<InterpString>,
+    /// Whether it's a stack that runs many times side by side, each copy named on the command line
+    /// (`--ephemeral-name`). Missing or null means no.
+    pub ephemeral: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,6 +149,7 @@ impl RepoConfig {
                 cluster: target.cluster,
                 release: target.release.unwrap_or_default(),
                 version: target.version,
+                ephemeral: target.ephemeral.unwrap_or(false),
                 file: entry.file,
             });
         }
@@ -212,6 +216,9 @@ impl fmt::Display for RepoConfig {
         for target in &self.targets {
             writeln!(f, "  {}:  ({})", target.name, target.file.display())?;
             writeln!(f, "    cluster: {}", target.cluster)?;
+            if target.ephemeral {
+                writeln!(f, "    ephemeral: yes")?;
+            }
             write_config_paths(f, "    ", &target.config_paths)?;
         }
 
@@ -285,6 +292,7 @@ struct TargetSection {
     templates: Option<Vec<RenderFileIn>>,
     release: Option<Release>,
     version: Option<InterpString>,
+    ephemeral: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -568,6 +576,42 @@ mod tests {
         assert!(e.contains("extra"), "{e}");
         let e = error("unit:\n  generators: [{ path: ./g }]\n");
         assert!(e.contains("type"), "{e}");
+    }
+
+    #[test]
+    fn ephemeral_defaults_to_false() {
+        let repo = Repo::new()
+            .file("repo.yaml", "repo:\n  name: r\n")
+            .file("targets/a/target.yaml", "target:\n  cluster: c\n")
+            .file(
+                "targets/b/target.yaml",
+                "target:\n  cluster: c\n  ephemeral: null\n",
+            )
+            .file(
+                "targets/c/target.yaml",
+                "target:\n  cluster: c\n  ephemeral: false\n",
+            )
+            .file(
+                "targets/d/target.yaml",
+                "target:\n  cluster: c\n  ephemeral: true\n",
+            )
+            .load()
+            .unwrap();
+        let ephemeral: Vec<bool> = repo.targets.iter().map(|t| t.ephemeral).collect();
+        assert_eq!(ephemeral, [false, false, false, true]);
+        assert!(repo.to_string().contains(
+            "  d:  (.obelisk-k8s/targets/d/target.yaml)\n    cluster: c\n    ephemeral: yes\n"
+        ));
+        assert!(
+            Repo::new()
+                .file("repo.yaml", "repo:\n  name: r\n")
+                .file(
+                    "targets/a/target.yaml",
+                    "target:\n  cluster: c\n  ephemeral: maybe\n"
+                )
+                .load()
+                .is_err()
+        );
     }
 
     #[test]

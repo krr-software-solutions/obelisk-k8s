@@ -4,11 +4,12 @@
 use std::path::{Path, PathBuf};
 
 use obelisk_k8s::ObeliskK8sError;
+use obelisk_k8s::config::ephemeral::{Ephemeral, EphemeralValues};
 use obelisk_k8s::config::global::edit::{self as global_edit, Change};
 use obelisk_k8s::config::global::{GLOBAL_ROOT_ENV, GlobalConfig, default_global_root, tilde};
 use obelisk_k8s::config::repo::RepoConfig;
 
-use crate::{ClusterCommand, GlobalRepoCommand};
+use crate::{ClusterCommand, EphemeralArgs, GlobalRepoCommand, TemplateCommand};
 
 fn cwd() -> Result<PathBuf, ObeliskK8sError> {
     std::env::current_dir().map_err(|source| ObeliskK8sError::Io {
@@ -159,49 +160,50 @@ pub fn run_config_repo_paths(
     Ok(())
 }
 
-pub fn run_template_values(
+pub fn run_template(
     repo: Option<&str>,
     global_root_arg: Option<PathBuf>,
-    targets: &[String],
-    units: &[String],
+    command: &TemplateCommand,
 ) -> Result<(), ObeliskK8sError> {
+    let args = command.args();
     let (repo_root, shown_root) = repo_root(repo, global_root_arg)?;
     let config = load_repo_config(&repo_root)?;
-    let selection = config.select(targets, units)?;
-    let report = config.values_report(&repo_root, &selection, shown_root.as_deref())?;
+    let selection = config.select(&args.targets, &args.units)?;
+    let ephemeral = ephemeral(&args.ephemeral)?;
+    let (shown_root, ephemeral) = (shown_root.as_deref(), ephemeral.as_ref());
+    let report = match command {
+        TemplateCommand::Values(_) => config
+            .values_report(&repo_root, &selection, shown_root, ephemeral)?
+            .to_string(),
+        TemplateCommand::GeneratedValues(_) => config
+            .generated_values_report(&repo_root, &selection, shown_root, ephemeral)?
+            .to_string(),
+        TemplateCommand::Manifests(_) => config
+            .manifests_report(&repo_root, &selection, shown_root, ephemeral)?
+            .to_string(),
+    };
     // anstream drops the colors when stdout isn't a terminal, or with NO_COLOR set.
     anstream::print!("{report}");
     Ok(())
 }
 
-pub fn run_template_generated_values(
-    repo: Option<&str>,
-    global_root_arg: Option<PathBuf>,
-    targets: &[String],
-    units: &[String],
-) -> Result<(), ObeliskK8sError> {
-    let (repo_root, shown_root) = repo_root(repo, global_root_arg)?;
-    let config = load_repo_config(&repo_root)?;
-    let selection = config.select(targets, units)?;
-    let report = config.generated_values_report(&repo_root, &selection, shown_root.as_deref())?;
-    // anstream drops the colors when stdout isn't a terminal, or with NO_COLOR set.
-    anstream::print!("{report}");
-    Ok(())
-}
-
-pub fn run_template_manifests(
-    repo: Option<&str>,
-    global_root_arg: Option<PathBuf>,
-    targets: &[String],
-    units: &[String],
-) -> Result<(), ObeliskK8sError> {
-    let (repo_root, shown_root) = repo_root(repo, global_root_arg)?;
-    let config = load_repo_config(&repo_root)?;
-    let selection = config.select(targets, units)?;
-    let report = config.manifests_report(&repo_root, &selection, shown_root.as_deref())?;
-    // anstream drops the colors when stdout isn't a terminal, or with NO_COLOR set.
-    anstream::print!("{report}");
-    Ok(())
+/// The ephemeral copy the flags name, if any.
+fn ephemeral(args: &EphemeralArgs) -> Result<Option<Ephemeral>, ObeliskK8sError> {
+    let Some(name) = &args.name else {
+        return Ok(None);
+    };
+    let values = match (&args.values, &args.values_path) {
+        (Some(text), _) => EphemeralValues::Inline(text.clone()),
+        (None, Some(path)) => EphemeralValues::File(path.clone()),
+        // clap already requires one with the name.
+        (None, None) => {
+            return Err(ObeliskK8sError::Usage(
+                "`--ephemeral-name` needs `--ephemeral-values` or `--ephemeral-values-path`"
+                    .to_owned(),
+            ));
+        }
+    };
+    Ephemeral::new(name.clone(), values).map(Some)
 }
 
 #[cfg(test)]

@@ -37,7 +37,7 @@ ip-allocator.
   back if the result won't load.
 - `obelisk-k8s template values [-t <target>]... [-u <unit>]...`: the merged values each selected unit
   gets on each selected target: its found config files deep-merged in merge order (maps key by key;
-  lists, scalars and `null` replace), with the tool's `obelisk: { repo, target, unit }` block on top.
+  lists, scalars and `null` replace), with the tool's `obelisk: { repo, target, unit, ephemeral, git }` block on top.
   `obelisk:` is reserved: a config file may only set `obelisk.release.{name, namespace}`, as strings
   (parsed and kept per file, not used yet, and not in the output), and anything else under it is an
   error. SSM refs aren't resolved yet.
@@ -50,6 +50,15 @@ ip-allocator.
   null without tags; `dirty` null if `git status` can't say). It's whichever repo the repo root is in,
   so a repo root that's a subdirectory gets the enclosing repo's HEAD and dirt. Any tag counts: with
   several on HEAD, an annotated one wins, then the first by name.
+- **Ephemeral targets:** a target with `ephemeral: true` (missing or `null`: false) is a stack that
+  runs many times side by side. Every `template` command on one needs `--ephemeral-name <NAME>` (a DNS
+  label) and exactly one of `--ephemeral-values <YAML>` / `--ephemeral-values-path <PATH>`; that's an
+  error to leave out even when the target is only selected by default (no `-t`), and giving them when
+  none of the targets being rendered is ephemeral is an error too (a target counts if a selected
+  unit renders on it). `obelisk.ephemeral` is the name (`null` on other
+  targets), and the values are the last config layer, merged over every config file under the same
+  rules (so they can set `obelisk.version` too, and it shows up as `--ephemeral-values` or the path).
+  diff/apply will take the same flags.
 - `obelisk.version`: after the generators, exactly one distinct version is required for each unit on
   each target, from any of: `version` in its target or unit (interpolated), or `obelisk.version` in a
   config file or generator. It's added to the generated values, and templates' charts get it as

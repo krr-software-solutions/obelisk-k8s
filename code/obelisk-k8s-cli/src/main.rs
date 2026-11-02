@@ -174,34 +174,65 @@ impl From<ClusterAdd> for NewCluster {
 enum TemplateCommand {
     /// The merged values each unit gets on each target: its config files, deep-merged in merge order,
     /// with the `obelisk:` block on top (SSM refs not resolved)
-    Values {
-        /// Only these targets (repeatable; default: all)
-        #[arg(short, long = "target", value_name = "TARGET")]
-        targets: Vec<String>,
-        /// Only these units (repeatable; default: all)
-        #[arg(short, long = "unit", value_name = "UNIT")]
-        units: Vec<String>,
-    },
+    Values(TemplateArgs),
     /// The values after each unit's generators: its merged values, with every generator's output
     /// deep-merged on top (generators are Go templates, rendered by `helm`)
-    GeneratedValues {
-        /// Only these targets (repeatable; default: all)
-        #[arg(short, long = "target", value_name = "TARGET")]
-        targets: Vec<String>,
-        /// Only these units (repeatable; default: all)
-        #[arg(short, long = "unit", value_name = "UNIT")]
-        units: Vec<String>,
-    },
+    GeneratedValues(TemplateArgs),
     /// The k8s resources each unit renders on each target: its templates, rendered with its generated
     /// values and joined in merge order (templates are Go templates, rendered by `helm`)
-    Manifests {
-        /// Only these targets (repeatable; default: all)
-        #[arg(short, long = "target", value_name = "TARGET")]
-        targets: Vec<String>,
-        /// Only these units (repeatable; default: all)
-        #[arg(short, long = "unit", value_name = "UNIT")]
-        units: Vec<String>,
-    },
+    Manifests(TemplateArgs),
+}
+
+impl TemplateCommand {
+    fn args(&self) -> &TemplateArgs {
+        match self {
+            Self::Values(args) | Self::GeneratedValues(args) | Self::Manifests(args) => args,
+        }
+    }
+}
+
+#[derive(Debug, Args)]
+struct TemplateArgs {
+    /// Only these targets (repeatable; default: all)
+    #[arg(short, long = "target", value_name = "TARGET")]
+    targets: Vec<String>,
+    /// Only these units (repeatable; default: all)
+    #[arg(short, long = "unit", value_name = "UNIT")]
+    units: Vec<String>,
+    #[command(flatten)]
+    ephemeral: EphemeralArgs,
+}
+
+/// An ephemeral target's copy: needed exactly when a selected target is ephemeral.
+#[derive(Debug, Args)]
+struct EphemeralArgs {
+    /// Which copy of an ephemeral target to render (`obelisk.ephemeral`; a DNS label)
+    #[arg(
+        id = "ephemeral_name",
+        long = "ephemeral-name",
+        value_name = "NAME",
+        requires = "ephemeral_values_from"
+    )]
+    name: Option<String>,
+    /// The copy's values, as YAML: merged over every config file
+    #[arg(
+        id = "ephemeral_values",
+        long = "ephemeral-values",
+        value_name = "YAML",
+        group = "ephemeral_values_from",
+        requires = "ephemeral_name"
+    )]
+    values: Option<String>,
+    /// The copy's values, from a YAML file (relative to the current directory): merged over every
+    /// config file
+    #[arg(
+        id = "ephemeral_values_path",
+        long = "ephemeral-values-path",
+        value_name = "PATH",
+        group = "ephemeral_values_from",
+        requires = "ephemeral_name"
+    )]
+    values_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -327,23 +358,9 @@ fn main_impl() -> Result<(), ObeliskK8sError> {
             &units,
             explain,
         ),
-        Command::Template {
-            repo,
-            command: TemplateCommand::Values { targets, units },
-        } => commands::run_template_values(repo.as_deref(), cli.global_root, &targets, &units),
-        Command::Template {
-            repo,
-            command: TemplateCommand::Manifests { targets, units },
-        } => commands::run_template_manifests(repo.as_deref(), cli.global_root, &targets, &units),
-        Command::Template {
-            repo,
-            command: TemplateCommand::GeneratedValues { targets, units },
-        } => commands::run_template_generated_values(
-            repo.as_deref(),
-            cli.global_root,
-            &targets,
-            &units,
-        ),
+        Command::Template { repo, command } => {
+            commands::run_template(repo.as_deref(), cli.global_root, &command)
+        }
         Command::Completions { shell } => {
             run_completions(shell);
             Ok(())
@@ -368,6 +385,32 @@ mod tests {
     #[test]
     fn the_cli_is_well_formed() {
         command().debug_assert();
+    }
+
+    #[test]
+    fn an_ephemeral_name_comes_with_one_kind_of_values() {
+        let parse = |args: &[&str]| {
+            let args = [BIN, "template", "values"].iter().chain(args);
+            command().try_get_matches_from(args).map(|_| ())
+        };
+        assert!(parse(&[]).is_ok());
+        assert!(parse(&["--ephemeral-name", "a", "--ephemeral-values", "{}"]).is_ok());
+        assert!(parse(&["--ephemeral-name", "a", "--ephemeral-values-path", "v.yaml"]).is_ok());
+        for bad in [
+            &["--ephemeral-name", "a"][..],
+            &["--ephemeral-values", "{}"],
+            &["--ephemeral-values-path", "v.yaml"],
+            &[
+                "--ephemeral-name",
+                "a",
+                "--ephemeral-values",
+                "{}",
+                "--ephemeral-values-path",
+                "v.yaml",
+            ],
+        ] {
+            assert!(parse(bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]

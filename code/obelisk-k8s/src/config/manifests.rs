@@ -16,11 +16,12 @@ use std::fmt;
 use std::path::Path;
 
 use crate::ObeliskK8sError;
+use crate::config::ephemeral::{Ephemeral, RunInputs};
 use crate::config::paths::{Selection, write_yaml_cases};
 use crate::config::repo::{RepoConfig, Target, Unit};
 use crate::config::values::OBELISK_KEY;
 use crate::config::values::shown_under;
-use crate::{git, helm};
+use crate::helm;
 
 /// What `.Release.Namespace` is while a template renders, for now.
 const TEMPLATE_NAMESPACE: &str = "default";
@@ -55,12 +56,13 @@ impl RepoConfig {
         repo_root: &Path,
         selection: &Selection<'a>,
         shown_root: Option<&Path>,
+        ephemeral: Option<&Ephemeral>,
     ) -> Result<ManifestsReport<'a>, ObeliskK8sError> {
-        let git = git::facts(repo_root);
+        let inputs = RunInputs::new(repo_root, selection, ephemeral)?;
         let cases = selection
             .cases
             .iter()
-            .map(|(target, unit)| self.manifests_for(repo_root, shown_root, target, unit, &git))
+            .map(|(target, unit)| self.manifests_for(repo_root, shown_root, target, unit, &inputs))
             .collect::<Result<_, _>>()?;
         Ok(ManifestsReport {
             cases,
@@ -74,14 +76,14 @@ impl RepoConfig {
         shown_root: Option<&Path>,
         target: &'a Target,
         unit: &'a Unit,
-        git: &serde_json::Value,
+        inputs: &RunInputs<'_>,
     ) -> Result<ManifestsCase<'a>, ObeliskK8sError> {
         let templates = self.resolve_templates(repo_root, target, unit)?;
         let mut manifests = String::new();
         // Nothing to render: skip the generators too (each is a `helm` run).
         if templates.iter().any(|p| p.found) {
             helm::check_release_name(&unit.name, "unit", "templates")?;
-            let generated = self.generated_for(repo_root, shown_root, target, unit, git)?;
+            let generated = self.generated_for(repo_root, shown_root, target, unit, inputs)?;
             let version = generated.values[OBELISK_KEY]["version"]
                 .as_str()
                 .unwrap_or_default();
@@ -160,7 +162,7 @@ mod tests {
         let targets: Vec<String> = targets.iter().map(|t| (*t).to_owned()).collect();
         let selection = config.select(&targets, &["app".to_owned()]).unwrap();
         let text = config
-            .manifests_report(dir.path(), &selection, None)?
+            .manifests_report(dir.path(), &selection, None, None)?
             .to_string();
         Ok(anstream::adapter::strip_str(&text).to_string())
     }
@@ -306,7 +308,7 @@ mod tests {
             .select(&["dev".to_owned()], std::slice::from_ref(&long))
             .unwrap();
         let error = config
-            .manifests_report(dir.path(), &selection, None)
+            .manifests_report(dir.path(), &selection, None, None)
             .unwrap_err();
         assert!(
             error.to_string().contains("has templates") && error.to_string().contains("at most 53"),
