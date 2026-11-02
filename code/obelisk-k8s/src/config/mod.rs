@@ -185,6 +185,10 @@ pub(crate) mod test_support {
         dir
     }
 
+    /// A target on cluster `c` whose units' release is the unit's name, in a namespace named after
+    /// the target.
+    pub(crate) const TARGET: &str = "target:\n  cluster: c\n  release: { name: \"${{obelisk:unit}}\", namespace: \"${{obelisk:target}}\" }\n";
+
     /// For tests that run `helm`: without it they fail, unless `OBELISK_TEST_SKIP_HELM=1` says to skip
     /// them (then this is `false`, and the test returns early).
     pub(crate) fn helm_installed() -> bool {

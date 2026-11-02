@@ -4,8 +4,8 @@
 //! Maps merge key by key, recursively; anything else (lists, scalars, `null`) replaces what was there.
 //! A file that's empty or `null` adds nothing. `obelisk:` is the tool's: a file may only set
 //! `obelisk.release.{name, namespace}` and `obelisk.version`, as strings (parsed into
-//! [`ValuesCase::sets`] and left out of the values: the version goes back in once it's agreed, after
-//! the generators), and anything else under it is an error. `ref+awsssm` refs aren't resolved yet.
+//! [`ValuesCase::sets`] and left out of the values: the version and the release go back in once
+//! they're agreed, after the generators), and anything else under it is an error. `ref+awsssm` refs aren't resolved yet.
 //!
 //! Values go through a generic tree, so quoted strings stay strings (`"0755"`, `"yes"`, `"1e3"` come out
 //! quoted) and block scalars keep their text, but plain scalars come out in their parsed form:
@@ -42,9 +42,22 @@ pub struct ValuesCase<'a> {
     /// `values` as YAML.
     pub yaml: String,
     /// What each file (relative to the repo root, or the ephemeral values as shown) set under
-    /// `obelisk:`, in merge order; files that set nothing are left out. The release name and namespace are parsed, not used yet; the version is
-    /// agreed on after the generators.
+    /// `obelisk:`, in merge order; files that set nothing are left out. The release and the version
+    /// are agreed on after the generators.
     pub sets: FileObelisks,
+    /// What the case agreed on, after the generators (`None` before them, in `template values`).
+    pub agreed: Option<Agreed>,
+}
+
+/// What a case agrees on after its generators: one value each, from wherever it's given.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Agreed {
+    /// `obelisk.release.name`: `.Release.Name`, and the Helm release.
+    pub release_name: String,
+    /// `obelisk.release.namespace`: `.Release.Namespace`, and where the release goes.
+    pub namespace: String,
+    /// `obelisk.version`: the chart's `version` and `appVersion`.
+    pub version: String,
 }
 
 /// What `template values` prints: a single case's values as plain YAML, or several as a YAML stream,
@@ -91,7 +104,7 @@ impl RepoConfig {
         inputs: &RunInputs<'_>,
     ) -> Result<ValuesCase<'a>, ObeliskK8sError> {
         let (values, sets) = self.config_values(repo_root, shown_root, target, unit, inputs)?;
-        ValuesCase::new(target, unit, values, sets)
+        ValuesCase::new(target, unit, values, sets, None)
     }
 
     /// The `obelisk:` block, then `unit`'s config files on `target` merged, then the ephemeral values
@@ -171,6 +184,7 @@ impl<'a> ValuesCase<'a> {
         unit: &'a Unit,
         values: Map<String, Value>,
         sets: FileObelisks,
+        agreed: Option<Agreed>,
     ) -> Result<Self, ObeliskK8sError> {
         let yaml = values_yaml(&values, target, unit)?;
         Ok(Self {
@@ -179,6 +193,7 @@ impl<'a> ValuesCase<'a> {
             values,
             yaml,
             sets,
+            agreed,
         })
     }
 }

@@ -67,8 +67,9 @@ ip-allocator.
 - `obelisk-k8s template values [-t <target>]... [-u <unit>]...`: the merged values each selected unit
   gets on each selected target: its found config files deep-merged in merge order (maps key by key;
   lists, scalars and `null` replace), with the tool's `obelisk: { repo, target, unit, ephemeral, git }` block on top.
-  `obelisk:` is reserved: a config file may only set `obelisk.release.{name, namespace}`, as strings
-  (parsed and kept per file, not used yet, and not in the output), and anything else under it is an
+  `obelisk:` is reserved: a config file may only set `obelisk.release.{name, namespace}` and
+  `obelisk.version`, as strings (kept per file and left out of this output; they're agreed on after the
+  generators: see **Release** and `obelisk.version` below), and anything else under it is an
   error. SSM refs aren't resolved yet.
   Quoted strings stay as written; plain scalars come out parsed, the YAML 1.1 way where it matters
   (`0755` is `493`), with known limits listed in `config/values.rs`. Same selection as
@@ -99,8 +100,8 @@ ip-allocator.
   throwaway Helm chart with the generated values as `.Values`, joined in merge order as Helm prints
   them (each document under a `# Source:` comment naming the template; Helm orders the documents
   *within* one template by kind). A template may print any number of documents. No shared `define`s
-  across files for now (tentative). `.Release` is the unit / `default` until the release check
-  lands. Takes `--repo` too.
+  across files for now (tentative). `.Release.{Name, Namespace}` is the case's agreed release (see
+  below). Takes `--repo` too.
 - `obelisk-k8s template generated-values [-t …]… [-u …]…`: the merged values with each of the unit's
   generators deep-merged on top, in merge order. `generators:` (in `repo.yaml`, `target.yaml`,
   `unit.yaml`) lists `{ type: gotmpl, path }` like config paths (interpolated, missing files skipped).
@@ -109,9 +110,12 @@ ip-allocator.
   output must be one mapping or nothing, and may set `obelisk.release.{name, namespace}` like a config
   file. Takes `--repo` too. Each generator is its own `helm` run (targets × units × generators of them
   for a full run). A unit with generators needs a name Helm accepts as a release name (≤ 53 chars).
-- Targets and units may have `release: { name, namespace }` (both optional, interpolated): parsed, not
-  used yet. They'll be where a unit's Helm release name and namespace can come from, along with config
-  files and generators, with every given value required to agree.
+- **Release:** `obelisk.release.{name, namespace}` exists only to be `.Release.{Name, Namespace}` (and
+  the Helm release `apply` will install). Like the version, each must have exactly one distinct
+  value per unit on a target, from `release: { name, namespace }` in its target or unit
+  (interpolated) or `obelisk.release.*` in a config file or generator; none is an error, as is a
+  conflict. Both must be valid names; a release name at most 53 characters. Generators still render
+  with `.Release` as the unit / `default` (the release isn't agreed until after them).
 - `config repo …` works on the repo in the current directory, or with `--repo <name>`, on the one with
   that name in the global `repos.yaml` (paths are then shown under it, so they work from anywhere).
 - `--help` groups options under Core, Extra and Special headings (as obeliskd does).

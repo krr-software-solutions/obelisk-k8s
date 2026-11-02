@@ -100,7 +100,7 @@ pub enum RenderKind {
 
 /// What a target or unit says about the Helm release its units become: `release: { name, namespace }`,
 /// both optional and interpolated. Like every value in these files, a plain scalar is read as its text
-/// (`name: 123` is `"123"`). Parsed, not used yet.
+/// (`name: 123` is `"123"`). Agreed on, with config files and generators, after the generators.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Release {

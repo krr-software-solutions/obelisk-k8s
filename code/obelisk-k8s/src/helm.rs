@@ -7,22 +7,23 @@ use std::process::Command;
 use crate::ObeliskK8sError;
 
 /// Helm's limit on release names.
-const RELEASE_NAME_MAX: usize = 53;
+pub(crate) const RELEASE_NAME_MAX: usize = 53;
 
-/// `name` is what files will render as a Helm release named: Helm wants at most 53 characters. `kind`
-/// says what it names (e.g. `unit`), `what` what renders (e.g. `generators`).
+/// Whether Helm takes `name` as a release name, length-wise (at most [`RELEASE_NAME_MAX`]).
+#[must_use]
+pub(crate) fn fits_release_name(name: &str) -> bool {
+    name.len() <= RELEASE_NAME_MAX
+}
+
+/// `unit`'s generators render as a Helm release named after it, so its name must fit one.
 ///
 /// # Errors
 ///
 /// [`ObeliskK8sError::Usage`] if it's too long.
-pub(crate) fn check_release_name(
-    name: &str,
-    kind: &str,
-    what: &str,
-) -> Result<(), ObeliskK8sError> {
-    if name.len() > RELEASE_NAME_MAX {
+pub(crate) fn check_generator_release(unit: &str) -> Result<(), ObeliskK8sError> {
+    if !fits_release_name(unit) {
         return Err(ObeliskK8sError::Usage(format!(
-            "{kind} `{name}` has {what}, which render as a Helm release named after it, but Helm release names are at most {RELEASE_NAME_MAX} characters"
+            "unit `{unit}` has generators, which render as a Helm release named after it, but Helm release names are at most {RELEASE_NAME_MAX} characters"
         )));
     }
     Ok(())

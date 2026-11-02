@@ -4,8 +4,9 @@
 //! Templates are listed like config paths (`templates:` in `repo.yaml`, `target.yaml` and
 //! `unit.yaml`; interpolated; missing files skipped). Each is a Go template (`type: gotmpl`), rendered
 //! on its own by Helm through a throwaway chart, with the generated values as `.Values`, so a template
-//! can't use another one's `define`s. As in generators, `.Release.Name` is the unit and
-//! `.Release.Namespace` is `default` for now: use `.Values.obelisk`.
+//! can't use another one's `define`s. `.Release.Name` and `.Release.Namespace` are the case's agreed
+//! release (`obelisk.release.{name, namespace}`, which also need agreeing on before anything renders),
+//! and the chart's `version` and `appVersion` its agreed `obelisk.version`.
 //!
 //! What Helm prints is kept as is: documents separated by `---`, each under a `# Source:` comment naming
 //! the template file. A template may print any number of documents, or none (one that prints only a
@@ -19,12 +20,8 @@ use crate::ObeliskK8sError;
 use crate::config::ephemeral::{Ephemeral, RunInputs};
 use crate::config::paths::{Selection, write_yaml_cases};
 use crate::config::repo::{RepoConfig, Target, Unit};
-use crate::config::values::OBELISK_KEY;
 use crate::config::values::shown_under;
 use crate::helm;
-
-/// What `.Release.Namespace` is while a template renders, for now.
-const TEMPLATE_NAMESPACE: &str = "default";
 
 /// One (target, unit) case's rendered resources.
 #[derive(Debug)]
@@ -82,26 +79,24 @@ impl RepoConfig {
         let mut manifests = String::new();
         // Nothing to render: skip the generators too (each is a `helm` run).
         if templates.iter().any(|p| p.found) {
-            helm::check_release_name(&unit.name, "unit", "templates")?;
-            let generated = self.generated_for(repo_root, shown_root, target, unit, inputs)?;
-            let version = generated.values[OBELISK_KEY]["version"]
-                .as_str()
-                .unwrap_or_default();
+            let (generated, agreed) =
+                self.generated_for(repo_root, shown_root, target, unit, inputs)?;
+            let version = &agreed.version;
             if !helm::is_chart_version(version) {
                 return Err(ObeliskK8sError::Usage(format!(
                     "version `{version}` for unit `{}` on target `{}` isn't SemVer, which Helm needs for a chart version: e.g. `0.0.0-{version}`, or a tag like `v1.2.3`",
                     unit.name, target.name
                 )));
             }
-            let values = generated.yaml;
+            let values = &generated.yaml;
             for path in templates.iter().filter(|p| p.found) {
                 let shown = shown_under(shown_root, &path.path);
                 let rendered = helm::render(
                     &repo_root.join(&path.path),
                     &shown,
-                    &values,
-                    &unit.name,
-                    TEMPLATE_NAMESPACE,
+                    values,
+                    &agreed.release_name,
+                    &agreed.namespace,
                     Some(version),
                 )?;
                 // A template that renders nothing still gets a newline from Helm.
@@ -132,8 +127,7 @@ impl fmt::Display for ManifestsReport<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::repo::REPO_CONFIG_DIR;
-    use crate::config::test_support::{helm_installed, write_repo};
+    use crate::config::test_support::{TARGET, helm_installed, write_repo};
 
     fn repo(extra: &[(&str, &str)]) -> tempfile::TempDir {
         let mut files = vec![
@@ -141,8 +135,8 @@ mod tests {
                 "repo.yaml",
                 "repo:\n  name: r\n  configPaths: [./values.yaml]\n  generators: [{ type: gotmpl, path: ./gen.gotmpl }]\n  templates:\n    - { type: gotmpl, path: ./all.gotmpl }\n    - { type: gotmpl, path: \"./${{obelisk:target}}.gotmpl\" }\n",
             ),
-            ("targets/prod/target.yaml", "target:\n  cluster: c\n"),
-            ("targets/dev/target.yaml", "target:\n  cluster: c\n"),
+            ("targets/prod/target.yaml", TARGET),
+            ("targets/dev/target.yaml", TARGET),
             (
                 "units/app/unit.yaml",
                 "unit:\n  version: 1.0.0\n  templates: [{ type: gotmpl, path: ./app.gotmpl }]\n",
@@ -222,7 +216,7 @@ mod tests {
             ),
             (
                 "targets/prod/target.yaml",
-                "target:\n  cluster: c\n  templates: [{ type: gotmpl, path: ./target.gotmpl }]\n",
+                "target:\n  cluster: c\n  templates: [{ type: gotmpl, path: ./target.gotmpl }]\n  release: { name: \"${{obelisk:unit}}\", namespace: \"${{obelisk:target}}\" }\n",
             ),
             (
                 "units/app/unit.yaml",
@@ -297,21 +291,22 @@ mod tests {
     }
 
     #[test]
-    fn a_unit_with_templates_needs_a_helm_sized_name() {
-        // Fails before `helm` would run.
-        let long = "a".repeat(54);
-        let dir = repo(&[("all.gotmpl", CONFIG_MAP)]);
-        let units = dir.path().join(REPO_CONFIG_DIR).join("units");
-        std::fs::rename(units.join("app"), units.join(&long)).unwrap();
-        let config = RepoConfig::load(dir.path()).unwrap();
-        let selection = config
-            .select(&["dev".to_owned()], std::slice::from_ref(&long))
-            .unwrap();
-        let error = config
-            .manifests_report(dir.path(), &selection, None, None)
-            .unwrap_err();
+    fn a_release_name_must_fit_helm() {
+        // The repo's generator renders first, so helm is needed to get to the check.
+        if !helm_installed() {
+            return;
+        }
+        let long = format!(
+            "target:\n  cluster: c\n  release: {{ name: {}, namespace: n }}\n",
+            "a".repeat(54)
+        );
+        let dir = repo(&[
+            ("targets/dev/target.yaml", &long),
+            ("all.gotmpl", CONFIG_MAP),
+        ]);
+        let error = manifests(&dir, &["dev"]).unwrap_err().to_string();
         assert!(
-            error.to_string().contains("has templates") && error.to_string().contains("at most 53"),
+            error.contains("is too long: Helm release names are at most 53 characters"),
             "{error}"
         );
     }
@@ -328,6 +323,22 @@ mod tests {
         let text = manifests(&dir, &["dev"]).unwrap();
         assert!(
             text.contains("  chart: \"1.0.0\"\n  app: \"1.0.0\"\n  values: \"1.0.0\"\n"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn templates_render_as_the_agreed_release() {
+        if !helm_installed() {
+            return;
+        }
+        let dir = repo(&[(
+            "all.gotmpl",
+            "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n  namespace: {{ .Release.Namespace }}\ndata:\n  release: {{ .Release.Name | quote }}\n",
+        )]);
+        let text = manifests(&dir, &["dev"]).unwrap();
+        assert!(
+            text.contains("  namespace: dev\ndata:\n  release: \"app\"\n"),
             "{text}"
         );
     }

@@ -13,9 +13,13 @@
 //! `obelisk.release.{name, namespace}` and `obelisk.version` under `obelisk:` (kept on
 //! [`ValuesCase::sets`], not in the values).
 //!
-//! After the generators, every version given for the case (its target's and unit's `version`, and
-//! `obelisk.version` in its config files and generators) must be one and the same; it's added to the
-//! values as `obelisk.version`.
+//! After the generators, the case must agree on one version, one release name and one release
+//! namespace: every value given (its target's and unit's `version` / `release.name` /
+//! `release.namespace`, and `obelisk.version` / `obelisk.release.{name, namespace}` in its config
+//! files and generators) must be the same, and there must be one of each. They're added to the
+//! values as `obelisk.version` and `obelisk.release.{name, namespace}`; templates get the release as
+//! `.Release.{Name, Namespace}`. A release name is a valid name of at most 53 characters (Helm's
+//! limit), a namespace one of at most 63.
 
 use std::path::{Path, PathBuf};
 
@@ -24,11 +28,13 @@ use serde_json::Value;
 use crate::ObeliskK8sError;
 use crate::config::ephemeral::{Ephemeral, RunInputs};
 use crate::config::paths::Selection;
-use crate::config::repo::{RepoConfig, Target, Unit};
+use crate::config::repo::{Release, RepoConfig, Target, Unit};
 use crate::config::values::{
-    FileObelisks, OBELISK_KEY, ValuesCase, ValuesReport, absorb, shown_under, values_yaml,
+    Agreed, FileObelisk, FileObelisks, OBELISK_KEY, ValuesCase, ValuesReport, absorb, shown_under,
+    values_yaml,
 };
-use crate::interp::InterpolationParams;
+use crate::config::{NAME_RULE, is_valid_name};
+use crate::interp::{InterpString, InterpolationParams};
 use crate::{helm, yaml};
 
 /// What `.Release.Namespace` is while a generator renders.
@@ -42,7 +48,9 @@ impl RepoConfig {
     ///
     /// Whatever building the config values fails with; [`ObeliskK8sError::Helm`] if a generator
     /// doesn't render; [`ObeliskK8sError::Config`] for an output that isn't one mapping, or sets
-    /// something under `obelisk:` other than `release`.
+    /// something under `obelisk:` other than `release.{name, namespace}` and `version`;
+    /// [`ObeliskK8sError::Usage`] if a case has no version, release name or release namespace, more
+    /// than one of any, or a release that isn't a valid name (or too long a release name).
     pub fn generated_values_report<'a>(
         &'a self,
         repo_root: &Path,
@@ -54,7 +62,10 @@ impl RepoConfig {
         let cases = selection
             .cases
             .iter()
-            .map(|(target, unit)| self.generated_for(repo_root, shown_root, target, unit, &inputs))
+            .map(|(target, unit)| {
+                self.generated_for(repo_root, shown_root, target, unit, &inputs)
+                    .map(|(case, _)| case)
+            })
             .collect::<Result<_, _>>()?;
         Ok(ValuesReport {
             cases,
@@ -62,6 +73,7 @@ impl RepoConfig {
         })
     }
 
+    /// One case's generated values, and what it agreed on.
     pub(crate) fn generated_for<'a>(
         &'a self,
         repo_root: &Path,
@@ -69,13 +81,13 @@ impl RepoConfig {
         target: &'a Target,
         unit: &'a Unit,
         inputs: &RunInputs<'_>,
-    ) -> Result<ValuesCase<'a>, ObeliskK8sError> {
+    ) -> Result<(ValuesCase<'a>, Agreed), ObeliskK8sError> {
         let (mut values, mut sets) =
             self.config_values(repo_root, shown_root, target, unit, inputs)?;
         let input = values_yaml(&values, target, unit)?;
         let generators = self.resolve_generators(repo_root, target, unit)?;
         if generators.iter().any(|p| p.found) {
-            helm::check_release_name(&unit.name, "unit", "generators")?;
+            helm::check_generator_release(&unit.name)?;
         }
         for path in generators.iter().filter(|p| p.found) {
             let shown = shown_under(shown_root, &path.path);
@@ -109,17 +121,92 @@ impl RepoConfig {
                 )?;
             }
         }
-        let version = agree_on_version(target, unit, &sets)?;
+        let agreed = Agreed {
+            version: agree(Field::Version, target, unit, &sets)?,
+            release_name: agree(Field::ReleaseName, target, unit, &sets)?,
+            namespace: agree(Field::ReleaseNamespace, target, unit, &sets)?,
+        };
+        check_release(&agreed, target, unit)?;
         if let Some(Value::Object(obelisk)) = values.get_mut(OBELISK_KEY) {
-            obelisk.insert("version".to_owned(), Value::String(version));
+            obelisk.insert(
+                "release".to_owned(),
+                serde_json::json!({ "name": agreed.release_name, "namespace": agreed.namespace }),
+            );
+            obelisk.insert("version".to_owned(), Value::String(agreed.version.clone()));
         }
-        ValuesCase::new(target, unit, values, sets)
+        let case = ValuesCase::new(target, unit, values, sets, Some(agreed.clone()))?;
+        Ok((case, agreed))
     }
 }
 
-/// `obelisk.version` for `unit` on `target`: every value given (by the target, the unit, a config file
-/// or a generator) must be the same one, and there must be one.
-fn agree_on_version(
+/// One of the things a case agrees on ([`Agreed`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Field {
+    /// `obelisk.version`: the chart's `version` and `appVersion`.
+    Version,
+    /// `obelisk.release.name`: `.Release.Name`, and the Helm release.
+    ReleaseName,
+    /// `obelisk.release.namespace`: `.Release.Namespace`, and where the release goes.
+    ReleaseNamespace,
+}
+
+impl Field {
+    /// e.g. "release name".
+    fn what(self) -> &'static str {
+        match self {
+            Self::Version => "version",
+            Self::ReleaseName => "release name",
+            Self::ReleaseNamespace => "release namespace",
+        }
+    }
+
+    /// Its key in a target or unit, e.g. `release.name`.
+    fn key(self) -> &'static str {
+        match self {
+            Self::Version => "version",
+            Self::ReleaseName => "release.name",
+            Self::ReleaseNamespace => "release.namespace",
+        }
+    }
+
+    /// What a target or unit says.
+    fn in_target_or_unit<'a>(
+        self,
+        version: Option<&'a InterpString>,
+        release: &'a Release,
+    ) -> Option<&'a InterpString> {
+        match self {
+            Self::Version => version,
+            Self::ReleaseName => release.name.as_ref(),
+            Self::ReleaseNamespace => release.namespace.as_ref(),
+        }
+    }
+
+    /// What a config file or generator set.
+    fn in_file(self, set: &FileObelisk) -> Option<&String> {
+        match self {
+            Self::Version => set.version.as_ref(),
+            Self::ReleaseName => set.name.as_ref(),
+            Self::ReleaseNamespace => set.namespace.as_ref(),
+        }
+    }
+
+    /// How to give it, for the error when nothing does.
+    fn hint(self) -> &'static str {
+        match self {
+            Self::Version => " (e.g. from `.Values.obelisk.git`)",
+            Self::ReleaseName => "",
+            Self::ReleaseNamespace => {
+                " (e.g. from `.Values.obelisk.ephemeral`, on an ephemeral target)"
+            }
+        }
+    }
+}
+
+/// The agreed `what` for `unit` on `target`: every value given (by the target, the unit, a config
+/// file or a generator) must be the same one, and there must be one.
+fn agree(
+    what: Field,
     target: &Target,
     unit: &Unit,
     sets: &FileObelisks,
@@ -129,15 +216,19 @@ fn agree_on_version(
         unit: Some(&unit.name),
     };
     let mut given: Vec<(String, PathBuf)> = Vec::new();
-    for (file, version) in [(&target.file, &target.version), (&unit.file, &unit.version)] {
-        if let Some(version) = version {
-            let value = version
+    for (file, version, release) in [
+        (&target.file, &target.version, &target.release),
+        (&unit.file, &unit.version, &unit.release),
+    ] {
+        if let Some(raw) = what.in_target_or_unit(version.as_ref(), release) {
+            let value = raw
                 .interpolate(&params)
                 .map_err(|var| ObeliskK8sError::Config {
                     file: file.clone(),
                     at: None,
                     message: format!(
-                        "`version: {version}`: `${{{{obelisk:{}}}}}` has no value here",
+                        "`{}: {raw}`: `${{{{obelisk:{}}}}}` has no value here",
+                        what.key(),
                         var.name()
                     ),
                 })?;
@@ -146,7 +237,7 @@ fn agree_on_version(
     }
     given.extend(
         sets.iter()
-            .filter_map(|(file, set)| Some((set.version.clone()?, file.clone()))),
+            .filter_map(|(file, set)| Some((what.in_file(set)?.clone(), file.clone()))),
     );
 
     let case = format!("unit `{}` on target `{}`", unit.name, target.name);
@@ -156,7 +247,11 @@ fn agree_on_version(
     match distinct.as_slice() {
         [one] => Ok((*one).to_owned()),
         [] => Err(ObeliskK8sError::Usage(format!(
-            "no version for {case}: set `version` in its target or unit, or `{OBELISK_KEY}.version` in a config file or generator (e.g. from `.Values.{OBELISK_KEY}.git`)"
+            "no {} for {case}: set `{}` in its target or unit, or `{OBELISK_KEY}.{}` in a config file or generator{}",
+            what.what(),
+            what.key(),
+            what.key(),
+            what.hint()
         ))),
         _ => {
             let from: Vec<_> = given
@@ -164,8 +259,9 @@ fn agree_on_version(
                 .map(|(v, f)| format!("`{v}` ({})", f.display()))
                 .collect();
             Err(ObeliskK8sError::Usage(format!(
-                "{case} has {} different versions, from {} places: {}; they must agree",
+                "{case} has {} different {}s, from {} places: {}; they must agree",
                 distinct.len(),
+                what.what(),
                 given.len(),
                 from.join(", ")
             )))
@@ -173,11 +269,34 @@ fn agree_on_version(
     }
 }
 
+/// Helm's and Kubernetes' rules for the agreed release.
+fn check_release(agreed: &Agreed, target: &Target, unit: &Unit) -> Result<(), ObeliskK8sError> {
+    let case = format!("unit `{}` on target `{}`", unit.name, target.name);
+    for (what, value) in [
+        ("release name", &agreed.release_name),
+        ("release namespace", &agreed.namespace),
+    ] {
+        if !is_valid_name(value) {
+            return Err(ObeliskK8sError::Usage(format!(
+                "{what} `{value}` for {case} isn't a valid name ({NAME_RULE})"
+            )));
+        }
+    }
+    if !helm::fits_release_name(&agreed.release_name) {
+        return Err(ObeliskK8sError::Usage(format!(
+            "release name `{}` for {case} is too long: Helm release names are at most {} characters",
+            agreed.release_name,
+            helm::RELEASE_NAME_MAX
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::repo::REPO_CONFIG_DIR;
-    use crate::config::test_support::{helm_installed, write_repo};
+    use crate::config::test_support::{TARGET, helm_installed, write_repo};
 
     fn repo(extra: &[(&str, &str)]) -> tempfile::TempDir {
         let mut files = vec![
@@ -185,8 +304,8 @@ mod tests {
                 "repo.yaml",
                 "repo:\n  name: r\n  configPaths: [./values.yaml]\n  generators:\n    - { type: gotmpl, path: ./gen.yaml.gotmpl }\n    - { type: gotmpl, path: \"./${{obelisk:target}}.gen.yaml.gotmpl\" }\n",
             ),
-            ("targets/prod/target.yaml", "target:\n  cluster: c\n"),
-            ("targets/dev/target.yaml", "target:\n  cluster: c\n"),
+            ("targets/prod/target.yaml", TARGET),
+            ("targets/dev/target.yaml", TARGET),
             (
                 "units/app/unit.yaml",
                 "unit:\n  version: 1.0.0\n  generators: [{ type: gotmpl, path: ./app.gen.yaml.gotmpl }]\n",
@@ -240,6 +359,9 @@ mod tests {
             return;
         }
         let dir = repo(&[
+            // Targets with no release: only the generator gives one.
+            ("targets/prod/target.yaml", "target:\n  cluster: c\n"),
+            ("targets/dev/target.yaml", "target:\n  cluster: c\n"),
             (
                 "gen.yaml.gotmpl",
                 "obelisk:\n  release:\n    name: {{ .Values.obelisk.unit }}\n    namespace: mc-{{ .Values.obelisk.target }}\ndb:\n  url: \"postgres://{{ .Values.db.host }}:{{ .Values.db.port }}\"\nrelease: {{ .Release.Name }}/{{ .Release.Namespace }}\n",
@@ -254,7 +376,8 @@ mod tests {
         // Every generator sees the config values, not the others' output: `app.gen` didn't see `replicas`.
         assert_eq!(
             yaml,
-            "obelisk:\n  repo: r\n  target: prod\n  unit: app\n  ephemeral: null\n  git: null\n  version: \"1.0.0\"\n\
+            "obelisk:\n  repo: r\n  target: prod\n  unit: app\n  ephemeral: null\n  git: null\n\
+             \x20 release:\n    name: app\n    namespace: mc-prod\n  version: \"1.0.0\"\n\
              db:\n  host: h\n  port: 6543\n  url: postgres://h:5432\n\
              mode: \"0755\"\nrelease: app/default\nreplicas: 3\n"
         );
@@ -330,8 +453,8 @@ mod tests {
                 "repo.yaml",
                 "repo:\n  name: r\n  configPaths: [./values.yaml, \"./${{obelisk:target}}.yaml\"]\n",
             ),
-            ("targets/prod/target.yaml", "target:\n  cluster: c\n"),
-            ("targets/dev/target.yaml", "target:\n  cluster: c\n"),
+            ("targets/prod/target.yaml", TARGET),
+            ("targets/dev/target.yaml", TARGET),
             ("units/app/unit.yaml", "unit: {}\n"),
         ];
         all.retain(|(p, _)| !files.iter().any(|(q, _)| q == p));
@@ -364,7 +487,7 @@ mod tests {
         let dir = plain(&[
             (
                 "targets/prod/target.yaml",
-                "target:\n  cluster: c\n  version: v2.0.0\n",
+                "target:\n  cluster: c\n  version: v2.0.0\n  release: { name: \"${{obelisk:unit}}\", namespace: \"${{obelisk:target}}\" }\n",
             ),
             ("prod.yaml", "obelisk:\n  version: v2.0.0\n"),
         ]);
@@ -417,7 +540,7 @@ mod tests {
             ),
             (
                 "targets/prod/target.yaml",
-                "target:\n  cluster: c\n  ephemeral: true\n",
+                "target:\n  cluster: c\n  ephemeral: true\n  release: { name: \"${{obelisk:unit}}\", namespace: \"${{obelisk:target}}\" }\n",
             ),
             (
                 "gen.gotmpl",
@@ -440,7 +563,7 @@ mod tests {
         use crate::config::ephemeral::{Ephemeral, EphemeralValues};
         let dir = plain(&[(
             "targets/prod/target.yaml",
-            "target:\n  cluster: c\n  ephemeral: true\n  version: v1\n",
+            "target:\n  cluster: c\n  ephemeral: true\n  version: v1\n  release: { name: \"${{obelisk:unit}}\", namespace: \"${{obelisk:target}}\" }\n",
         )]);
         let config = RepoConfig::load(dir.path()).unwrap();
         let selection = config.select(&["prod".to_owned()], &[]).unwrap();
@@ -455,6 +578,127 @@ mod tests {
                 .unwrap_err()
                 .to_string(),
             "unit `app` on target `prod` has 2 different versions, from 2 places: `v1` (.obelisk-k8s/targets/prod/target.yaml), `v2` (--ephemeral-values); they must agree"
+        );
+    }
+
+    fn release(dir: &tempfile::TempDir, target: &str) -> Result<Value, ObeliskK8sError> {
+        let config = RepoConfig::load(dir.path()).unwrap();
+        let selection = config
+            .select(&[target.to_owned()], &["app".to_owned()])
+            .unwrap();
+        let mut report = config.generated_values_report(dir.path(), &selection, None, None)?;
+        Ok(report.cases.remove(0).values[OBELISK_KEY]["release"].clone())
+    }
+
+    #[test]
+    fn agrees_on_one_release() {
+        let version = ("units/app/unit.yaml", "unit:\n  version: v1\n");
+        // From the target (interpolated), and a config file saying the same.
+        let dir = plain(&[
+            version,
+            ("prod.yaml", "obelisk:\n  release: { namespace: prod }\n"),
+        ]);
+        assert_eq!(
+            release(&dir, "prod").unwrap(),
+            serde_json::json!({ "name": "app", "namespace": "prod" })
+        );
+        // Each is required.
+        let dir = plain(&[
+            version,
+            (
+                "targets/prod/target.yaml",
+                "target:\n  cluster: c\n  release: { name: app }\n",
+            ),
+        ]);
+        assert_eq!(
+            release(&dir, "prod").unwrap_err().to_string(),
+            "no release namespace for unit `app` on target `prod`: set `release.namespace` in its target or unit, or `obelisk.release.namespace` in a config file or generator (e.g. from `.Values.obelisk.ephemeral`, on an ephemeral target)"
+        );
+        let dir = plain(&[
+            version,
+            (
+                "targets/prod/target.yaml",
+                "target:\n  cluster: c\n  release: { namespace: n }\n",
+            ),
+        ]);
+        assert!(
+            release(&dir, "prod")
+                .unwrap_err()
+                .to_string()
+                .starts_with("no release name for unit `app` on target `prod`"),
+        );
+        // And they must agree.
+        let dir = plain(&[
+            version,
+            ("prod.yaml", "obelisk:\n  release: { name: other }\n"),
+        ]);
+        assert_eq!(
+            release(&dir, "prod").unwrap_err().to_string(),
+            "unit `app` on target `prod` has 2 different release names, from 2 places: `app` (.obelisk-k8s/targets/prod/target.yaml), `other` (.obelisk-k8s/prod.yaml); they must agree"
+        );
+    }
+
+    #[test]
+    fn a_unit_can_give_its_release_interpolated() {
+        let dir = plain(&[
+            (
+                "targets/prod/target.yaml",
+                "target:\n  cluster: c\n  release: { namespace: n }\n",
+            ),
+            (
+                "units/app/unit.yaml",
+                "unit:\n  version: v1\n  release: { name: \"${{obelisk:unit}}-${{obelisk:target}}\" }\n",
+            ),
+        ]);
+        assert_eq!(
+            release(&dir, "prod").unwrap(),
+            serde_json::json!({ "name": "app-prod", "namespace": "n" })
+        );
+    }
+
+    #[test]
+    fn a_namespace_conflict_names_every_place() {
+        let dir = plain(&[
+            (
+                "units/app/unit.yaml",
+                "unit:\n  version: v1\n  release: { namespace: a }\n",
+            ),
+            ("values.yaml", "obelisk:\n  release: { namespace: b }\n"),
+        ]);
+        assert_eq!(
+            release(&dir, "prod").unwrap_err().to_string(),
+            "unit `app` on target `prod` has 3 different release namespaces, from 3 places: `prod` (.obelisk-k8s/targets/prod/target.yaml), `a` (.obelisk-k8s/units/app/unit.yaml), `b` (.obelisk-k8s/values.yaml); they must agree"
+        );
+    }
+
+    #[test]
+    fn the_release_must_be_valid_for_helm_and_kubernetes() {
+        let version = ("units/app/unit.yaml", "unit:\n  version: v1\n");
+        let target = |release: &str| format!("target:\n  cluster: c\n  release: {release}\n");
+        let bad_namespace = target("{ name: app, namespace: Not_Valid }");
+        let dir = plain(&[version, ("targets/prod/target.yaml", &bad_namespace)]);
+        let error = release(&dir, "prod").unwrap_err().to_string();
+        assert!(
+            error.starts_with(
+                "release namespace `Not_Valid` for unit `app` on target `prod` isn't a valid name"
+            ),
+            "{error}"
+        );
+        let bad_name = target("{ name: -app, namespace: n }");
+        let dir = plain(&[version, ("targets/prod/target.yaml", &bad_name)]);
+        let error = release(&dir, "prod").unwrap_err().to_string();
+        assert!(
+            error.starts_with(
+                "release name `-app` for unit `app` on target `prod` isn't a valid name"
+            ),
+            "{error}"
+        );
+        let long = target(&format!("{{ name: {}, namespace: n }}", "a".repeat(54)));
+        let dir = plain(&[version, ("targets/prod/target.yaml", &long)]);
+        let error = release(&dir, "prod").unwrap_err().to_string();
+        assert!(
+            error.contains("is too long: Helm release names are at most 53"),
+            "{error}"
         );
     }
 
