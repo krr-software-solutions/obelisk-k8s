@@ -5,16 +5,18 @@ use std::path::Path;
 use serde_json::Value;
 
 use crate::config::ephemeral::{Ephemeral, check_selection};
-use crate::config::global::{Cluster, GlobalConfig};
+use crate::config::global::{Cluster, GlobalConfig, normalize};
 use crate::config::paths::Selection;
 use crate::config::repo::Target;
 use crate::{ObeliskK8sError, git};
 
-/// The git facts, the ephemeral copy (if any), and the global config the targets' clusters come
-/// from.
+/// The git facts, the ephemeral copy (if any), the global config the targets' clusters come from,
+/// and where things are (`obelisk.paths`).
 #[derive(Debug)]
 pub(crate) struct RunInputs<'a> {
     pub(crate) git: Value,
+    /// `obelisk.paths`: the global root and the repo root, absolute.
+    pub(crate) paths: Value,
     pub(crate) ephemeral: Option<&'a Ephemeral>,
     global: &'a GlobalConfig,
 }
@@ -25,7 +27,9 @@ impl<'a> RunInputs<'a> {
     ///
     /// # Errors
     ///
-    /// As [`check_selection`] and [`RunInputs::cluster`].
+    /// As [`check_selection`] and [`RunInputs::cluster`]; [`ObeliskK8sError::Io`] if `repo_root`
+    /// can't be made absolute; [`ObeliskK8sError::Usage`] if it or the global root isn't UTF-8 (they
+    /// go into the values as text).
     pub(crate) fn new(
         repo_root: &Path,
         selection: &Selection<'_>,
@@ -33,8 +37,17 @@ impl<'a> RunInputs<'a> {
         global: &'a GlobalConfig,
     ) -> Result<Self, ObeliskK8sError> {
         check_selection(selection, ephemeral)?;
+        let repo_root_absolute =
+            std::path::absolute(repo_root).map_err(|source| ObeliskK8sError::Io {
+                path: repo_root.to_owned(),
+                source,
+            })?;
         let inputs = Self {
             git: git::facts(repo_root),
+            paths: serde_json::json!({
+                "globalRoot": utf8(&global.dir)?,
+                "repoRoot": utf8(&normalize(&repo_root_absolute))?,
+            }),
             ephemeral,
             global,
         };
@@ -69,5 +82,40 @@ impl<'a> RunInputs<'a> {
     /// The copy `target` renders as: `None` unless it's ephemeral.
     pub(crate) fn ephemeral_for(&self, target: &Target) -> Option<&'a Ephemeral> {
         self.ephemeral.filter(|_| target.ephemeral)
+    }
+}
+
+/// `path` as text, for the values.
+fn utf8(path: &Path) -> Result<&str, ObeliskK8sError> {
+    path.to_str().ok_or_else(|| {
+        ObeliskK8sError::Usage(format!(
+            "{} isn't UTF-8, so it can't go into `obelisk.paths`",
+            path.display()
+        ))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::test_support::global;
+
+    #[test]
+    fn the_paths_are_absolute_and_normalized() {
+        let global = global();
+        let selection = Selection {
+            cases: Vec::new(),
+            single: false,
+        };
+        let inputs =
+            RunInputs::new(Path::new("some/./repo/../repo"), &selection, None, &global).unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(
+            inputs.paths,
+            serde_json::json!({
+                "globalRoot": "/home/me/.obelisk-k8s",
+                "repoRoot": cwd.join("some/repo").to_str().unwrap(),
+            })
+        );
     }
 }

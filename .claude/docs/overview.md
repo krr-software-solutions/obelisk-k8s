@@ -66,7 +66,7 @@ ip-allocator.
   back if the result won't load.
 - `obelisk-k8s template values [-t <target>]... [-u <unit>]...`: the merged values each selected unit
   gets on each selected target: its found config files deep-merged in merge order (maps key by key;
-  lists, scalars and `null` replace), with the tool's `obelisk: { repo, target, unit, cluster, ephemeral, git }` block on top.
+  lists, scalars and `null` replace), with the tool's `obelisk: { repo, target, unit, cluster, ephemeral, git, paths }` block on top.
   `obelisk:` is reserved: a config file may only set `obelisk.release.{name, namespace}` and
   `obelisk.version`, as strings (kept per file and left out of this output; they're agreed on after the
   generators: see **Release** and `obelisk.version` below), and anything else under it is an
@@ -75,6 +75,9 @@ ip-allocator.
   (`0755` is `493`), with known limits listed in `config/values.rs`. Same selection as
   `config repo paths`; several cases print as a YAML stream, each under a `# [ target=…, unit=… ]`
   comment. Takes `--repo` too.
+- `obelisk.paths: { globalRoot, repoRoot }`: where the global config and the repo are on this machine,
+  absolute and normalized (`.` and `..` resolved; symlinks kept); an error if either isn't UTF-8.
+  Machine-specific, so rendered output differs between machines.
 - `obelisk.cluster: { name, supernet, subnet }` is the target's cluster, from the global config:
   its name, and the obeliskd supernet and subnet it runs on (`null` without `obeliskd`). So every
   `template` command (and `apply`) loads the global config, and a selected target whose cluster

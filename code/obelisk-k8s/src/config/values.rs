@@ -174,6 +174,7 @@ impl RepoConfig {
             ephemeral.map_or(Value::Null, |e| Value::String(e.name.clone())),
         );
         block.insert("git".to_owned(), inputs.git.clone());
+        block.insert("paths".to_owned(), inputs.paths.clone());
         Ok(Value::Object(block))
     }
 }
@@ -374,7 +375,9 @@ mod tests {
         let text = config
             .values_report(dir.path(), &selection, None, None, &global())?
             .to_string();
-        Ok(anstream::adapter::strip_str(&text).to_string())
+        Ok(anstream::adapter::strip_str(&text)
+            .to_string()
+            .replace(&dir.path().display().to_string(), "<repo>"))
     }
 
     fn ephemeral_report(
@@ -392,7 +395,9 @@ mod tests {
         let text = config
             .values_report(dir.path(), &selection, None, ephemeral.as_ref(), &global())?
             .to_string();
-        Ok(anstream::adapter::strip_str(&text).to_string())
+        Ok(anstream::adapter::strip_str(&text)
+            .to_string()
+            .replace(&dir.path().display().to_string(), "<repo>"))
     }
 
     fn ephemeral_base() -> tempfile::TempDir {
@@ -421,7 +426,7 @@ mod tests {
                 Some("c: ephemeral\nobelisk:\n  version: \"1.0.0\"\n")
             )
             .unwrap(),
-            "obelisk:\n  repo: r\n  target: preview\n  unit: app\n  cluster:\n    name: c\n    supernet: null\n    subnet: null\n  ephemeral: pr-7\n  git: null\n\
+            "obelisk:\n  repo: r\n  target: preview\n  unit: app\n  cluster:\n    name: c\n    supernet: null\n    subnet: null\n  ephemeral: pr-7\n  git: null\n  paths:\n    globalRoot: /home/me/.obelisk-k8s\n    repoRoot: <repo>\n\
              a: preview\nb: global\nc: ephemeral\n"
         );
         // A plain target gets `ephemeral: null`, and none of the ephemeral values.
@@ -504,7 +509,7 @@ mod tests {
         );
         assert_eq!(
             report(&dir, &["dev"], &["app"]).unwrap_err().to_string(),
-            "target `dev` deploys to cluster `nope`, which isn't in the global config at /nowhere (it has: c, obd): add it with `obelisk-k8s config global cluster add`"
+            "target `dev` deploys to cluster `nope`, which isn't in the global config at ~/.obelisk-k8s (it has: c, obd): add it with `obelisk-k8s config global cluster add`"
         );
     }
 
@@ -523,7 +528,7 @@ mod tests {
         ]);
         assert_eq!(
             report(&dir, &["prod"], &["app"]).unwrap(),
-            "obelisk:\n  repo: r\n  target: prod\n  unit: app\n  cluster:\n    name: c\n    supernet: null\n    subnet: null\n  ephemeral: null\n  git: null\n\
+            "obelisk:\n  repo: r\n  target: prod\n  unit: app\n  cluster:\n    name: c\n    supernet: null\n    subnet: null\n  ephemeral: null\n  git: null\n  paths:\n    globalRoot: /home/me/.obelisk-k8s\n    repoRoot: <repo>\n\
              db:\n  host: prod\n  port: 5432\n  pool:\n    max: 10\n    min: 1\n\
              list:\n- 3\nkeep: g\nextra: null\n"
         );
@@ -538,7 +543,7 @@ mod tests {
              tpl: |\n  {{ .Values.x }}\n  line two\nref: \"ref+awsssm:///app/x\"\n",
         )]);
         let text = report(&dir, &["prod"], &["app"]).unwrap();
-        let body = text.split_once("git: null\n").unwrap().1;
+        let body = text.split_once("repoRoot: <repo>\n").unwrap().1;
         // (The key `n` comes out quoted: plain, it's a YAML 1.1 boolean.)
         assert_eq!(
             body,
@@ -561,7 +566,7 @@ mod tests {
         let dir = base(&[("global.yaml", ""), ("prod.yaml", "# nothing\n")]);
         assert_eq!(
             report(&dir, &["prod"], &["app"]).unwrap(),
-            "obelisk:\n  repo: r\n  target: prod\n  unit: app\n  cluster:\n    name: c\n    supernet: null\n    subnet: null\n  ephemeral: null\n  git: null\n"
+            "obelisk:\n  repo: r\n  target: prod\n  unit: app\n  cluster:\n    name: c\n    supernet: null\n    subnet: null\n  ephemeral: null\n  git: null\n  paths:\n    globalRoot: /home/me/.obelisk-k8s\n    repoRoot: <repo>\n"
         );
     }
 
@@ -598,7 +603,7 @@ mod tests {
         ]);
         assert_eq!(
             report(&dir, &["prod"], &["app"]).unwrap(),
-            "obelisk:\n  repo: r\n  target: prod\n  unit: app\n  cluster:\n    name: c\n    supernet: null\n    subnet: null\n  ephemeral: null\n  git: null\nenv: prod\n"
+            "obelisk:\n  repo: r\n  target: prod\n  unit: app\n  cluster:\n    name: c\n    supernet: null\n    subnet: null\n  ephemeral: null\n  git: null\n  paths:\n    globalRoot: /home/me/.obelisk-k8s\n    repoRoot: <repo>\nenv: prod\n"
         );
         let release = |name: Option<&str>, namespace: &str| FileObelisk {
             name: name.map(str::to_owned),
@@ -685,8 +690,8 @@ mod tests {
         let dir = base(&[("dev.yaml", "env: dev\n"), ("prod.yaml", "env: prod\n")]);
         assert_eq!(
             report(&dir, &[], &[]).unwrap(),
-            "# [ target=dev, unit=app ]\nobelisk:\n  repo: r\n  target: dev\n  unit: app\n  cluster:\n    name: c\n    supernet: null\n    subnet: null\n  ephemeral: null\n  git: null\nenv: dev\n---\n\
-             # [ target=prod, unit=app ]\nobelisk:\n  repo: r\n  target: prod\n  unit: app\n  cluster:\n    name: c\n    supernet: null\n    subnet: null\n  ephemeral: null\n  git: null\nenv: prod\n"
+            "# [ target=dev, unit=app ]\nobelisk:\n  repo: r\n  target: dev\n  unit: app\n  cluster:\n    name: c\n    supernet: null\n    subnet: null\n  ephemeral: null\n  git: null\n  paths:\n    globalRoot: /home/me/.obelisk-k8s\n    repoRoot: <repo>\nenv: dev\n---\n\
+             # [ target=prod, unit=app ]\nobelisk:\n  repo: r\n  target: prod\n  unit: app\n  cluster:\n    name: c\n    supernet: null\n    subnet: null\n  ephemeral: null\n  git: null\n  paths:\n    globalRoot: /home/me/.obelisk-k8s\n    repoRoot: <repo>\nenv: prod\n"
         );
     }
 
@@ -727,7 +732,7 @@ mod tests {
         let text = report(&dir, &["prod"], &["app"]).unwrap();
         assert!(
             text.starts_with(
-                "obelisk:\n  repo: r\n  target: prod\n  unit: app\n  cluster:\n    name: c\n    supernet: null\n    subnet: null\n  ephemeral: null\n  git: null\n"
+                "obelisk:\n  repo: r\n  target: prod\n  unit: app\n  cluster:\n    name: c\n    supernet: null\n    subnet: null\n  ephemeral: null\n  git: null\n  paths:\n    globalRoot: /home/me/.obelisk-k8s\n    repoRoot: <repo>\n"
             ),
             "{text}"
         );

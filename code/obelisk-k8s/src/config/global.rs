@@ -36,6 +36,8 @@ pub fn default_global_root(home: Option<&Path>) -> Option<PathBuf> {
 pub struct GlobalConfig {
     /// As the user should see it (`~/…` under the home directory).
     pub root: PathBuf,
+    /// The real directory: absolute and normalized.
+    pub dir: PathBuf,
     /// Sorted by name.
     pub repos: Vec<Repo>,
     /// Sorted by name.
@@ -200,6 +202,7 @@ impl GlobalConfig {
         clusters.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(Self {
             root: shown,
+            dir: root.clone(),
             repos,
             clusters,
             warnings,
@@ -376,7 +379,7 @@ pub fn tilde(path: &Path, home: Option<&Path>) -> PathBuf {
 }
 
 /// `path` with `.` and `..` worked out (lexically: symlinks aren't followed).
-fn normalize(path: &Path) -> PathBuf {
+pub(crate) fn normalize(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for component in path.components() {
         match component {
@@ -755,6 +758,18 @@ mod tests {
                 "~/.obelisk-k8s/clusters/r/cluster.yaml: a remote cluster with no `kubectlContext` or `kubectlCluster`: obelisk-k8s won't guess its context"
             ]
         );
+    }
+
+    #[test]
+    fn keeps_the_real_root_next_to_the_shown_one() {
+        let home = Home::new().file(".obelisk-k8s/repos.yaml", "repos: []\n");
+        let messy = home.path().join(".obelisk-k8s/./clusters/..");
+        let config = GlobalConfig::load(&messy, Some(home.path())).unwrap();
+        assert_eq!(config.dir, home.path().join(".obelisk-k8s"));
+        // The shown root is as given (under `~`); the real one is resolved.
+        let config = GlobalConfig::load(&home.root(), Some(home.path())).unwrap();
+        assert_eq!(config.root, Path::new("~/.obelisk-k8s"));
+        assert_eq!(config.dir, home.root());
     }
 
     #[test]

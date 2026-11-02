@@ -198,7 +198,7 @@ pub(crate) mod test_support {
         let cluster = |name: &str, obeliskd: Option<Obeliskd>| Cluster {
             name: name.to_owned(),
             file: format!("clusters/{name}/cluster.yaml").into(),
-            dir: format!("/nowhere/clusters/{name}").into(),
+            dir: format!("/home/me/.obelisk-k8s/clusters/{name}").into(),
             k8s: K8s::K3d,
             location: Location::Local,
             managed: true,
@@ -207,7 +207,8 @@ pub(crate) mod test_support {
             kubectl_context: None,
         };
         GlobalConfig {
-            root: "/nowhere".into(),
+            root: "~/.obelisk-k8s".into(),
+            dir: "/home/me/.obelisk-k8s".into(),
             repos: Vec::new(),
             clusters: vec![
                 cluster("c", None),

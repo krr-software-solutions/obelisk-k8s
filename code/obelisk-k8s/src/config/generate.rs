@@ -334,7 +334,10 @@ mod tests {
         let mut report =
             config.generated_values_report(dir.path(), &selection, None, None, &global())?;
         let case = report.cases.remove(0);
-        Ok((case.yaml, case.sets))
+        let yaml = case
+            .yaml
+            .replace(&dir.path().display().to_string(), "<repo>");
+        Ok((yaml, case.sets))
     }
 
     #[test]
@@ -380,7 +383,7 @@ mod tests {
         // Every generator sees the config values, not the others' output: `app.gen` didn't see `replicas`.
         assert_eq!(
             yaml,
-            "obelisk:\n  repo: r\n  target: prod\n  unit: app\n  cluster:\n    name: c\n    supernet: null\n    subnet: null\n  ephemeral: null\n  git: null\n\
+            "obelisk:\n  repo: r\n  target: prod\n  unit: app\n  cluster:\n    name: c\n    supernet: null\n    subnet: null\n  ephemeral: null\n  git: null\n  paths:\n    globalRoot: /home/me/.obelisk-k8s\n    repoRoot: <repo>\n\
              \x20 release:\n    name: app\n    namespace: mc-prod\n  version: \"1.0.0\"\n\
              db:\n  host: h\n  port: 6543\n  url: postgres://h:5432\n\
              mode: \"0755\"\nrelease: app/default\nreplicas: 3\n"
