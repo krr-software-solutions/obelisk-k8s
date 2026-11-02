@@ -3,7 +3,8 @@
 # generic package registry, then create the release with a link to each.
 #
 # Run by CI's `gitlab-release` job (needs curl + jq, and CI_JOB_TOKEN can upload packages and
-# create releases). install.sh downloads from the package registry, not these links.
+# create releases). The public release, which install.sh downloads from, is GitHub's
+# (scripts/github-release.sh).
 set -eu
 
 tag="${CI_COMMIT_TAG:?CI_COMMIT_TAG is not set}"

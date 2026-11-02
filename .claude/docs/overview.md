@@ -4,7 +4,7 @@ obelisk-k8s deploys apps to Kubernetes: real prod/dev clusters, and local
 [k3d](https://k3d.io) clusters with ephemeral instances. It replaces obelisk-local (the Scala deploy
 CLI, `~/dev/repo/current/obelisk-local`), which is frozen and keeps running mission-control prod
 until cutover. IP allocation and DNS for local clusters come from
-[obeliskd](https://gitlab.krr-software-solutions.com/oss/obeliskd), never from obelisk-local's
+[obeliskd](https://github.com/krr-software-solutions/obeliskd), never from obelisk-local's
 ip-allocator.
 
 ## Current state

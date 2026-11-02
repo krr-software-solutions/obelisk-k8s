@@ -16,7 +16,8 @@
 #            install-smoke         install.sh from that GitHub release installs that version, as a user would
 #
 # Everything in `publish` waits for every check and build, so a failing build never leaves a
-# half-published version behind.
+# half-published version behind. The two releases don't wait for each other, though: if one fails,
+# the other may still be out (re-run the failed job).
 #
 # CI variables (Settings → CI/CD → Variables):
 #   GITHUB_TOKEN           can write github.com/krr-software-solutions/obelisk-k8s (the public mirror)

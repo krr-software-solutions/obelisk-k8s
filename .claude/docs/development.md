@@ -36,7 +36,8 @@ stays private (code, packages, its release); the public face is the GitHub mirro
 `github.com/krr-software-solutions/obelisk-k8s`: GitLab push-mirrors the code to it, and
 `github-release` (with the `GITHUB_TOKEN` CI variable) publishes each release there, with
 version-less asset names so `releases/latest/download/…` (what `install.sh` and the README use)
-always works. A pre-release tag (`v1.2.3-rc.1`) is marked one, so it's never `latest`.
+always works. A pre-release tag (`v1.2.3-rc.1`) is marked one, so it's never `latest`. Releases before
+`v0.1.1` (just `v0.1.0`) are on GitLab only.
 
 ## The `FIX-PRE-MERGE` marker
 

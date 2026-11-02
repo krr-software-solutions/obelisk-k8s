@@ -13,7 +13,7 @@ cat <<MD
 **Install** (Linux, macOS; the binary goes in \`~/.local/bin\`):
 
 \`\`\`sh
-curl -fsSL https://github.com/krr-software-solutions/obelisk-k8s/releases/download/$tag/install.sh | sh
+curl -fsSL https://github.com/krr-software-solutions/obelisk-k8s/releases/download/$tag/install.sh | OBELISK_K8S_VERSION=$version sh
 \`\`\`
 
 Or download the archive for your platform below.
