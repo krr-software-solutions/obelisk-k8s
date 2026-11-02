@@ -1,3 +1,0 @@
-grafana:
-  adminUser: "ref+awsssm:///infra/homelab-1/grafana/admin/username"
-# ... rest of today's global-helm-values.yaml

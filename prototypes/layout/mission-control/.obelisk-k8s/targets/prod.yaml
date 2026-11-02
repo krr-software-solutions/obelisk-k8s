@@ -1,5 +1,0 @@
-# A release-target says where and how a deploy goes. Every unit deploys to every release-target unless it lists `targets:`.
-kubeContext: homelab-1
-aws:
-  profile: prod          # ~/.aws profile used to resolve ref+awsssm (replaces .obelisk/aws.yaml)
-namespace: krrss-mc-prod # the default namespace for every unit's release

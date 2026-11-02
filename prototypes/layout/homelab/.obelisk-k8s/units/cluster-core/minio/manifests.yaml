@@ -1,8 +1,0 @@
-apiVersion: v1
-kind: Secret
-metadata: { name: minio-root, namespace: minio }
-stringData:
-  rootUser: "ref+awsssm:///infra/homelab-1/minio/admin/username"
-  rootPassword: "ref+awsssm:///infra/homelab-1/minio/admin/password"
----
-# ... Deployment, Service, PVC, unchanged

@@ -1,2 +1,0 @@
-manifests: [manifests.yaml]
-dependsOn: [envoy-gateway-system]

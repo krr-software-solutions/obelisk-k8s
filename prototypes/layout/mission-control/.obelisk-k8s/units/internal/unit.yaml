@@ -1,7 +1,0 @@
-generate:
-  command: java
-  args: [-jar, release-target/obelisk-build.jar, internal]
-# Values files per release-target, merged in order. Paths are relative to this unit dir.
-values:
-  prod: [../../values.yaml, ../../values.prod.yaml, values.yaml, values.prod.yaml]
-dependsOn: [infra]

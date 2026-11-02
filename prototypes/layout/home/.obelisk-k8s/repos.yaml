@@ -1,4 +1,0 @@
-# v1.3 (paper): ~/.obelisk-k8s/repos.yaml, the registry of repos on this machine.
-mission-control: ~/dev/repo/krr-software-solutions/mission-control
-food-app: ~/dev/repo/krr-software-solutions/food-app
-homelab: ~/dev/repo/krr-software-solutions/homelab

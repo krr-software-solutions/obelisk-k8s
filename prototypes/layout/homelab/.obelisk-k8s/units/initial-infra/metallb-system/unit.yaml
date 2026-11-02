@@ -1,2 +1,0 @@
-chart: { repo: metallb, name: metallb, version: 0.15.0 }
-namespace: { name: metallb-system, create: true, privileged: true }

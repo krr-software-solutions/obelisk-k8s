@@ -1,8 +1,0 @@
-# Shared, prod only (today's krrss-mc/prod-values.yaml).
-global:
-  targetSuffix: prod
-db:
-  service:
-    credentials:
-      username: "ref+awsssm:///app/mission-control/prod/db/username"
-      password: "ref+awsssm:///app/mission-control/prod/db/password"
