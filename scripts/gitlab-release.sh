@@ -3,8 +3,7 @@
 # generic package registry, then create the release with a link to each.
 #
 # Run by CI's `gitlab-release` job (needs curl + jq, and CI_JOB_TOKEN can upload packages and
-# create releases). Each link also gets a version-less permalink:
-#   <project>/-/releases/permalink/latest/downloads/obelisk-k8s-<target>.tar.gz
+# create releases). install.sh downloads from the package registry, not these links.
 set -eu
 
 tag="${CI_COMMIT_TAG:?CI_COMMIT_TAG is not set}"

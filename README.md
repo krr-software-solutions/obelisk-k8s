@@ -6,9 +6,11 @@ Deploy tooling for Kubernetes, for real prod/dev clusters and local [k3d](https:
 
 ## Installing
 
-Linux and macOS. The project is private, so it takes a GitLab token that can read it (`read_api`):
+Linux and macOS. The project is private, so it takes a GitLab token that can read it, exported (the
+`sh` side downloads with it too):
 
 ```sh
+export GITLAB_TOKEN=glpat-…   # a token that can read the project (read_api); install.sh needs it too
 curl -fsSL -H "PRIVATE-TOKEN: $GITLAB_TOKEN" "https://gitlab.krr-software-solutions.com/api/v4/projects/24/repository/files/install.sh/raw?ref=main" | sh
 ```
 
@@ -20,12 +22,12 @@ It installs the latest release's binary to `~/.local/bin` (see `install.sh` for 
 A deployment goes through a few layers:
 
 ```text
-instance spec → generator → values.yaml → plain Helm chart → k8s resources
+config files → values → generators → generated values → templates → k8s resources → Helm release
 ```
 
-- **Instance spec:** what you want, e.g. "ephemeral instance `xyz`, database in the global namespace".
-- **Generator:** any executable that takes inputs and writes a values file. Python is the default.
-  This keeps logic out of heavy Helm Go templates.
+- **Config files:** a repo's values per target and unit, deep-merged in a fixed order.
+- **Generators:** Go templates that compute more values from those (rendered by Helm); executables
+  are planned. This keeps logic out of the templates.
 - **Helm:** does the templating, merges the values files, and applies (`helm upgrade --install`).
   Raw YAML and YAML from a URL get wrapped into throwaway charts, so every unit is a Helm release.
 - **obelisk-k8s:** orders the units (CRDs before the resources that use them, across namespaces),
@@ -36,10 +38,11 @@ IP allocation and DNS for local clusters come from
 
 ## Roadmap
 
-- **v1:** a render-only `template` command for prod/dev targets.
-- **v1.1:** ephemeral instances on local k3d clusters.
-- **v1.2:** up/down hooks (setup, database/topic creation, seeding test data).
-- **v1.3:** a cluster spec that pulls apps from several repos ("give me a whole cluster that looks like this").
+- **Done:** `template` (values, generated values, manifests), `apply`, ephemeral targets, and local
+  k3d clusters on obeliskd (`cluster up/down/destroy/status`, with MetalLB and a gateway).
+- **Next:** SSM refs, upstream charts and raw/URL YAML as units, `diff`, then up/down hooks (setup,
+  database/topic creation, seeding test data) and blueprints: a spec that pulls apps from several
+  repos onto a managed cluster.
 
 ## Relationship to obelisk-local
 

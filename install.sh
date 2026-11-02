@@ -2,15 +2,18 @@
 # Install obelisk-k8s from a GitLab release: download and verify the binary for this machine, and
 # put it in ~/.local/bin (no root needed).
 #
+#   export GITLAB_TOKEN=glpat-…
 #   curl -fsSL -H "PRIVATE-TOKEN: $GITLAB_TOKEN" \
 #     "https://gitlab.krr-software-solutions.com/api/v4/projects/24/repository/files/install.sh/raw?ref=main" | sh
 #
 # The project is private, so every download needs a token that can read it: a personal (or project)
-# access token with `read_api`, in GITLAB_TOKEN. In CI, CI_JOB_TOKEN works too.
+# access token with `read_api`, exported as GITLAB_TOKEN (so this script sees it too, not just curl).
+# In CI, CI_JOB_TOKEN works too.
 #
 # Environment:
 #   GITLAB_TOKEN                 the token (sent as PRIVATE-TOKEN)
-#   OBELISK_K8S_VERSION          the version to install, e.g. 0.1.2 (default: the latest release)
+#   OBELISK_K8S_VERSION          the version to install, e.g. 0.1.2 (default: the latest release that
+#                                isn't a pre-release, like 1.2.3-rc.1)
 #   OBELISK_K8S_TARGET           override the detected target, e.g. aarch64-unknown-linux-musl
 #   OBELISK_K8S_INSTALL_DIR      where to put the binary (default: ~/.local/bin)
 #
@@ -92,10 +95,11 @@ main() {
   trap 'rm -rf "$tmp"' EXIT
 
   if [ -z "$version" ]; then
-    download "$API/releases/permalink/latest" "$tmp/latest.json" ||
-      die "couldn't find the latest release (does the token have read_api on the project?)"
-    tag="$(sed -n 's/.*"tag_name":"\([^"]*\)".*/\1/p' "$tmp/latest.json")"
-    [ -n "$tag" ] || die "no tag_name in the latest release"
+    # Newest first; the first that isn't a pre-release.
+    download "$API/releases?per_page=100" "$tmp/releases.json" ||
+      die "couldn't list the releases (does the token have read_api on the project?)"
+    tag="$(grep -o '"tag_name":"[^"]*"' "$tmp/releases.json" | cut -d '"' -f 4 | grep -v -- - | head -n 1 || true)"
+    [ -n "$tag" ] || die "no release yet (other than pre-releases): set OBELISK_K8S_VERSION"
     version="${tag#v}"
   fi
 

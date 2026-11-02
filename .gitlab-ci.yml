@@ -14,6 +14,10 @@
 #   publish  gitlab-release        archives → generic package registry, and the GitLab release
 #            install-smoke         install.sh installs that version from the release just published
 #
+# install-smoke runs the tag's install.sh from the checkout, with the job token: it proves the
+# package downloads, checksums and install, not the README's first step (fetching install.sh itself
+# through the repository-files API with a personal token), which CI has no personal token for.
+#
 # Everything in `publish` waits for every check and build, so a failing build never leaves a
 # half-published version behind. The project is private, and so are its releases: installing needs
 # a token that can read it (see install.sh). Mirroring to a public GitHub release is a TODO.
@@ -118,7 +122,7 @@ build:
     - version="${CI_COMMIT_TAG:-v0.0.0}"; version="${version#v}"
     - name="obelisk-k8s-$version-$TARGET"
     - mkdir -p "dist/$name"
-    - cp "target/$TARGET/release/obelisk-k8s" README.md "dist/$name/"
+    - cp "target/$TARGET/release/obelisk-k8s" README.md LICENSE-MIT LICENSE-APACHE "dist/$name/"
     - tar -C dist -czf "dist/$name.tar.gz" "$name"
     - (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
   artifacts:
@@ -141,8 +145,8 @@ gitlab-release:
   script:
     - scripts/gitlab-release.sh
 
-# install.sh (the tag's) must install that exact version from the release just published, with the
-# job's token standing in for a user's.
+# install.sh (the tag's, from the checkout) must install that exact version from the release just
+# published, with the job's token standing in for a user's: see the header for what that leaves out.
 install-smoke:
   extends:
     - .runner

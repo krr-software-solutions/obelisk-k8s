@@ -6,6 +6,9 @@ members = [
 ]
 
 [workspace.package]
+# Placeholder: the real version comes from the git tag. CI runs `scripts/set-version.sh`
+# (`v1.2.3` → `1.2.3`) before building, so local builds report 0.0.0. Keep it (and the `=0.0.0`
+# pin below) at 0.0.0: the script refuses to run without them.
 version = "0.0.0"
 edition = "2024"
 rust-version = "1.89" # serde-saphyr 2.0 needs 1.89

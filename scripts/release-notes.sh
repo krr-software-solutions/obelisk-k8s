@@ -10,9 +10,10 @@ version="${tag#v}"
 cat <<MD
 ## obelisk-k8s $version
 
-**Install** (Linux, macOS; needs a GitLab token that can read this project, in \`GITLAB_TOKEN\`):
+**Install** (Linux, macOS; needs a GitLab token that can read this project, exported):
 
 \`\`\`sh
+export GITLAB_TOKEN=glpat-…   # read_api; install.sh downloads with it too
 curl -fsSL -H "PRIVATE-TOKEN: \$GITLAB_TOKEN" "https://gitlab.krr-software-solutions.com/api/v4/projects/24/repository/files/install.sh/raw?ref=$tag" | OBELISK_K8S_VERSION=$version sh
 \`\`\`
 
