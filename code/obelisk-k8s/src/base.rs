@@ -113,19 +113,16 @@ pub(crate) fn install(name: &str, subnet: &Obeliskd) -> Result<Base, ObeliskK8sE
         Some(ENVOY_GATEWAY_VERSION),
         GATEWAY_NAMESPACE,
     )?;
-    let chart = tempfile::tempdir().map_err(|source| ObeliskK8sError::Io {
-        path: format!("<chart for {BASE_RELEASE}>").into(),
-        source,
-    })?;
-    helm::write_manifests_chart(chart.path(), BASE_RELEASE, &manifests(&address)?)?;
+    let manifests = manifests(&address)?;
     // MetalLB's webhook can take a moment to serve after its release is ready: retry while it does.
     let mut tries = 0;
     loop {
-        match install(
+        match helm::install_manifests(
             BASE_RELEASE,
-            Chart::Dir(chart.path()),
-            None,
+            "0.0.0",
+            &manifests,
             GATEWAY_NAMESPACE,
+            &context,
         ) {
             Err(ObeliskK8sError::Helm(message))
                 if message.contains("webhook") && tries < WEBHOOK_RETRIES =>

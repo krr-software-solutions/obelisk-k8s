@@ -237,8 +237,37 @@ fn pending(install: &Install<'_>) -> Result<Option<String>, ObeliskK8sError> {
         .map(str::to_owned))
 }
 
+/// `helm upgrade --install`s `manifests` (plain YAML) as release `release` at chart version
+/// `version`, through a throwaway chart ([`write_manifests_chart`]), into `namespace` on `context`;
+/// see [`upgrade_install`].
+///
+/// # Errors
+///
+/// As [`upgrade_install`]; [`ObeliskK8sError::Io`] if the chart can't be written.
+pub(crate) fn install_manifests(
+    release: &str,
+    version: &str,
+    manifests: &str,
+    namespace: &str,
+    context: &str,
+) -> Result<(), ObeliskK8sError> {
+    let chart = tempfile::tempdir().map_err(|source| ObeliskK8sError::Io {
+        path: format!("<chart for {release}>").into(),
+        source,
+    })?;
+    write_manifests_chart(chart.path(), release, version, manifests)?;
+    upgrade_install(&Install {
+        release,
+        chart: Chart::Dir(chart.path()),
+        version: None,
+        namespace,
+        context,
+    })
+}
+
 /// Writes a chart that installs `manifests` (plain YAML) as-is, into `dir`: shipped as a file and
-/// printed with `.Files.Get`, so nothing in it is read as a Go template.
+/// printed with `.Files.Get`, so nothing in it is read as a Go template. The chart's `version` and
+/// `appVersion` are `version`.
 ///
 /// # Errors
 ///
@@ -246,6 +275,7 @@ fn pending(install: &Install<'_>) -> Result<Option<String>, ObeliskK8sError> {
 pub(crate) fn write_manifests_chart(
     dir: &Path,
     name: &str,
+    version: &str,
     manifests: &str,
 ) -> Result<(), ObeliskK8sError> {
     let io_error = |source| ObeliskK8sError::Io {
@@ -253,7 +283,7 @@ pub(crate) fn write_manifests_chart(
         source,
     };
     let chart_yaml = crate::yaml::to_string(
-        &serde_json::json!({ "apiVersion": "v2", "name": name, "version": "0.0.0" }),
+        &serde_json::json!({ "apiVersion": "v2", "name": name, "version": version, "appVersion": version }),
         Path::new("Chart.yaml"),
     )?;
     std::fs::create_dir_all(dir.join("templates")).map_err(io_error)?;
@@ -321,10 +351,15 @@ mod tests {
     #[test]
     fn a_manifests_chart_prints_its_manifests_untemplated() {
         let dir = tempfile::tempdir().unwrap();
-        write_manifests_chart(dir.path(), "base", "a: '{{ not a template }}'\n").unwrap();
+        write_manifests_chart(dir.path(), "base", "1.2.3", "a: '{{ not a template }}'\n").unwrap();
         let read = |p: &str| std::fs::read_to_string(dir.path().join(p)).unwrap();
         assert!(
             read("Chart.yaml").contains("name: base"),
+            "{}",
+            read("Chart.yaml")
+        );
+        assert!(
+            read("Chart.yaml").contains("version: \"1.2.3\"\nappVersion: \"1.2.3\""),
             "{}",
             read("Chart.yaml")
         );

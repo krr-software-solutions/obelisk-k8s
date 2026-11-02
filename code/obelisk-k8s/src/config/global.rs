@@ -95,6 +95,25 @@ pub enum Location {
     Remote,
 }
 
+impl Cluster {
+    /// A k3d cluster on this machine: the kind obelisk-k8s can bring up.
+    #[must_use]
+    pub fn is_local_k3d(&self) -> bool {
+        (self.k8s, self.location) == (K8s::K3d, Location::Local)
+    }
+
+    /// The kubectl context it's reached through: k3d's own for a local k3d cluster, else its
+    /// `kubectlContext`. `None` without one (`kubectlCluster` isn't guessed from yet).
+    #[must_use]
+    pub fn context(&self) -> Option<String> {
+        if self.is_local_k3d() {
+            Some(crate::k3d::context(&self.name))
+        } else {
+            self.kubectl_context.clone()
+        }
+    }
+}
+
 /// As written in `cluster.yaml`.
 impl fmt::Display for K8s {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

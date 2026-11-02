@@ -20,7 +20,7 @@ use crate::ObeliskK8sError;
 use crate::config::ephemeral::{Ephemeral, RunInputs};
 use crate::config::paths::{Selection, write_yaml_cases};
 use crate::config::repo::{RepoConfig, Target, Unit};
-use crate::config::values::shown_under;
+use crate::config::values::{Agreed, shown_under};
 use crate::helm;
 
 /// One (target, unit) case's rendered resources.
@@ -30,6 +30,9 @@ pub struct ManifestsCase<'a> {
     pub unit: &'a str,
     /// Every template's output, in merge order, as Helm printed it (empty if there are none).
     pub manifests: String,
+    /// The release they render as: `None` if the unit has no templates (nothing was rendered, and
+    /// nothing agreed on).
+    pub release: Option<Agreed>,
 }
 
 /// What `template manifests` prints: a single case's resources, or several, each under a magenta
@@ -67,7 +70,7 @@ impl RepoConfig {
         })
     }
 
-    fn manifests_for<'a>(
+    pub(crate) fn manifests_for<'a>(
         &'a self,
         repo_root: &Path,
         shown_root: Option<&Path>,
@@ -77,6 +80,7 @@ impl RepoConfig {
     ) -> Result<ManifestsCase<'a>, ObeliskK8sError> {
         let templates = self.resolve_templates(repo_root, target, unit)?;
         let mut manifests = String::new();
+        let mut release = None;
         // Nothing to render: skip the generators too (each is a `helm` run).
         if templates.iter().any(|p| p.found) {
             let (generated, agreed) =
@@ -104,11 +108,13 @@ impl RepoConfig {
                     manifests.push_str(&rendered);
                 }
             }
+            release = Some(agreed);
         }
         Ok(ManifestsCase {
             target: &target.name,
             unit: &unit.name,
             manifests,
+            release,
         })
     }
 }

@@ -39,6 +39,18 @@ enum Command {
         #[command(subcommand)]
         command: TemplateCommand,
     },
+    /// Install what `template manifests` renders: one Helm release per unit on each target, on its
+    /// cluster's kubectl context
+    Apply {
+        /// The repo, by its name in the global `repos.yaml` [default: the one in the current directory]
+        #[arg(long, help_heading = SPECIAL, value_name = "NAME")]
+        repo: Option<String>,
+        #[command(flatten)]
+        args: TemplateArgs,
+        /// Apply to remote clusters too (without it, a remote target is an error)
+        #[arg(long)]
+        yes: bool,
+    },
     /// Bring managed clusters up, down, and away (local k3d only, so far)
     Cluster {
         #[command(subcommand)]
@@ -390,6 +402,9 @@ fn main_impl() -> Result<(), ObeliskK8sError> {
         ),
         Command::Template { repo, command } => {
             commands::run_template(repo.as_deref(), cli.global_root, &command)
+        }
+        Command::Apply { repo, args, yes } => {
+            commands::run_apply(repo.as_deref(), cli.global_root, &args, yes)
         }
         Command::Cluster { command } => commands::run_cluster(cli.global_root, &command),
         Command::Completions { shell } => {

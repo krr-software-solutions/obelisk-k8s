@@ -34,6 +34,7 @@ defines the CLI (the clap types, `--help` headings, completions) and dispatches 
   merged over the config values.
 - `config/manifests.rs`: the rendered resources (`template manifests`): templates rendered with the
   generated values.
+- `config/apply.rs`: `apply`: rendered manifests installed as Helm releases on each target's cluster.
 - `config/ephemeral.rs`: an ephemeral target's copy (`--ephemeral-name` and its values), and checking
   a selection needs one exactly when it has an ephemeral target.
 - `cluster.rs`: `cluster status` / `up` / `down` / `destroy` for managed clusters (local k3d only).
@@ -42,7 +43,8 @@ defines the CLI (the clap types, `--help` headings, completions) and dispatches 
 - `obeliskd.rs`: asking `obeliskd` for the docker subnet a cluster runs on, and claiming /
   releasing the base's ips and hostnames.
 - `git.rs`: the `obelisk.git` facts (sha, tag, dirt), read with `git`.
-- `helm.rs`: running `helm template` on a throwaway chart (for Go templates).
+- `helm.rs`: running Helm: `helm template` on a throwaway chart (for Go templates), and
+  `helm upgrade --install` (of charts, and of rendered manifests through a throwaway chart).
 - `config/paths.rs`: which config files a unit gets on a target, and their merge order. Behind
   `config repo paths`.
 

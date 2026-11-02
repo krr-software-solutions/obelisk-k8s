@@ -102,6 +102,17 @@ ip-allocator.
   *within* one template by kind). A template may print any number of documents. No shared `define`s
   across files for now (tentative). `.Release.{Name, Namespace}` is the case's agreed release (see
   below). Takes `--repo` too.
+- `obelisk-k8s apply [-t …]… [-u …]… [--ephemeral-*] [--yes]`: installs what `template manifests`
+  renders, one Helm release per unit on a target: its agreed release name, into its agreed namespace
+  (created if missing), at its agreed version, via a throwaway chart that ships the rendered
+  manifests as-is (`{{ .Files.Get }}`, no second templating), with `helm upgrade --install
+  --rollback-on-failure` on the target's cluster's context (`k3d-<name>` for a local k3d cluster,
+  else its `kubectlContext`; none is an error). Everything is planned before anything installs:
+  clusters resolved, every case rendered, and two cases that would be the same release on the same
+  context (the second would replace the first), or a case whose templates render nothing (an upgrade
+  would empty the release), are errors. A remote cluster needs `--yes`. A unit with no templates is
+  skipped. Each install waits up to 5m and rolls back if it doesn't come up; if one fails, the ones
+  before it stay applied. Takes `--repo` too; the clusters come from the global config.
 - `obelisk-k8s template generated-values [-t …]… [-u …]…`: the merged values with each of the unit's
   generators deep-merged on top, in merge order. `generators:` (in `repo.yaml`, `target.yaml`,
   `unit.yaml`) lists `{ type: gotmpl, path }` like config paths (interpolated, missing files skipped).
@@ -137,7 +148,7 @@ config files ─▶ values ─▶ generators ─▶ generated values ─▶ temp
 - **Templates** (`templates:`) are Go templates that render k8s resources from the generated values.
   Generators and templates each render on their own through a throwaway Helm chart, so they get all of
   Helm's functions.
-- **Helm** renders, and will apply (`helm upgrade --install`, still tentative): every unit is a Helm
+- **Helm** renders, and applies (`helm upgrade --install`): every unit is a Helm
   release. Upstream charts, raw YAML and YAML from a URL (wrapped into throwaway charts), and
   executable generators are planned, not built.
 - **obelisk-k8s** will order units (CRDs before what uses them, across namespaces), wait for
@@ -192,7 +203,7 @@ Nothing below is decided. Don't silently pick an answer in code; raise it.
 - Do our own apps need Helm charts, or can a generator emit plain YAML?
 - Do raw/URL YAML units still get `ref+awsssm` resolution once wrapped (obelisk-local's `doTemplate`)?
 - CRD upgrades, given Helm never upgrades `crds/`.
-- Is apply part of v1, or only `template`?
+- ~~Is apply part of v1, or only `template`?~~ Decided: it is (`obelisk-k8s apply`, above).
 - Does the tool own instance identity for clean up/down (v1.1)? Hook shape (v1.2)?
 
 These are tracked in the Aletheia knowledge graph, project OBLSK (start at OBLSK/I-102).

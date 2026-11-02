@@ -274,7 +274,7 @@ pub fn status(config: &GlobalConfig, name: Option<&str>) -> Result<StatusReport,
         Some(name) => vec![config.cluster(name)?],
         None => config.clusters.iter().collect(),
     };
-    let list = if clusters.iter().any(|c| is_local_k3d(c)) {
+    let list = if clusters.iter().any(|c| c.is_local_k3d()) {
         k3d::list()?
     } else {
         k3d::List::default()
@@ -284,12 +284,12 @@ pub fn status(config: &GlobalConfig, name: Option<&str>) -> Result<StatusReport,
         warnings: Vec::new(),
     };
     for cluster in clusters {
-        let existing = if is_local_k3d(cluster) {
+        let existing = if cluster.is_local_k3d() {
             list.find(&cluster.name)?
         } else {
             None
         };
-        if cluster.managed && is_local_k3d(cluster) {
+        if cluster.managed && cluster.is_local_k3d() {
             report.warnings.extend(warnings(cluster));
         }
         report.statuses.push(status_of(cluster, existing.as_ref()));
@@ -298,24 +298,21 @@ pub fn status(config: &GlobalConfig, name: Option<&str>) -> Result<StatusReport,
 }
 
 fn status_of(cluster: &Cluster, existing: Option<&Existing>) -> Status {
-    let local_k3d = is_local_k3d(cluster);
+    let local_k3d = cluster.is_local_k3d();
     Status {
         name: cluster.name.clone(),
         k8s: cluster.k8s,
         location: cluster.location,
         managed: cluster.managed,
         state: (cluster.managed && local_k3d).then(|| State::of(existing)),
-        context: match existing {
-            Some(_) => Some(k3d::context(&cluster.name)),
-            None if local_k3d => None,
-            None => cluster.kubectl_context.clone(),
+        // A local k3d cluster has a context only while it exists.
+        context: if local_k3d && existing.is_none() {
+            None
+        } else {
+            cluster.context()
         },
         network: existing.map(|e| e.network.clone()),
     }
-}
-
-fn is_local_k3d(cluster: &Cluster) -> bool {
-    (cluster.k8s, cluster.location) == (K8s::K3d, Location::Local)
 }
 
 /// The cluster `name` in `config`, if it's one obelisk-k8s can bring up, down and away.
@@ -327,7 +324,7 @@ fn managed_k3d<'a>(config: &'a GlobalConfig, name: &str) -> Result<&'a Cluster, 
             cluster.file.display()
         )));
     }
-    if !is_local_k3d(cluster) {
+    if !cluster.is_local_k3d() {
         return Err(ObeliskK8sError::Usage(format!(
             "cluster `{name}` is {} on {}: obelisk-k8s can only bring up local k3d clusters so far",
             cluster.k8s, cluster.location

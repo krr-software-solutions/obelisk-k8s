@@ -10,7 +10,8 @@ use obelisk_k8s::config::repo::RepoConfig;
 use obelisk_k8s::{ObeliskK8sError, cluster};
 
 use crate::{
-    ClusterCommand, EphemeralArgs, GlobalRepoCommand, ManagedClusterCommand, TemplateCommand,
+    ClusterCommand, EphemeralArgs, GlobalRepoCommand, ManagedClusterCommand, TemplateArgs,
+    TemplateCommand,
 };
 
 fn cwd() -> Result<PathBuf, ObeliskK8sError> {
@@ -39,6 +40,15 @@ fn repo_root(
     };
     let (root, home) = global_root(global_root_arg)?;
     let config = GlobalConfig::load(&root, home.as_deref())?;
+    find_repo(name, &config, home.as_deref())
+}
+
+/// Repo `name` in `config`, and where it is as the user should see it.
+fn find_repo(
+    name: &str,
+    config: &GlobalConfig,
+    home: Option<&Path>,
+) -> Result<(PathBuf, Option<PathBuf>), ObeliskK8sError> {
     let found = config.repos.iter().find(|r| r.name == name).ok_or_else(|| {
         let known: Vec<_> = config.repos.iter().map(|r| r.name.as_str()).collect();
         let known = if known.is_empty() { "none".to_owned() } else { known.join(", ") };
@@ -47,10 +57,7 @@ fn repo_root(
             config.root.join("repos.yaml").display()
         ))
     })?;
-    Ok((
-        found.path.clone(),
-        Some(tilde(&found.path, home.as_deref())),
-    ))
+    Ok((found.path.clone(), Some(tilde(&found.path, home))))
 }
 
 pub fn run_config_repo_show(
@@ -185,6 +192,36 @@ pub fn run_cluster(
         ManagedClusterCommand::Down { name } => report(cluster::down(&config, name)?),
         ManagedClusterCommand::Destroy { name } => report(cluster::destroy(&config, name)?),
     }
+    Ok(())
+}
+
+pub fn run_apply(
+    repo: Option<&str>,
+    global_root_arg: Option<PathBuf>,
+    args: &TemplateArgs,
+    yes: bool,
+) -> Result<(), ObeliskK8sError> {
+    // The clusters come from the global config, and so does the repo with `--repo`: load it once.
+    let (global_root, home) = global_root(global_root_arg)?;
+    let global = GlobalConfig::load(&global_root, home.as_deref())?;
+    warn(&global.warnings);
+    let (repo_root, shown_root) = match repo {
+        Some(name) => find_repo(name, &global, home.as_deref())?,
+        None => (cwd()?, None),
+    };
+    let config = load_repo_config(&repo_root)?;
+    let selection = config.select(&args.targets, &args.units)?;
+    let ephemeral = ephemeral(&args.ephemeral)?;
+    let report = config.apply(
+        &repo_root,
+        &selection,
+        shown_root.as_deref(),
+        ephemeral.as_ref(),
+        &global,
+        yes,
+        |step| eprintln!("{step}"),
+    )?;
+    print!("{report}");
     Ok(())
 }
 
