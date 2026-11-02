@@ -18,8 +18,9 @@ use std::path::Path;
 use crate::ObeliskK8sError;
 use crate::config::paths::{Selection, write_yaml_cases};
 use crate::config::repo::{RepoConfig, Target, Unit};
+use crate::config::values::OBELISK_KEY;
 use crate::config::values::shown_under;
-use crate::helm;
+use crate::{git, helm};
 
 /// What `.Release.Namespace` is while a template renders, for now.
 const TEMPLATE_NAMESPACE: &str = "default";
@@ -55,10 +56,11 @@ impl RepoConfig {
         selection: &Selection<'a>,
         shown_root: Option<&Path>,
     ) -> Result<ManifestsReport<'a>, ObeliskK8sError> {
+        let git = git::facts(repo_root);
         let cases = selection
             .cases
             .iter()
-            .map(|(target, unit)| self.manifests_for(repo_root, shown_root, target, unit))
+            .map(|(target, unit)| self.manifests_for(repo_root, shown_root, target, unit, &git))
             .collect::<Result<_, _>>()?;
         Ok(ManifestsReport {
             cases,
@@ -72,15 +74,24 @@ impl RepoConfig {
         shown_root: Option<&Path>,
         target: &'a Target,
         unit: &'a Unit,
+        git: &serde_json::Value,
     ) -> Result<ManifestsCase<'a>, ObeliskK8sError> {
         let templates = self.resolve_templates(repo_root, target, unit)?;
         let mut manifests = String::new();
         // Nothing to render: skip the generators too (each is a `helm` run).
         if templates.iter().any(|p| p.found) {
             helm::check_release_name(&unit.name, "unit", "templates")?;
-            let values = self
-                .generated_for(repo_root, shown_root, target, unit)?
-                .yaml;
+            let generated = self.generated_for(repo_root, shown_root, target, unit, git)?;
+            let version = generated.values[OBELISK_KEY]["version"]
+                .as_str()
+                .unwrap_or_default();
+            if !helm::is_chart_version(version) {
+                return Err(ObeliskK8sError::Usage(format!(
+                    "version `{version}` for unit `{}` on target `{}` isn't SemVer, which Helm needs for a chart version: e.g. `0.0.0-{version}`, or a tag like `v1.2.3`",
+                    unit.name, target.name
+                )));
+            }
+            let values = generated.yaml;
             for path in templates.iter().filter(|p| p.found) {
                 let shown = shown_under(shown_root, &path.path);
                 let rendered = helm::render(
@@ -89,6 +100,7 @@ impl RepoConfig {
                     &values,
                     &unit.name,
                     TEMPLATE_NAMESPACE,
+                    Some(version),
                 )?;
                 // A template that renders nothing still gets a newline from Helm.
                 if !rendered.trim().is_empty() {
@@ -131,7 +143,7 @@ mod tests {
             ("targets/dev/target.yaml", "target:\n  cluster: c\n"),
             (
                 "units/app/unit.yaml",
-                "unit:\n  templates: [{ type: gotmpl, path: ./app.gotmpl }]\n",
+                "unit:\n  version: 1.0.0\n  templates: [{ type: gotmpl, path: ./app.gotmpl }]\n",
             ),
             ("values.yaml", "port: 8080\n"),
             (
@@ -212,7 +224,7 @@ mod tests {
             ),
             (
                 "units/app/unit.yaml",
-                "unit:\n  templates:\n    - { type: gotmpl, path: \"./${{obelisk:target}}-unit.gotmpl\" }\n    - { type: gotmpl, path: ./app.gotmpl }\n",
+                "unit:\n  version: 1.0.0\n  templates:\n    - { type: gotmpl, path: \"./${{obelisk:target}}-unit.gotmpl\" }\n    - { type: gotmpl, path: ./app.gotmpl }\n",
             ),
             ("all.gotmpl", CONFIG_MAP),
             ("target.gotmpl", &target_cm),
@@ -300,5 +312,61 @@ mod tests {
             error.to_string().contains("has templates") && error.to_string().contains("at most 53"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn the_chart_carries_the_version() {
+        if !helm_installed() {
+            return;
+        }
+        let dir = repo(&[(
+            "all.gotmpl",
+            "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\ndata:\n  chart: {{ .Chart.Version | quote }}\n  app: {{ .Chart.AppVersion | quote }}\n  values: {{ .Values.obelisk.version | quote }}\n",
+        )]);
+        let text = manifests(&dir, &["dev"]).unwrap();
+        assert!(
+            text.contains("  chart: \"1.0.0\"\n  app: \"1.0.0\"\n  values: \"1.0.0\"\n"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_version_must_be_semver_to_render_templates() {
+        // Checked before `helm` runs.
+        let dir = repo(&[
+            ("all.gotmpl", CONFIG_MAP),
+            (
+                "units/app/unit.yaml",
+                "unit:\n  version: b84d8f6\n  templates: [{ type: gotmpl, path: ./app.gotmpl }]\n",
+            ),
+            (
+                "repo.yaml",
+                "repo:\n  name: r\n  templates: [{ type: gotmpl, path: ./all.gotmpl }]\n",
+            ),
+        ]);
+        let e = manifests(&dir, &["dev"]).unwrap_err().to_string();
+        assert_eq!(
+            e,
+            "version `b84d8f6` for unit `app` on target `dev` isn't SemVer, which Helm needs for a chart version: e.g. `0.0.0-b84d8f6`, or a tag like `v1.2.3`"
+        );
+    }
+
+    #[test]
+    fn a_number_like_version_stays_a_string_in_the_chart() {
+        if !helm_installed() {
+            return;
+        }
+        let dir = repo(&[
+            (
+                "units/app/unit.yaml",
+                "unit:\n  version: \"1.0\"\n  templates: [{ type: gotmpl, path: ./app.gotmpl }]\n",
+            ),
+            (
+                "app.gotmpl",
+                "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\ndata:\n  chart: {{ .Chart.Version | quote }}\n",
+            ),
+        ]);
+        let text = manifests(&dir, &["dev"]).unwrap();
+        assert!(text.contains("  chart: \"1.0\"\n"), "{text}");
     }
 }

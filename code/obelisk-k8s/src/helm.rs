@@ -28,12 +28,46 @@ pub(crate) fn check_release_name(
     Ok(())
 }
 
+/// Whether `version` is a chart version Helm takes: `SemVer`, loosely (an optional `v`, one to three
+/// numeric parts without leading zeros, then optional `-prerelease` and `+build` parts, where a
+/// numeric prerelease part can't have a leading zero either).
+#[must_use]
+pub(crate) fn is_chart_version(version: &str) -> bool {
+    let rest = version.strip_prefix('v').unwrap_or(version);
+    let (rest, build) = rest
+        .split_once('+')
+        .map_or((rest, None), |(r, b)| (r, Some(b)));
+    let (core, pre) = rest
+        .split_once('-')
+        .map_or((rest, None), |(c, p)| (c, Some(p)));
+    let numeric = |part: &str| {
+        !part.is_empty()
+            && part.bytes().all(|b| b.is_ascii_digit())
+            && (part == "0" || !part.starts_with('0'))
+    };
+    let identifier =
+        |p: &str| !p.is_empty() && p.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
+    let identifiers = |s: &str| !s.is_empty() && s.split('.').all(identifier);
+    // A numeric prerelease part can't have a leading zero (build metadata can).
+    let prerelease = |s: &str| {
+        identifiers(s)
+            && s.split('.')
+                .all(|p| !p.bytes().all(|b| b.is_ascii_digit()) || numeric(p))
+    };
+    let parts: Vec<&str> = core.split('.').collect();
+    (1..=3).contains(&parts.len())
+        && parts.iter().all(|p| numeric(p))
+        && pre.is_none_or(prerelease)
+        && build.is_none_or(identifiers)
+}
+
 /// The throwaway chart's name; Helm names templates `<chart>/templates/<file>` in its errors.
 const CHART: &str = "obelisk-render";
 const TEMPLATE: &str = "templates/template.yaml";
 
 /// Renders the Go template at `template` (shown as `shown`) with `values_yaml` as `.Values`, as release
-/// `release` in namespace `namespace`, and returns what it printed (`---`-separated documents).
+/// `release` in namespace `namespace`, in a chart whose `version` and `appVersion` are `chart_version`
+/// (`0.0.0` without one), and returns what it printed (`---`-separated documents).
 ///
 /// # Errors
 ///
@@ -45,6 +79,7 @@ pub(crate) fn render(
     values_yaml: &str,
     release: &str,
     namespace: &str,
+    chart_version: Option<&str>,
 ) -> Result<String, ObeliskK8sError> {
     let io_error = |source| ObeliskK8sError::Io {
         path: shown.to_owned(),
@@ -58,10 +93,12 @@ pub(crate) fn render(
             .and_then(|()| std::fs::write(path, contents))
             .map_err(io_error)
     };
-    write(
-        "Chart.yaml",
-        &format!("apiVersion: v2\nname: {CHART}\nversion: 0.0.0\n"),
+    let version = chart_version.unwrap_or("0.0.0");
+    let chart_yaml = crate::yaml::to_string(
+        &serde_json::json!({ "apiVersion": "v2", "name": CHART, "version": version, "appVersion": version }),
+        Path::new("Chart.yaml"),
     )?;
+    write("Chart.yaml", &chart_yaml)?;
     write("values.yaml", values_yaml)?;
     write(TEMPLATE, &text)?;
 
@@ -104,4 +141,45 @@ pub(crate) fn render(
         &format!("---\n# Source: {CHART}/{TEMPLATE}\n"),
         &format!("---\n# Source: {}\n", shown.display()),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn knows_chart_versions() {
+        for ok in [
+            "0.0.0",
+            "1.2.3",
+            "v1.2.3",
+            "1.2",
+            "1",
+            "0.0.0-b84d8f6",
+            "v1.2.3-4-gb84d8f6-dirty",
+            "1.2.3+dirty",
+            "1.2.3-rc.1+build.5",
+            "1.2.3+01",
+            "0.0.0-a123456",
+        ] {
+            assert!(is_chart_version(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "b84d8f6",
+            "0b84d8f6",
+            "main",
+            "1.2.3.4",
+            "01.2.3",
+            "1.2.3-",
+            "1.2.3-a..b",
+            "v",
+            "1.2.3 ",
+            "1.2.3-01",
+            "1.2.3-rc.01",
+            "0.0.0-0123456",
+        ] {
+            assert!(!is_chart_version(bad), "{bad}");
+        }
+    }
 }

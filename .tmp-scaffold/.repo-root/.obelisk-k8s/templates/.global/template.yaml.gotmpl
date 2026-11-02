@@ -10,5 +10,8 @@ metadata:
 data:
   long-name: {{ index .Values "long-name" | quote }}
   ab: {{ .Values.stuff.ab | quote }}
+  version: {{ .Values.obelisk.version | quote }}
+  chart-version: {{ .Chart.Version | quote }}
+  git-sha: {{ .Values.obelisk.git.sha.short | quote }}
   stuff.yaml: |
     {{- toYaml .Values.stuff | nindent 4 }}

@@ -3,8 +3,9 @@
 //!
 //! Maps merge key by key, recursively; anything else (lists, scalars, `null`) replaces what was there.
 //! A file that's empty or `null` adds nothing. `obelisk:` is the tool's: a file may only set
-//! `obelisk.release.{name, namespace}`, as strings (parsed into [`ValuesCase::releases`], and left out
-//! of the values), and anything else under it is an error. `ref+awsssm` refs aren't resolved yet.
+//! `obelisk.release.{name, namespace}` and `obelisk.version`, as strings (parsed into
+//! [`ValuesCase::sets`] and left out of the values: the version goes back in once it's agreed, after
+//! the generators), and anything else under it is an error. `ref+awsssm` refs aren't resolved yet.
 //!
 //! Values go through a generic tree, so quoted strings stay strings (`"0755"`, `"yes"`, `"1e3"` come out
 //! quoted) and block scalars keep their text, but plain scalars come out in their parsed form:
@@ -25,7 +26,7 @@ use serde_json::{Map, Value};
 use crate::ObeliskK8sError;
 use crate::config::paths::{Selection, write_yaml_cases};
 use crate::config::repo::{RepoConfig, Target, Unit};
-use crate::yaml;
+use crate::{git, yaml};
 
 /// The key the tool's own block goes under, at the top of the merged values.
 pub const OBELISK_KEY: &str = "obelisk";
@@ -39,9 +40,10 @@ pub struct ValuesCase<'a> {
     pub values: Map<String, Value>,
     /// `values` as YAML.
     pub yaml: String,
-    /// What each config file (relative to the repo root) set under `obelisk.release`, in merge order;
-    /// files that set nothing are left out. Parsed, not used yet (it's not in `values`).
-    pub releases: Releases,
+    /// What each file (relative to the repo root) set under `obelisk:`, in merge order; files that set
+    /// nothing are left out. The release name and namespace are parsed, not used yet; the version is
+    /// agreed on after the generators.
+    pub sets: FileObelisks,
 }
 
 /// What `template values` prints: a single case's values as plain YAML, or several as a YAML stream,
@@ -66,10 +68,11 @@ impl RepoConfig {
         selection: &Selection<'a>,
         shown_root: Option<&Path>,
     ) -> Result<ValuesReport<'a>, ObeliskK8sError> {
+        let git = git::facts(repo_root);
         let cases = selection
             .cases
             .iter()
-            .map(|(target, unit)| self.values_for(repo_root, shown_root, target, unit))
+            .map(|(target, unit)| self.values_for(repo_root, shown_root, target, unit, &git))
             .collect::<Result<_, _>>()?;
         Ok(ValuesReport {
             cases,
@@ -83,23 +86,28 @@ impl RepoConfig {
         shown_root: Option<&Path>,
         target: &'a Target,
         unit: &'a Unit,
+        git: &Value,
     ) -> Result<ValuesCase<'a>, ObeliskK8sError> {
-        let (values, releases) = self.config_values(repo_root, shown_root, target, unit)?;
-        ValuesCase::new(target, unit, values, releases)
+        let (values, sets) = self.config_values(repo_root, shown_root, target, unit, git)?;
+        ValuesCase::new(target, unit, values, sets)
     }
 
     /// The `obelisk:` block, then `unit`'s config files on `target` merged; and what the files set
-    /// under `obelisk.release`.
+    /// under `obelisk:`.
     pub(crate) fn config_values(
         &self,
         repo_root: &Path,
         shown_root: Option<&Path>,
         target: &Target,
         unit: &Unit,
-    ) -> Result<(Map<String, Value>, Releases), ObeliskK8sError> {
+        git: &Value,
+    ) -> Result<(Map<String, Value>, FileObelisks), ObeliskK8sError> {
         let mut values = Map::new();
-        values.insert(OBELISK_KEY.to_owned(), self.obelisk_block(target, unit));
-        let mut releases = Vec::new();
+        values.insert(
+            OBELISK_KEY.to_owned(),
+            self.obelisk_block(target, unit, git),
+        );
+        let mut sets = Vec::new();
         for path in self
             .resolve(repo_root, target, unit)?
             .iter()
@@ -109,35 +117,36 @@ impl RepoConfig {
             let file = yaml::read_values(&repo_root.join(&path.path), &shown)?;
             absorb(
                 &mut values,
-                &mut releases,
+                &mut sets,
                 file,
                 &path.path,
                 &shown,
                 "a config file",
             )?;
         }
-        Ok((values, releases))
+        Ok((values, sets))
     }
 
     /// What the tool knows about the case.
-    fn obelisk_block(&self, target: &Target, unit: &Unit) -> Value {
+    fn obelisk_block(&self, target: &Target, unit: &Unit, git: &Value) -> Value {
         let mut block = Map::new();
         block.insert("repo".to_owned(), Value::String(self.name.clone()));
         block.insert("target".to_owned(), Value::String(target.name.clone()));
         block.insert("unit".to_owned(), Value::String(unit.name.clone()));
+        block.insert("git".to_owned(), git.clone());
         Value::Object(block)
     }
 }
 
-/// What each file set under `obelisk.release` (relative to the repo root), in merge order.
-pub type Releases = Vec<(PathBuf, FileRelease)>;
+/// What each file set under `obelisk:` (relative to the repo root), in merge order.
+pub type FileObelisks = Vec<(PathBuf, FileObelisk)>;
 
 impl<'a> ValuesCase<'a> {
     pub(crate) fn new(
         target: &'a Target,
         unit: &'a Unit,
         values: Map<String, Value>,
-        releases: Releases,
+        sets: FileObelisks,
     ) -> Result<Self, ObeliskK8sError> {
         let yaml = values_yaml(&values, target, unit)?;
         Ok(Self {
@@ -145,7 +154,7 @@ impl<'a> ValuesCase<'a> {
             unit: &unit.name,
             values,
             yaml,
-            releases,
+            sets,
         })
     }
 }
@@ -169,11 +178,12 @@ pub(crate) fn shown_under(shown_root: Option<&Path>, path: &Path) -> PathBuf {
 }
 
 /// Merges one file's values (a config file, or a generator's output) into `values`: it must be a
-/// mapping or nothing, and may only set `obelisk.release.{name, namespace}` under `obelisk:`, which is
-/// recorded in `releases` (as `path`) and kept out of `values`. `what` names the kind of file.
+/// mapping or nothing, and may only set `obelisk.release.{name, namespace}` and `obelisk.version` under
+/// `obelisk:`, which is recorded in `sets` (as `path`) and kept out of `values`. `what` names the kind
+/// of file.
 pub(crate) fn absorb(
     values: &mut Map<String, Value>,
-    releases: &mut Releases,
+    sets: &mut FileObelisks,
     file: Value,
     path: &Path,
     shown: &Path,
@@ -188,9 +198,9 @@ pub(crate) fn absorb(
         Value::Null => Ok(()),
         Value::Object(mut file) => {
             if let Some(obelisk) = file.remove(OBELISK_KEY) {
-                let release = release_in_file(&obelisk, what).map_err(error)?;
-                if release != FileRelease::default() {
-                    releases.push((path.to_owned(), release));
+                let set = obelisk_in_file(&obelisk, what).map_err(error)?;
+                if set != FileObelisk::default() {
+                    sets.push((path.to_owned(), set));
                 }
             }
             merge(values, file);
@@ -200,29 +210,44 @@ pub(crate) fn absorb(
     }
 }
 
-/// What a config file says about the Helm release, under `obelisk.release`.
+/// What a config file (or generator) set under `obelisk:`: the Helm release's name and namespace
+/// (`obelisk.release.{name, namespace}`), and the version (`obelisk.version`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct FileRelease {
+pub struct FileObelisk {
     pub name: Option<String>,
     pub namespace: Option<String>,
+    pub version: Option<String>,
 }
 
-/// The `obelisk:` a config file set: `null`, or `{ release: null | { name?, namespace? } }`, where both
-/// are strings (or `null`). Values files are typed, so a plain `123` is a number: quote it.
-fn release_in_file(obelisk: &Value, what: &str) -> Result<FileRelease, String> {
+/// The `obelisk:` a config file set: `null`, or `{ release?: null | { name?, namespace? }, version? }`,
+/// where each is a string (or `null`). Values files are typed, so a plain `123` is a number: quote it.
+fn obelisk_in_file(obelisk: &Value, what: &str) -> Result<FileObelisk, String> {
     let only = format!(
-        "`{OBELISK_KEY}:` is reserved; {what} may only set `{OBELISK_KEY}.release.name` and `{OBELISK_KEY}.release.namespace`"
+        "`{OBELISK_KEY}:` is reserved; {what} may only set `{OBELISK_KEY}.release.name`, `{OBELISK_KEY}.release.namespace` and `{OBELISK_KEY}.version`"
     );
+    let string = |map: &Map<String, Value>, key: &str, shown: &str| match map.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => Ok(Some(s.clone())),
+        Some(other) => Err(format!(
+            "`{OBELISK_KEY}.{shown}` must be a string, not `{other}` (quote it)"
+        )),
+    };
     let obelisk = match obelisk {
-        Value::Null => return Ok(FileRelease::default()),
+        Value::Null => return Ok(FileObelisk::default()),
         Value::Object(map) => map,
         _ => return Err(format!("{only}, so `{OBELISK_KEY}:` must be a mapping")),
     };
-    if let Some(other) = obelisk.keys().find(|k| *k != "release") {
+    if let Some(other) = obelisk.keys().find(|k| *k != "release" && *k != "version") {
         return Err(format!("{only}, not `{OBELISK_KEY}.{other}`"));
     }
+    let version = string(obelisk, "version", "version")?;
     let release = match obelisk.get("release") {
-        None | Some(Value::Null) => return Ok(FileRelease::default()),
+        None | Some(Value::Null) => {
+            return Ok(FileObelisk {
+                version,
+                ..FileObelisk::default()
+            });
+        }
         Some(Value::Object(map)) => map,
         Some(_) => {
             return Err(format!(
@@ -233,16 +258,10 @@ fn release_in_file(obelisk: &Value, what: &str) -> Result<FileRelease, String> {
     if let Some(other) = release.keys().find(|k| *k != "name" && *k != "namespace") {
         return Err(format!("{only}, not `{OBELISK_KEY}.release.{other}`"));
     }
-    let field = |key: &str| match release.get(key) {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(s)) => Ok(Some(s.clone())),
-        Some(other) => Err(format!(
-            "`{OBELISK_KEY}.release.{key}` must be a string, not `{other}` (quote it)"
-        )),
-    };
-    Ok(FileRelease {
-        name: field("name")?,
-        namespace: field("namespace")?,
+    Ok(FileObelisk {
+        name: string(release, "name", "release.name")?,
+        namespace: string(release, "namespace", "release.namespace")?,
+        version,
     })
 }
 
@@ -319,7 +338,7 @@ mod tests {
         ]);
         assert_eq!(
             report(&dir, &["prod"], &["app"]).unwrap(),
-            "obelisk:\n  repo: r\n  target: prod\n  unit: app\n\
+            "obelisk:\n  repo: r\n  target: prod\n  unit: app\n  git: null\n\
              db:\n  host: prod\n  port: 5432\n  pool:\n    max: 10\n    min: 1\n\
              list:\n- 3\nkeep: g\nextra: null\n"
         );
@@ -334,7 +353,7 @@ mod tests {
              tpl: |\n  {{ .Values.x }}\n  line two\nref: \"ref+awsssm:///app/x\"\n",
         )]);
         let text = report(&dir, &["prod"], &["app"]).unwrap();
-        let body = text.split_once("unit: app\n").unwrap().1;
+        let body = text.split_once("git: null\n").unwrap().1;
         // (The key `n` comes out quoted: plain, it's a YAML 1.1 boolean.)
         assert_eq!(
             body,
@@ -357,7 +376,7 @@ mod tests {
         let dir = base(&[("global.yaml", ""), ("prod.yaml", "# nothing\n")]);
         assert_eq!(
             report(&dir, &["prod"], &["app"]).unwrap(),
-            "obelisk:\n  repo: r\n  target: prod\n  unit: app\n"
+            "obelisk:\n  repo: r\n  target: prod\n  unit: app\n  git: null\n"
         );
     }
 
@@ -374,11 +393,11 @@ mod tests {
         assert!(error.contains(".obelisk-k8s/prod.yaml:"), "{error}");
     }
 
-    fn case_releases(dir: &tempfile::TempDir) -> Vec<(PathBuf, FileRelease)> {
+    fn case_sets(dir: &tempfile::TempDir) -> Vec<(PathBuf, FileObelisk)> {
         let config = RepoConfig::load(dir.path()).unwrap();
         let selection = config.select(&["prod".into()], &["app".into()]).unwrap();
         let report = config.values_report(dir.path(), &selection, None).unwrap();
-        report.cases.into_iter().next().unwrap().releases
+        report.cases.into_iter().next().unwrap().sets
     }
 
     #[test]
@@ -392,14 +411,15 @@ mod tests {
         ]);
         assert_eq!(
             report(&dir, &["prod"], &["app"]).unwrap(),
-            "obelisk:\n  repo: r\n  target: prod\n  unit: app\nenv: prod\n"
+            "obelisk:\n  repo: r\n  target: prod\n  unit: app\n  git: null\nenv: prod\n"
         );
-        let release = |name: Option<&str>, namespace: &str| FileRelease {
+        let release = |name: Option<&str>, namespace: &str| FileObelisk {
             name: name.map(str::to_owned),
             namespace: Some(namespace.to_owned()),
+            version: None,
         };
         assert_eq!(
-            case_releases(&dir),
+            case_sets(&dir),
             [
                 (
                     PathBuf::from(".obelisk-k8s/global.yaml"),
@@ -423,13 +443,13 @@ mod tests {
             "obelisk:\n  release: { name: null }\n",
         ] {
             let dir = base(&[("prod.yaml", empty)]);
-            assert_eq!(case_releases(&dir), [], "{empty:?}");
+            assert_eq!(case_sets(&dir), [], "{empty:?}");
         }
     }
 
     #[test]
     fn reserves_the_rest_of_the_obelisk_key() {
-        let only = "`obelisk:` is reserved; a config file may only set `obelisk.release.name` and `obelisk.release.namespace`";
+        let only = "`obelisk:` is reserved; a config file may only set `obelisk.release.name`, `obelisk.release.namespace` and `obelisk.version`";
         for (bad, why) in [
             (
                 "obelisk:\n  target: other\n",
@@ -470,7 +490,7 @@ mod tests {
             assert_eq!(error, format!(".obelisk-k8s/prod.yaml: {why}"), "{bad:?}");
         }
         let dir = base(&[("prod.yaml", "obelisk:\n  release: { name: \"123\" }\n")]);
-        assert_eq!(case_releases(&dir)[0].1.name.as_deref(), Some("123"));
+        assert_eq!(case_sets(&dir)[0].1.name.as_deref(), Some("123"));
     }
 
     #[test]
@@ -478,8 +498,8 @@ mod tests {
         let dir = base(&[("dev.yaml", "env: dev\n"), ("prod.yaml", "env: prod\n")]);
         assert_eq!(
             report(&dir, &[], &[]).unwrap(),
-            "# [ target=dev, unit=app ]\nobelisk:\n  repo: r\n  target: dev\n  unit: app\nenv: dev\n---\n\
-             # [ target=prod, unit=app ]\nobelisk:\n  repo: r\n  target: prod\n  unit: app\nenv: prod\n"
+            "# [ target=dev, unit=app ]\nobelisk:\n  repo: r\n  target: dev\n  unit: app\n  git: null\nenv: dev\n---\n\
+             # [ target=prod, unit=app ]\nobelisk:\n  repo: r\n  target: prod\n  unit: app\n  git: null\nenv: prod\n"
         );
     }
 
@@ -504,6 +524,34 @@ mod tests {
         assert_eq!(
             error,
             "~/dev/r/.obelisk-k8s/prod.yaml: a config file must be a mapping (or empty)"
+        );
+    }
+
+    #[test]
+    fn the_obelisk_block_has_the_git_facts() {
+        // A temp dir isn't a git repo; `git::facts` itself is tested in `git.rs`.
+        let dir = base(&[]);
+        let text = report(&dir, &["prod"], &["app"]).unwrap();
+        assert!(
+            text.starts_with("obelisk:\n  repo: r\n  target: prod\n  unit: app\n  git: null\n"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn keeps_a_config_files_version_out_of_the_values() {
+        let dir = base(&[("prod.yaml", "obelisk:\n  version: v1.2.3\n")]);
+        assert!(
+            !report(&dir, &["prod"], &["app"])
+                .unwrap()
+                .contains("version")
+        );
+        assert_eq!(case_sets(&dir)[0].1.version.as_deref(), Some("v1.2.3"));
+        let dir = base(&[("prod.yaml", "obelisk:\n  version: 1.5\n")]);
+        let e = report(&dir, &["prod"], &["app"]).unwrap_err().to_string();
+        assert!(
+            e.ends_with("`obelisk.version` must be a string, not `1.5` (quote it)"),
+            "{e}"
         );
     }
 }

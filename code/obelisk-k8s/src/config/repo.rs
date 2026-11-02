@@ -3,8 +3,8 @@
 //! ```text
 //! .obelisk-k8s/
 //!   repo.yaml                 repo: { name, helmRepos, configPaths, generators, templates }
-//!   targets/<dir>/target.yaml target: { name, cluster, configPaths, generators, templates, release: { name, namespace } }
-//!   units/<dir>/unit.yaml     unit: { name, configPaths, generators, templates, targets, release: { name, namespace } }
+//!   targets/<dir>/target.yaml target: { name, cluster, configPaths, generators, templates, release: { name, namespace }, version }
+//!   units/<dir>/unit.yaml     unit: { name, configPaths, generators, templates, targets, release: { name, namespace }, version }
 //! ```
 //!
 //! A target's or unit's name defaults to its directory's name. `null` and missing mean the same thing
@@ -59,6 +59,9 @@ pub struct Target {
     pub generators: Vec<RenderFile>,
     pub templates: Vec<RenderFile>,
     pub release: Release,
+    /// The version its units' Helm releases get (`obelisk.version`), interpolated. Parsed here, agreed
+    /// on after generation.
+    pub version: Option<InterpString>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,6 +74,9 @@ pub struct Unit {
     pub templates: Vec<RenderFile>,
     pub targets: UnitTargets,
     pub release: Release,
+    /// The version its Helm release gets (`obelisk.version`), interpolated. Parsed here, agreed on after
+    /// generation.
+    pub version: Option<InterpString>,
 }
 
 /// A file obelisk-k8s renders: a generator (`generators:`, more values from the merged config values)
@@ -139,6 +145,7 @@ impl RepoConfig {
                 templates: check_render_files(&entry.file, target.templates, TEMPLATE_PATH)?,
                 cluster: target.cluster,
                 release: target.release.unwrap_or_default(),
+                version: target.version,
                 file: entry.file,
             });
         }
@@ -157,6 +164,7 @@ impl RepoConfig {
                 templates: check_render_files(&entry.file, unit.templates, TEMPLATE_PATH)?,
                 targets: check_unit_targets(&entry.file, unit.targets, &targets)?,
                 release: unit.release.unwrap_or_default(),
+                version: unit.version,
                 file: entry.file,
             });
         }
@@ -276,6 +284,7 @@ struct TargetSection {
     generators: Option<Vec<RenderFileIn>>,
     templates: Option<Vec<RenderFileIn>>,
     release: Option<Release>,
+    version: Option<InterpString>,
 }
 
 #[derive(Deserialize)]
@@ -293,6 +302,7 @@ struct UnitSection {
     templates: Option<Vec<RenderFileIn>>,
     targets: Option<Vec<Spanned<String>>>,
     release: Option<Release>,
+    version: Option<InterpString>,
 }
 
 #[derive(Deserialize)]

@@ -10,16 +10,25 @@
 //! a full `template generated-values` costs targets × units × generators of them.
 //!
 //! A generator's output must be one mapping, or nothing. Like a config file, it may only set
-//! `obelisk.release.{name, namespace}` under `obelisk:` (kept on [`ValuesCase::releases`], not in the
-//! values).
+//! `obelisk.release.{name, namespace}` and `obelisk.version` under `obelisk:` (kept on
+//! [`ValuesCase::sets`], not in the values).
+//!
+//! After the generators, every version given for the case (its target's and unit's `version`, and
+//! `obelisk.version` in its config files and generators) must be one and the same; it's added to the
+//! values as `obelisk.version`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+use serde_json::Value;
 
 use crate::ObeliskK8sError;
 use crate::config::paths::Selection;
 use crate::config::repo::{RepoConfig, Target, Unit};
-use crate::config::values::{ValuesCase, ValuesReport, absorb, shown_under, values_yaml};
-use crate::{helm, yaml};
+use crate::config::values::{
+    FileObelisks, OBELISK_KEY, ValuesCase, ValuesReport, absorb, shown_under, values_yaml,
+};
+use crate::interp::InterpolationParams;
+use crate::{git, helm, yaml};
 
 /// What `.Release.Namespace` is while a generator renders.
 const GENERATOR_NAMESPACE: &str = "default";
@@ -39,10 +48,11 @@ impl RepoConfig {
         selection: &Selection<'a>,
         shown_root: Option<&Path>,
     ) -> Result<ValuesReport<'a>, ObeliskK8sError> {
+        let git = git::facts(repo_root);
         let cases = selection
             .cases
             .iter()
-            .map(|(target, unit)| self.generated_for(repo_root, shown_root, target, unit))
+            .map(|(target, unit)| self.generated_for(repo_root, shown_root, target, unit, &git))
             .collect::<Result<_, _>>()?;
         Ok(ValuesReport {
             cases,
@@ -56,8 +66,10 @@ impl RepoConfig {
         shown_root: Option<&Path>,
         target: &'a Target,
         unit: &'a Unit,
+        git: &Value,
     ) -> Result<ValuesCase<'a>, ObeliskK8sError> {
-        let (mut values, mut releases) = self.config_values(repo_root, shown_root, target, unit)?;
+        let (mut values, mut sets) =
+            self.config_values(repo_root, shown_root, target, unit, git)?;
         let input = values_yaml(&values, target, unit)?;
         let generators = self.resolve_generators(repo_root, target, unit)?;
         if generators.iter().any(|p| p.found) {
@@ -71,6 +83,7 @@ impl RepoConfig {
                 &input,
                 &unit.name,
                 GENERATOR_NAMESPACE,
+                None,
             )?;
             let mut documents = yaml::parse_values_stream(&rendered, &shown)?;
             if documents.len() > 1 {
@@ -86,7 +99,7 @@ impl RepoConfig {
             if let Some(output) = documents.pop() {
                 absorb(
                     &mut values,
-                    &mut releases,
+                    &mut sets,
                     output,
                     &path.path,
                     &shown,
@@ -94,7 +107,67 @@ impl RepoConfig {
                 )?;
             }
         }
-        ValuesCase::new(target, unit, values, releases)
+        let version = agree_on_version(target, unit, &sets)?;
+        if let Some(Value::Object(obelisk)) = values.get_mut(OBELISK_KEY) {
+            obelisk.insert("version".to_owned(), Value::String(version));
+        }
+        ValuesCase::new(target, unit, values, sets)
+    }
+}
+
+/// `obelisk.version` for `unit` on `target`: every value given (by the target, the unit, a config file
+/// or a generator) must be the same one, and there must be one.
+fn agree_on_version(
+    target: &Target,
+    unit: &Unit,
+    sets: &FileObelisks,
+) -> Result<String, ObeliskK8sError> {
+    let params = InterpolationParams {
+        target: Some(&target.name),
+        unit: Some(&unit.name),
+    };
+    let mut given: Vec<(String, PathBuf)> = Vec::new();
+    for (file, version) in [(&target.file, &target.version), (&unit.file, &unit.version)] {
+        if let Some(version) = version {
+            let value = version
+                .interpolate(&params)
+                .map_err(|var| ObeliskK8sError::Config {
+                    file: file.clone(),
+                    at: None,
+                    message: format!(
+                        "`version: {version}`: `${{{{obelisk:{}}}}}` has no value here",
+                        var.name()
+                    ),
+                })?;
+            given.push((value, file.clone()));
+        }
+    }
+    given.extend(
+        sets.iter()
+            .filter_map(|(file, set)| Some((set.version.clone()?, file.clone()))),
+    );
+
+    let case = format!("unit `{}` on target `{}`", unit.name, target.name);
+    let mut distinct: Vec<&str> = given.iter().map(|(v, _)| v.as_str()).collect();
+    distinct.sort_unstable();
+    distinct.dedup();
+    match distinct.as_slice() {
+        [one] => Ok((*one).to_owned()),
+        [] => Err(ObeliskK8sError::Usage(format!(
+            "no version for {case}: set `version` in its target or unit, or `{OBELISK_KEY}.version` in a config file or generator (e.g. from `.Values.{OBELISK_KEY}.git`)"
+        ))),
+        _ => {
+            let from: Vec<_> = given
+                .iter()
+                .map(|(v, f)| format!("`{v}` ({})", f.display()))
+                .collect();
+            Err(ObeliskK8sError::Usage(format!(
+                "{case} has {} different versions, from {} places: {}; they must agree",
+                distinct.len(),
+                given.len(),
+                from.join(", ")
+            )))
+        }
     }
 }
 
@@ -114,7 +187,7 @@ mod tests {
             ("targets/dev/target.yaml", "target:\n  cluster: c\n"),
             (
                 "units/app/unit.yaml",
-                "unit:\n  generators: [{ type: gotmpl, path: ./app.gen.yaml.gotmpl }]\n",
+                "unit:\n  version: 1.0.0\n  generators: [{ type: gotmpl, path: ./app.gen.yaml.gotmpl }]\n",
             ),
             (
                 "values.yaml",
@@ -125,18 +198,18 @@ mod tests {
         write_repo(&files)
     }
 
-    /// The one case for unit `app` on `target`: (its YAML, what its files set under `obelisk.release`).
+    /// The one case for unit `app` on `target`: (its YAML, what its files set under `obelisk:`).
     fn generated(
         dir: &tempfile::TempDir,
         target: &str,
-    ) -> Result<(String, crate::config::values::Releases), ObeliskK8sError> {
+    ) -> Result<(String, crate::config::values::FileObelisks), ObeliskK8sError> {
         let config = RepoConfig::load(dir.path()).unwrap();
         let selection = config
             .select(&[target.to_owned()], &["app".to_owned()])
             .unwrap();
         let mut report = config.generated_values_report(dir.path(), &selection, None)?;
         let case = report.cases.remove(0);
-        Ok((case.yaml, case.releases))
+        Ok((case.yaml, case.sets))
     }
 
     #[test]
@@ -179,7 +252,7 @@ mod tests {
         // Every generator sees the config values, not the others' output: `app.gen` didn't see `replicas`.
         assert_eq!(
             yaml,
-            "obelisk:\n  repo: r\n  target: prod\n  unit: app\n\
+            "obelisk:\n  repo: r\n  target: prod\n  unit: app\n  git: null\n  version: \"1.0.0\"\n\
              db:\n  host: h\n  port: 6543\n  url: postgres://h:5432\n\
              mode: \"0755\"\nrelease: app/default\nreplicas: 3\n"
         );
@@ -243,8 +316,169 @@ mod tests {
         assert_eq!(
             error("obelisk:\n  target: x\n"),
             format!(
-                "{file}: `obelisk:` is reserved; a generator's output may only set `obelisk.release.name` and `obelisk.release.namespace`, not `obelisk.target`"
+                "{file}: `obelisk:` is reserved; a generator's output may only set `obelisk.release.name`, `obelisk.release.namespace` and `obelisk.version`, not `obelisk.target`"
             )
+        );
+    }
+
+    /// `units/app` on targets `prod` / `dev`, with no generators (so no `helm`), and `files` on top.
+    fn plain(files: &[(&str, &str)]) -> tempfile::TempDir {
+        let mut all = vec![
+            (
+                "repo.yaml",
+                "repo:\n  name: r\n  configPaths: [./values.yaml, \"./${{obelisk:target}}.yaml\"]\n",
+            ),
+            ("targets/prod/target.yaml", "target:\n  cluster: c\n"),
+            ("targets/dev/target.yaml", "target:\n  cluster: c\n"),
+            ("units/app/unit.yaml", "unit: {}\n"),
+        ];
+        all.retain(|(p, _)| !files.iter().any(|(q, _)| q == p));
+        all.extend_from_slice(files);
+        write_repo(&all)
+    }
+
+    fn version(dir: &tempfile::TempDir, target: &str) -> Result<String, ObeliskK8sError> {
+        let config = RepoConfig::load(dir.path()).unwrap();
+        let selection = config
+            .select(&[target.to_owned()], &["app".to_owned()])
+            .unwrap();
+        let mut report = config.generated_values_report(dir.path(), &selection, None)?;
+        let case = report.cases.remove(0);
+        Ok(case.values[OBELISK_KEY]["version"]
+            .as_str()
+            .unwrap()
+            .to_owned())
+    }
+
+    #[test]
+    fn agrees_on_one_version() {
+        // From the unit, interpolated.
+        let dir = plain(&[(
+            "units/app/unit.yaml",
+            "unit:\n  version: \"0.0.0-${{obelisk:unit}}\"\n",
+        )]);
+        assert_eq!(version(&dir, "prod").unwrap(), "0.0.0-app");
+        // The same value from the target and a config file is one version.
+        let dir = plain(&[
+            (
+                "targets/prod/target.yaml",
+                "target:\n  cluster: c\n  version: v2.0.0\n",
+            ),
+            ("prod.yaml", "obelisk:\n  version: v2.0.0\n"),
+        ]);
+        assert_eq!(version(&dir, "prod").unwrap(), "v2.0.0");
+        // A config file's version isn't merged in as a value; only the agreed one is.
+        let dir = plain(&[("values.yaml", "obelisk:\n  version: \"1.0\"\nx: 1\n")]);
+        let config = RepoConfig::load(dir.path()).unwrap();
+        let selection = config
+            .select(&["dev".to_owned()], &["app".to_owned()])
+            .unwrap();
+        let report = config
+            .generated_values_report(dir.path(), &selection, None)
+            .unwrap();
+        assert!(
+            report.cases[0].yaml.contains("  version: \"1.0\"\nx: 1\n"),
+            "{}",
+            report.cases[0].yaml
+        );
+    }
+
+    #[test]
+    fn needs_exactly_one_version() {
+        let error = version(&plain(&[]), "prod").unwrap_err().to_string();
+        assert_eq!(
+            error,
+            "no version for unit `app` on target `prod`: set `version` in its target or unit, or `obelisk.version` in a config file or generator (e.g. from `.Values.obelisk.git`)"
+        );
+        let dir = plain(&[
+            ("units/app/unit.yaml", "unit:\n  version: v1\n"),
+            ("values.yaml", "obelisk:\n  version: v1\n"),
+            ("prod.yaml", "obelisk:\n  version: v2\n"),
+        ]);
+        assert_eq!(
+            version(&dir, "prod").unwrap_err().to_string(),
+            "unit `app` on target `prod` has 2 different versions, from 3 places: `v1` (.obelisk-k8s/units/app/unit.yaml), `v1` (.obelisk-k8s/values.yaml), `v2` (.obelisk-k8s/prod.yaml); they must agree"
+        );
+        assert_eq!(version(&dir, "dev").unwrap(), "v1", "dev has no prod.yaml");
+    }
+
+    #[test]
+    fn a_generator_can_set_the_version_from_git() {
+        if !helm_installed() {
+            return;
+        }
+        let dir = plain(&[
+            (
+                "repo.yaml",
+                "repo:\n  name: r\n  generators: [{ type: gotmpl, path: ./gen.gotmpl }]\n",
+            ),
+            (
+                "gen.gotmpl",
+                "obelisk:\n  version: {{ printf \"0.0.0-%s\" (.Values.obelisk.git | default \"nogit\") | quote }}\n",
+            ),
+        ]);
+        // A temp dir isn't a git repo: `obelisk.git` is null.
+        assert_eq!(version(&dir, "prod").unwrap(), "0.0.0-nogit");
+    }
+
+    #[test]
+    fn a_generator_can_set_the_version_from_a_real_sha() {
+        if !helm_installed() {
+            return;
+        }
+        let dir = plain(&[
+            (
+                "repo.yaml",
+                "repo:\n  name: r\n  generators: [{ type: gotmpl, path: ./gen.gotmpl }]\n",
+            ),
+            (
+                "gen.gotmpl",
+                "obelisk:\n  version: {{ printf \"0.0.0-%s\" .Values.obelisk.git.sha.short | quote }}\n",
+            ),
+        ]);
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args([
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .current_dir(dir.path())
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}");
+            String::from_utf8(out.stdout).unwrap().trim().to_owned()
+        };
+        git(&["init", "-q"]);
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "one"]);
+        let short = git(&["rev-parse", "--short", "HEAD"]);
+        assert_eq!(version(&dir, "prod").unwrap(), format!("0.0.0-{short}"));
+    }
+
+    #[test]
+    fn a_unit_and_a_generator_must_agree_on_the_version() {
+        if !helm_installed() {
+            return;
+        }
+        let dir = plain(&[
+            (
+                "repo.yaml",
+                "repo:\n  name: r\n  generators: [{ type: gotmpl, path: ./gen.gotmpl }]\n",
+            ),
+            ("units/app/unit.yaml", "unit:\n  version: 1.2.3\n"),
+            ("gen.gotmpl", "obelisk:\n  version: \"0.0.0-dev\"\n"),
+        ]);
+        let e = version(&dir, "prod").unwrap_err().to_string();
+        assert!(
+            e.contains(
+                "`1.2.3` (.obelisk-k8s/units/app/unit.yaml), `0.0.0-dev` (.obelisk-k8s/gen.gotmpl)"
+            ),
+            "{e}"
         );
     }
 }

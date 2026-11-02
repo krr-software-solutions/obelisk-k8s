@@ -45,6 +45,17 @@ ip-allocator.
   (`0755` is `493`), with known limits listed in `config/values.rs`. Same selection as
   `config repo paths`; several cases print as a YAML stream, each under a `# [ target=…, unit=… ]`
   comment. Takes `--repo` too.
+- The `obelisk:` block also carries what git says about the repo: `obelisk.git: { sha: { short, value
+  }, tag: { exact, value }, dirty: { tracked, untracked, any } }` (`null` outside a git repo; `tag.*`
+  null without tags; `dirty` null if `git status` can't say). It's whichever repo the repo root is in,
+  so a repo root that's a subdirectory gets the enclosing repo's HEAD and dirt. Any tag counts: with
+  several on HEAD, an annotated one wins, then the first by name.
+- `obelisk.version`: after the generators, exactly one distinct version is required for each unit on
+  each target, from any of: `version` in its target or unit (interpolated), or `obelisk.version` in a
+  config file or generator. It's added to the generated values, and templates' charts get it as
+  `version` and `appVersion`, so it must be `SemVer`-ish for `template manifests` (e.g. `0.0.0-<sha>`,
+  or a tag like `v1.2.3`). Note that `git describe` output like `v1.2.3-4-gabc1234` is SemVer for a
+  *prerelease of* 1.2.3, so it sorts before `v1.2.3`.
 - `obelisk-k8s template manifests [-t …]… [-u …]…`: the k8s resources each unit renders: its
   `templates:` (listed like `generators:`, `{ type: gotmpl, path }`), each rendered on its own through a
   throwaway Helm chart with the generated values as `.Values`, joined in merge order as Helm prints

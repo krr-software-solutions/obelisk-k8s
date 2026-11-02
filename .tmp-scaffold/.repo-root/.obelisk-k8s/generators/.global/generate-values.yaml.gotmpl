@@ -1,3 +1,13 @@
+{{- /* The version every unit's release gets: the exact tag if HEAD has one, else 0.0.0-<short sha>, plus -dirty
+       (or 0.0.0-nogit outside a git repo, where `obelisk.git` is null). */ -}}
+{{- $version := "0.0.0-nogit" }}
+{{- with .Values.obelisk.git }}
+{{- $version = .tag.exact | default (printf "0.0.0-%s" .sha.short) }}
+{{- if and .dirty .dirty.any }}{{ $version = printf "%s-dirty" $version }}{{ end }}
+{{- end }}
+obelisk:
+  version: {{ $version | quote }}
+
 stuff:
   ab: {{ add .Values.stuff.a .Values.stuff.b }}
 

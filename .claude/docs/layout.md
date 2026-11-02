@@ -34,6 +34,7 @@ defines the CLI (the clap types, `--help` headings, completions) and dispatches 
   merged over the config values.
 - `config/manifests.rs`: the rendered resources (`template manifests`): templates rendered with the
   generated values.
+- `git.rs`: the `obelisk.git` facts (sha, tag, dirt), read with `git`.
 - `helm.rs`: running `helm template` on a throwaway chart (for Go templates).
 - `config/paths.rs`: which config files a unit gets on a target, and their merge order. Behind
   `config repo paths`.
