@@ -11,16 +11,15 @@
 #   build    build: [<target>]     the `obelisk-k8s` binary per target (cargo-zigbuild, all from Linux); manual
 #
 # A release tag runs check and build, then:
-#   publish  gitlab-release        archives → generic package registry, and the GitLab release
-#            install-smoke         install.sh installs that version from the release just published
-#
-# install-smoke runs the tag's install.sh from the checkout, with the job token: it proves the
-# package downloads, checksums and install, not the README's first step (fetching install.sh itself
-# through the repository-files API with a personal token), which CI has no personal token for.
+#   publish  gitlab-release        archives → generic package registry, and the GitLab release (private)
+#            github-release        the tag + archives + install.sh → the public GitHub mirror's release
+#            install-smoke         install.sh from that GitHub release installs that version, as a user would
 #
 # Everything in `publish` waits for every check and build, so a failing build never leaves a
-# half-published version behind. The project is private, and so are its releases: installing needs
-# a token that can read it (see install.sh). Mirroring to a public GitHub release is a TODO.
+# half-published version behind.
+#
+# CI variables (Settings → CI/CD → Variables):
+#   GITHUB_TOKEN           can write github.com/krr-software-solutions/obelisk-k8s (the public mirror)
 workflow:
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
@@ -145,20 +144,38 @@ gitlab-release:
   script:
     - scripts/gitlab-release.sh
 
-# install.sh (the tag's, from the checkout) must install that exact version from the release just
-# published, with the job's token standing in for a user's: see the header for what that leaves out.
+# The public release: GitLab (and its packages) stay private.
+github-release:
+  extends:
+    - .runner
+    - ".mr=never,tag=auto"
+  stage: publish
+  needs: [check, build]
+  image: alpine:3.21
+  variables:
+    GIT_DEPTH: "0"   # pushing the tag needs its history
+  before_script:
+    - apk add --no-cache git github-cli
+  script:
+    - scripts/github-release.sh
+
+# install.sh, fetched from the GitHub release just published, must install that exact version: the
+# path a user takes, with no token and no checkout.
 install-smoke:
   extends:
     - .runner
     - ".mr=never,tag=auto"
   stage: publish
-  needs: [gitlab-release]
+  needs: [github-release]
   parallel:
     matrix:
       - IMAGE: ["alpine:3.21", "debian:13"]
   image: $IMAGE
+  variables:
+    GIT_STRATEGY: none   # tests the published script, not the checkout
   script:
     - if ! command -v wget > /dev/null; then apt-get -qq update && apt-get -qq install -y wget ca-certificates > /dev/null; fi
     - version="${CI_COMMIT_TAG#v}"
+    - wget -qO install.sh "https://github.com/krr-software-solutions/obelisk-k8s/releases/download/$CI_COMMIT_TAG/install.sh"
     - OBELISK_K8S_VERSION="$version" OBELISK_K8S_INSTALL_DIR="$PWD/bin" sh install.sh
     - test "$("$PWD/bin/obelisk-k8s" --version)" = "obelisk-k8s $version"

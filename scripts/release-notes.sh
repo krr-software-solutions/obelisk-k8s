@@ -1,5 +1,5 @@
 #!/bin/sh
-# The release notes (markdown) for a version tag.
+# The release notes (markdown) for a version tag, shared by the GitLab and GitHub releases.
 #
 #   scripts/release-notes.sh v1.2.3
 set -eu
@@ -10,11 +10,10 @@ version="${tag#v}"
 cat <<MD
 ## obelisk-k8s $version
 
-**Install** (Linux, macOS; needs a GitLab token that can read this project, exported):
+**Install** (Linux, macOS; the binary goes in \`~/.local/bin\`):
 
 \`\`\`sh
-export GITLAB_TOKEN=glpat-…   # read_api; install.sh downloads with it too
-curl -fsSL -H "PRIVATE-TOKEN: \$GITLAB_TOKEN" "https://gitlab.krr-software-solutions.com/api/v4/projects/24/repository/files/install.sh/raw?ref=$tag" | OBELISK_K8S_VERSION=$version sh
+curl -fsSL https://github.com/krr-software-solutions/obelisk-k8s/releases/download/$tag/install.sh | sh
 \`\`\`
 
 Or download the archive for your platform below.

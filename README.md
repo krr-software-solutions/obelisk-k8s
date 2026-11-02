@@ -6,15 +6,15 @@ Deploy tooling for Kubernetes, for real prod/dev clusters and local [k3d](https:
 
 ## Installing
 
-Linux and macOS. The project is private, so it takes a GitLab token that can read it, exported (the
-`sh` side downloads with it too):
+Linux (x86_64, aarch64) and macOS:
 
 ```sh
-export GITLAB_TOKEN=glpat-…   # a token that can read the project (read_api); install.sh needs it too
-curl -fsSL -H "PRIVATE-TOKEN: $GITLAB_TOKEN" "https://gitlab.krr-software-solutions.com/api/v4/projects/24/repository/files/install.sh/raw?ref=main" | sh
+curl -fsSL https://github.com/krr-software-solutions/obelisk-k8s/releases/latest/download/install.sh | sh
 ```
 
-It installs the latest release's binary to `~/.local/bin` (see `install.sh` for the options). It runs
+It downloads and verifies the latest release's binary and puts it in `~/.local/bin`; set
+`OBELISK_K8S_VERSION` for another version, `OBELISK_K8S_INSTALL_DIR` for another place. Or take an
+archive from the [releases](https://github.com/krr-software-solutions/obelisk-k8s/releases). It runs
 `helm`, `kubectl`, and for local clusters `k3d` and `docker`, which it doesn't install.
 
 ## The idea
@@ -34,7 +34,7 @@ config files → values → generators → generated values → templates → k8
   waits for readiness, and resolves SSM refs before values reach Helm. It never prints resolved secrets.
 
 IP allocation and DNS for local clusters come from
-[obeliskd](https://gitlab.krr-software-solutions.com/oss/obeliskd).
+[obeliskd](https://github.com/krr-software-solutions/obeliskd).
 
 ## Roadmap
 

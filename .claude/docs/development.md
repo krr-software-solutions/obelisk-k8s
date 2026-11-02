@@ -26,13 +26,17 @@ MR pipelines, and a release from a version tag (as obeliskd). Jobs come from the
 | `check`           | auto   | auto | fmt, clippy, tests (`OBELISK_TEST_SKIP_HELM=1`: no `helm` in CI)  |
 | `shellcheck`      | auto   | —    | `install.sh` and `scripts/`                                       |
 | `build`           | manual | auto | the binary per target (cargo-zigbuild): Linux musl, macOS; x86_64/aarch64 |
-| `gitlab-release`  | —      | auto | archives → the generic package registry, and the GitLab release   |
-| `install-smoke`   | —      | auto | `install.sh` installs that version from the release (alpine, debian) |
+| `gitlab-release`  | —      | auto | archives → the generic package registry, and the GitLab release (private) |
+| `github-release`  | —      | auto | the tag, archives and `install.sh` → the public GitHub mirror's release |
+| `install-smoke`   | —      | auto | `install.sh` from the GitHub release installs that version (alpine, debian) |
 
 **Releasing:** tag the merged `main`, `git tag v1.2.3 && git push origin v1.2.3`. `Cargo.toml` keeps
-the `0.0.0` placeholder; release jobs stamp the tag's version in with `scripts/set-version.sh`. The
-project, its packages and releases are private: installing needs a token (`install.sh`, and the
-`curl … | sh` line in the README). Mirroring to a public GitHub release (as obeliskd does) is a TODO.
+the `0.0.0` placeholder; release jobs stamp the tag's version in with `scripts/set-version.sh`. GitLab
+stays private (code, packages, its release); the public face is the GitHub mirror,
+`github.com/krr-software-solutions/obelisk-k8s`: GitLab push-mirrors the code to it, and
+`github-release` (with the `GITHUB_TOKEN` CI variable) publishes each release there, with
+version-less asset names so `releases/latest/download/…` (what `install.sh` and the README use)
+always works. A pre-release tag (`v1.2.3-rc.1`) is marked one, so it's never `latest`.
 
 ## The `FIX-PRE-MERGE` marker
 
@@ -44,4 +48,5 @@ mean it.
 ## Repo
 
 - GitLab: `gitlab.krr-software-solutions.com/oss/obelisk-k8s` (project ID 24), default branch `main`.
+- GitHub (public mirror, releases): `github.com/krr-software-solutions/obelisk-k8s`.
 - Merge via MR; squash to a single clean commit before merging.

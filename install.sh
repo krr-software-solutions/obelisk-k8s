@@ -1,19 +1,12 @@
 #!/bin/sh
-# Install obelisk-k8s from a GitLab release: download and verify the binary for this machine, and
+# Install obelisk-k8s from a GitHub release: download and verify the binary for this machine, and
 # put it in ~/.local/bin (no root needed).
 #
-#   export GITLAB_TOKEN=glpat-…
-#   curl -fsSL -H "PRIVATE-TOKEN: $GITLAB_TOKEN" \
-#     "https://gitlab.krr-software-solutions.com/api/v4/projects/24/repository/files/install.sh/raw?ref=main" | sh
-#
-# The project is private, so every download needs a token that can read it: a personal (or project)
-# access token with `read_api`, exported as GITLAB_TOKEN (so this script sees it too, not just curl).
-# In CI, CI_JOB_TOKEN works too.
+#   curl -fsSL https://github.com/krr-software-solutions/obelisk-k8s/releases/latest/download/install.sh | sh
 #
 # Environment:
-#   GITLAB_TOKEN                 the token (sent as PRIVATE-TOKEN)
-#   OBELISK_K8S_VERSION          the version to install, e.g. 0.1.2 (default: the latest release that
-#                                isn't a pre-release, like 1.2.3-rc.1)
+#   OBELISK_K8S_VERSION          the version to install, e.g. 0.1.2 (default: the latest release; GitHub
+#                                never counts a pre-release, like 1.2.3-rc.1, as the latest)
 #   OBELISK_K8S_TARGET           override the detected target, e.g. aarch64-unknown-linux-musl
 #   OBELISK_K8S_INSTALL_DIR      where to put the binary (default: ~/.local/bin)
 #
@@ -24,7 +17,7 @@
 # Everything is inside main(), called on the last line, so a partial download runs nothing.
 set -eu
 
-API="https://gitlab.krr-software-solutions.com/api/v4/projects/24"
+REPO="krr-software-solutions/obelisk-k8s"
 
 say() { printf 'obelisk-k8s-install: %s\n' "$*" >&2; }
 die() { say "error: $*"; exit 1; }
@@ -52,23 +45,11 @@ detect_target() {
   esac
 }
 
-# The auth header for every request: a personal token, else CI's job token.
-auth_header() {
-  if [ -n "${GITLAB_TOKEN:-}" ]; then
-    echo "PRIVATE-TOKEN: $GITLAB_TOKEN"
-  elif [ -n "${CI_JOB_TOKEN:-}" ]; then
-    echo "JOB-TOKEN: $CI_JOB_TOKEN"
-  else
-    die "set GITLAB_TOKEN to a token that can read the project (read_api): it's private"
-  fi
-}
-
 download() { # <url> <file>
   if has curl; then
-    curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
-      --header "$header" --output "$2" "$1"
+    curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location --output "$2" "$1"
   elif has wget; then
-    wget --quiet --header="$header" --output-document="$2" "$1"
+    wget --quiet --output-document="$2" "$1"
   else
     die "need curl or wget"
   fi
@@ -86,26 +67,21 @@ sha256_of() { # <file>
 
 main() {
   has curl || has wget || die "need curl or wget"
-  header="$(auth_header)"
   target="${OBELISK_K8S_TARGET:-$(detect_target)}"
   version="${OBELISK_K8S_VERSION:-}"
   version="${version#v}"
 
+  if [ -n "$version" ]; then
+    base="https://github.com/$REPO/releases/download/v$version"
+  else
+    base="https://github.com/$REPO/releases/latest/download"
+  fi
+  archive="obelisk-k8s-$target.tar.gz"
+
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
 
-  if [ -z "$version" ]; then
-    # Newest first; the first that isn't a pre-release.
-    download "$API/releases?per_page=100" "$tmp/releases.json" ||
-      die "couldn't list the releases (does the token have read_api on the project?)"
-    tag="$(grep -o '"tag_name":"[^"]*"' "$tmp/releases.json" | cut -d '"' -f 4 | grep -v -- - | head -n 1 || true)"
-    [ -n "$tag" ] || die "no release yet (other than pre-releases): set OBELISK_K8S_VERSION"
-    version="${tag#v}"
-  fi
-
-  archive="obelisk-k8s-$version-$target.tar.gz"
-  base="$API/packages/generic/obelisk-k8s/$version"
-  say "downloading $archive"
+  say "downloading $archive (${version:-latest})"
   download "$base/$archive" "$tmp/$archive" || die "couldn't download $base/$archive"
   download "$base/$archive.sha256" "$tmp/$archive.sha256" || die "couldn't download $base/$archive.sha256"
 

@@ -13,8 +13,8 @@ version = "0.0.0"
 edition = "2024"
 rust-version = "1.89" # serde-saphyr 2.0 needs 1.89
 license = "MIT OR Apache-2.0"
-repository = "https://gitlab.krr-software-solutions.com/oss/obelisk-k8s"
-homepage = "https://gitlab.krr-software-solutions.com/oss/obelisk-k8s"
+repository = "https://github.com/krr-software-solutions/obelisk-k8s"
+homepage = "https://github.com/krr-software-solutions/obelisk-k8s"
 readme = "README.md"
 keywords = ["kubernetes", "helm", "k3d", "deployment"]
 
