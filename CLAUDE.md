@@ -11,7 +11,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 ```
 
-Clippy runs pedantic; treat its warnings as errors. CI doesn't run these yet (see Development).
+Clippy runs pedantic; treat its warnings as errors. CI runs the same `check` (without the `helm` tests; see Development).
 
 ## Docs
 

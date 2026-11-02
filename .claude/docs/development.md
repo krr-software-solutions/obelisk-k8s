@@ -17,14 +17,22 @@ unless `OBELISK_TEST_SKIP_HELM=1` is set.
 
 ## CI (`.gitlab-ci.yml`)
 
-MR pipelines only, so far. Jobs come from the shared templates in `krrss/util/pipeline-utils`
-(`.runner`, `".mr=…,tag=…"`).
+MR pipelines, and a release from a version tag (as obeliskd). Jobs come from the shared templates in
+`krrss/util/pipeline-utils` (`.runner`, `".mr=…,tag=…"`).
 
-| Job               | MR   | What                                                           |
-|-------------------|------|----------------------------------------------------------------|
-| `check-pre-merge` | auto | fails if a `FIX-PRE-MERGE` marker is left anywhere (see below) |
+| Job               | MR     | Tag  | What                                                              |
+|-------------------|--------|------|-------------------------------------------------------------------|
+| `check-pre-merge` | auto   | —    | fails if a `FIX-PRE-MERGE` marker is left anywhere (see below)    |
+| `check`           | auto   | auto | fmt, clippy, tests (`OBELISK_TEST_SKIP_HELM=1`: no `helm` in CI)  |
+| `shellcheck`      | auto   | —    | `install.sh` and `scripts/`                                       |
+| `build`           | manual | auto | the binary per target (cargo-zigbuild): Linux musl, macOS; x86_64/aarch64 |
+| `gitlab-release`  | —      | auto | archives → the generic package registry, and the GitLab release   |
+| `install-smoke`   | —      | auto | `install.sh` installs that version from the release (alpine, debian) |
 
-Not yet: a `check` job (fmt, clippy, tests), builds, releases.
+**Releasing:** tag the merged `main`, `git tag v1.2.3 && git push origin v1.2.3`. `Cargo.toml` keeps
+the `0.0.0` placeholder; release jobs stamp the tag's version in with `scripts/set-version.sh`. The
+project, its packages and releases are private: installing needs a token (`install.sh`, and the
+`curl … | sh` line in the README). Mirroring to a public GitHub release (as obeliskd does) is a TODO.
 
 ## The `FIX-PRE-MERGE` marker
 

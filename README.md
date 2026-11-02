@@ -2,7 +2,18 @@
 
 Deploy tooling for Kubernetes, for real prod/dev clusters and local [k3d](https://k3d.io) ones alike.
 
-> **Status:** early. Nothing here works yet.
+> **Status:** early. `template`, `apply` and local k3d `cluster up` work; see `.claude/docs/overview.md`.
+
+## Installing
+
+Linux and macOS. The project is private, so it takes a GitLab token that can read it (`read_api`):
+
+```sh
+curl -fsSL -H "PRIVATE-TOKEN: $GITLAB_TOKEN" "https://gitlab.krr-software-solutions.com/api/v4/projects/24/repository/files/install.sh/raw?ref=main" | sh
+```
+
+It installs the latest release's binary to `~/.local/bin` (see `install.sh` for the options). It runs
+`helm`, `kubectl`, and for local clusters `k3d` and `docker`, which it doesn't install.
 
 ## The idea
 

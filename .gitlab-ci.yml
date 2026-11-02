@@ -1,10 +1,26 @@
-# obelisk-k8s CI: the pre-merge checks on MRs.
+# obelisk-k8s CI: the pre-merge checks on MRs, and the whole release from a version tag (as obeliskd).
+#
+# The version comes from the tag. Cargo.toml carries the placeholder `0.0.0`; every job that builds
+# a release first runs `scripts/set-version.sh "$CI_COMMIT_TAG"` (`v1.2.3` → `1.2.3`).
+# Cut a release by tagging the merged `main`: `git tag v1.2.3 && git push origin v1.2.3`.
 #
 # An MR runs:
 #   test     check-pre-merge       no fix-before-merge markers left behind
+#            check                 fmt, clippy, tests
+#            shellcheck            install.sh and scripts/
+#   build    build: [<target>]     the `obelisk-k8s` binary per target (cargo-zigbuild, all from Linux); manual
+#
+# A release tag runs check and build, then:
+#   publish  gitlab-release        archives → generic package registry, and the GitLab release
+#            install-smoke         install.sh installs that version from the release just published
+#
+# Everything in `publish` waits for every check and build, so a failing build never leaves a
+# half-published version behind. The project is private, and so are its releases: installing needs
+# a token that can read it (see install.sh). Mirroring to a public GitHub release is a TODO.
 workflow:
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/
 
 include:
   - project: 'krrss/util/pipeline-utils'
@@ -13,6 +29,28 @@ include:
 
 stages:
   - test
+  - build
+  - publish
+
+variables:
+  CARGO_HOME: "$CI_PROJECT_DIR/.cargo-home"
+  CARGO_TERM_COLOR: always
+
+# A Rust job: the cargo registry is cached per Cargo.lock.
+.rust:
+  image: rust:1
+  variables:
+    KUBERNETES_CPU_REQUEST: "1"
+    KUBERNETES_CPU_LIMIT: "4"
+    KUBERNETES_MEMORY_REQUEST: "1Gi"
+    KUBERNETES_MEMORY_LIMIT: "4Gi"
+  cache:
+    key:
+      files: [Cargo.lock]
+    paths:
+      - .cargo-home/registry/index/
+      - .cargo-home/registry/cache/
+      - .cargo-home/git/db/
 
 # ----- test -----
 
@@ -26,3 +64,97 @@ check-pre-merge:
     - apk add --no-cache bash git
   script:
     - bash scripts/check-for-fix.sh
+
+# The tests that run `helm` are skipped (OBELISK_TEST_SKIP_HELM): the image has no `helm`.
+check:
+  extends:
+    - .runner
+    - .rust
+    - ".mr=auto,tag=auto"
+  stage: test
+  variables:
+    OBELISK_TEST_SKIP_HELM: "1"
+  script:
+    - rustup component add rustfmt clippy
+    - cargo fmt --all --check
+    - cargo clippy --workspace --all-targets --locked -- -D warnings
+    - cargo test --workspace --locked
+
+shellcheck:
+  extends:
+    - .runner
+    - ".mr=auto,tag=never"
+  stage: test
+  image: koalaman/shellcheck-alpine:stable
+  script:
+    - shellcheck install.sh scripts/*.sh
+
+# ----- build -----
+
+# The CLI for one target, cross-compiled with cargo-zigbuild. zig's linker ad-hoc signs the
+# aarch64-apple-darwin binary, which is all Apple Silicon needs to run a binary that isn't
+# quarantined (curl). Manual on MRs, to try a build.
+build:
+  extends:
+    - .runner
+    - .rust
+    - ".mr=manual,tag=auto"
+  stage: build
+  needs: []
+  image: ghcr.io/rust-cross/cargo-zigbuild:0.24.0
+  parallel:
+    matrix:
+      - TARGET:
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+          - x86_64-apple-darwin
+          - aarch64-apple-darwin
+  script:
+    - rustup toolchain install stable --profile minimal --no-self-update
+    - rustup default stable
+    - rustup target add "$TARGET"
+    - if [ -n "${CI_COMMIT_TAG:-}" ]; then scripts/set-version.sh "$CI_COMMIT_TAG"; fi
+    - cargo zigbuild --release --locked -p obelisk-k8s-cli --target "$TARGET"
+    - version="${CI_COMMIT_TAG:-v0.0.0}"; version="${version#v}"
+    - name="obelisk-k8s-$version-$TARGET"
+    - mkdir -p "dist/$name"
+    - cp "target/$TARGET/release/obelisk-k8s" README.md "dist/$name/"
+    - tar -C dist -czf "dist/$name.tar.gz" "$name"
+    - (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
+  artifacts:
+    expire_in: 1 week
+    paths:
+      - dist/*.tar.gz
+      - dist/*.tar.gz.sha256
+
+# ----- publish -----
+
+gitlab-release:
+  extends:
+    - .runner
+    - ".mr=never,tag=auto"
+  stage: publish
+  needs: [check, build]
+  image: alpine:3.21
+  before_script:
+    - apk add --no-cache curl jq
+  script:
+    - scripts/gitlab-release.sh
+
+# install.sh (the tag's) must install that exact version from the release just published, with the
+# job's token standing in for a user's.
+install-smoke:
+  extends:
+    - .runner
+    - ".mr=never,tag=auto"
+  stage: publish
+  needs: [gitlab-release]
+  parallel:
+    matrix:
+      - IMAGE: ["alpine:3.21", "debian:13"]
+  image: $IMAGE
+  script:
+    - if ! command -v wget > /dev/null; then apt-get -qq update && apt-get -qq install -y wget ca-certificates > /dev/null; fi
+    - version="${CI_COMMIT_TAG#v}"
+    - OBELISK_K8S_VERSION="$version" OBELISK_K8S_INSTALL_DIR="$PWD/bin" sh install.sh
+    - test "$("$PWD/bin/obelisk-k8s" --version)" = "obelisk-k8s $version"
