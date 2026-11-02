@@ -195,13 +195,13 @@ pub fn run_cluster(
     Ok(())
 }
 
-pub fn run_apply(
+/// The global config (its warnings printed), and the repo to work on: the one named `repo` in it,
+/// else the current directory. The clusters a repo's targets deploy to come from the global config,
+/// so commands that render or apply load it either way, once.
+fn global_and_repo(
     repo: Option<&str>,
     global_root_arg: Option<PathBuf>,
-    args: &TemplateArgs,
-    yes: bool,
-) -> Result<(), ObeliskK8sError> {
-    // The clusters come from the global config, and so does the repo with `--repo`: load it once.
+) -> Result<(GlobalConfig, PathBuf, Option<PathBuf>), ObeliskK8sError> {
     let (global_root, home) = global_root(global_root_arg)?;
     let global = GlobalConfig::load(&global_root, home.as_deref())?;
     warn(&global.warnings);
@@ -209,6 +209,16 @@ pub fn run_apply(
         Some(name) => find_repo(name, &global, home.as_deref())?,
         None => (cwd()?, None),
     };
+    Ok((global, repo_root, shown_root))
+}
+
+pub fn run_apply(
+    repo: Option<&str>,
+    global_root_arg: Option<PathBuf>,
+    args: &TemplateArgs,
+    yes: bool,
+) -> Result<(), ObeliskK8sError> {
+    let (global, repo_root, shown_root) = global_and_repo(repo, global_root_arg)?;
     let config = load_repo_config(&repo_root)?;
     let selection = config.select(&args.targets, &args.units)?;
     let ephemeral = ephemeral(&args.ephemeral)?;
@@ -231,20 +241,20 @@ pub fn run_template(
     command: &TemplateCommand,
 ) -> Result<(), ObeliskK8sError> {
     let args = command.args();
-    let (repo_root, shown_root) = repo_root(repo, global_root_arg)?;
+    let (global, repo_root, shown_root) = global_and_repo(repo, global_root_arg)?;
     let config = load_repo_config(&repo_root)?;
     let selection = config.select(&args.targets, &args.units)?;
     let ephemeral = ephemeral(&args.ephemeral)?;
     let (shown_root, ephemeral) = (shown_root.as_deref(), ephemeral.as_ref());
     let report = match command {
         TemplateCommand::Values(_) => config
-            .values_report(&repo_root, &selection, shown_root, ephemeral)?
+            .values_report(&repo_root, &selection, shown_root, ephemeral, &global)?
             .to_string(),
         TemplateCommand::GeneratedValues(_) => config
-            .generated_values_report(&repo_root, &selection, shown_root, ephemeral)?
+            .generated_values_report(&repo_root, &selection, shown_root, ephemeral, &global)?
             .to_string(),
         TemplateCommand::Manifests(_) => config
-            .manifests_report(&repo_root, &selection, shown_root, ephemeral)?
+            .manifests_report(&repo_root, &selection, shown_root, ephemeral, &global)?
             .to_string(),
     };
     // anstream drops the colors when stdout isn't a terminal, or with NO_COLOR set.

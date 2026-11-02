@@ -14,6 +14,7 @@ pub mod global;
 pub mod manifests;
 pub mod paths;
 pub mod repo;
+mod run;
 pub mod values;
 
 /// One `<kind>/<dir>/<file>` to load.
@@ -189,6 +190,38 @@ pub(crate) mod test_support {
     /// A target on cluster `c` whose units' release is the unit's name, in a namespace named after
     /// the target.
     pub(crate) const TARGET: &str = "target:\n  cluster: c\n  release: { name: \"${{obelisk:unit}}\", namespace: \"${{obelisk:target}}\" }\n";
+
+    /// A global config with clusters `c` (the one test targets deploy to; no obeliskd) and `obd` (on
+    /// obeliskd supernet `main`, subnet `sub`).
+    pub(crate) fn global() -> crate::config::global::GlobalConfig {
+        use crate::config::global::{Cluster, GlobalConfig, K8s, Location, Obeliskd};
+        let cluster = |name: &str, obeliskd: Option<Obeliskd>| Cluster {
+            name: name.to_owned(),
+            file: format!("clusters/{name}/cluster.yaml").into(),
+            dir: format!("/nowhere/clusters/{name}").into(),
+            k8s: K8s::K3d,
+            location: Location::Local,
+            managed: true,
+            obeliskd,
+            kubectl_cluster: None,
+            kubectl_context: None,
+        };
+        GlobalConfig {
+            root: "/nowhere".into(),
+            repos: Vec::new(),
+            clusters: vec![
+                cluster("c", None),
+                cluster(
+                    "obd",
+                    Some(Obeliskd {
+                        supernet: "main".to_owned(),
+                        subnet: "sub".to_owned(),
+                    }),
+                ),
+            ],
+            warnings: Vec::new(),
+        }
+    }
 
     /// For tests that run `helm`: without it they fail, unless `OBELISK_TEST_SKIP_HELM=1` says to skip
     /// them (then this is `false`, and the test returns early).

@@ -24,9 +24,11 @@ use std::path::{Path, PathBuf};
 use serde_json::{Map, Value};
 
 use crate::ObeliskK8sError;
-use crate::config::ephemeral::{Ephemeral, RunInputs};
+use crate::config::ephemeral::Ephemeral;
+use crate::config::global::{Cluster, GlobalConfig};
 use crate::config::paths::{Selection, write_yaml_cases};
 use crate::config::repo::{RepoConfig, Target, Unit};
+use crate::config::run::RunInputs;
 use crate::yaml;
 
 /// The key the tool's own block goes under, at the top of the merged values.
@@ -82,8 +84,9 @@ impl RepoConfig {
         selection: &Selection<'a>,
         shown_root: Option<&Path>,
         ephemeral: Option<&Ephemeral>,
+        global: &GlobalConfig,
     ) -> Result<ValuesReport<'a>, ObeliskK8sError> {
-        let inputs = RunInputs::new(repo_root, selection, ephemeral)?;
+        let inputs = RunInputs::new(repo_root, selection, ephemeral, global)?;
         let cases = selection
             .cases
             .iter()
@@ -121,7 +124,7 @@ impl RepoConfig {
         let mut values = Map::new();
         values.insert(
             OBELISK_KEY.to_owned(),
-            self.obelisk_block(target, unit, ephemeral, &inputs.git),
+            self.obelisk_block(target, unit, inputs)?,
         );
         let mut sets = Vec::new();
         for path in self
@@ -158,20 +161,32 @@ impl RepoConfig {
         &self,
         target: &Target,
         unit: &Unit,
-        ephemeral: Option<&Ephemeral>,
-        git: &Value,
-    ) -> Value {
+        inputs: &RunInputs<'_>,
+    ) -> Result<Value, ObeliskK8sError> {
+        let ephemeral = inputs.ephemeral_for(target);
         let mut block = Map::new();
         block.insert("repo".to_owned(), Value::String(self.name.clone()));
         block.insert("target".to_owned(), Value::String(target.name.clone()));
         block.insert("unit".to_owned(), Value::String(unit.name.clone()));
+        block.insert("cluster".to_owned(), cluster_block(inputs.cluster(target)?));
         block.insert(
             "ephemeral".to_owned(),
             ephemeral.map_or(Value::Null, |e| Value::String(e.name.clone())),
         );
-        block.insert("git".to_owned(), git.clone());
-        Value::Object(block)
+        block.insert("git".to_owned(), inputs.git.clone());
+        Ok(Value::Object(block))
     }
+}
+
+/// `obelisk.cluster`: what the global config says about a cluster: its name, and the obeliskd
+/// supernet and subnet it runs on (`null` without `obeliskd`).
+fn cluster_block(cluster: &Cluster) -> Value {
+    let obeliskd = cluster.obeliskd.as_ref();
+    serde_json::json!({
+        "name": cluster.name,
+        "supernet": obeliskd.map(|o| &o.supernet),
+        "subnet": obeliskd.map(|o| &o.subnet),
+    })
 }
 
 /// What each file set under `obelisk:`, in merge order: by its path relative to the repo root, or for
@@ -329,7 +344,7 @@ impl fmt::Display for ValuesReport<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::test_support::write_repo;
+    use crate::config::test_support::{global, write_repo};
 
     fn repo(files: &[(&str, &str)]) -> tempfile::TempDir {
         write_repo(files)
@@ -357,7 +372,7 @@ mod tests {
         let owned = |n: &[&str]| n.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
         let selection = config.select(&owned(targets), &owned(units)).unwrap();
         let text = config
-            .values_report(dir.path(), &selection, None, None)?
+            .values_report(dir.path(), &selection, None, None, &global())?
             .to_string();
         Ok(anstream::adapter::strip_str(&text).to_string())
     }
@@ -375,7 +390,7 @@ mod tests {
             .map(|v| Ephemeral::new("pr-7".into(), EphemeralValues::Inline(v.into())))
             .transpose()?;
         let text = config
-            .values_report(dir.path(), &selection, None, ephemeral.as_ref())?
+            .values_report(dir.path(), &selection, None, ephemeral.as_ref(), &global())?
             .to_string();
         Ok(anstream::adapter::strip_str(&text).to_string())
     }
@@ -406,7 +421,7 @@ mod tests {
                 Some("c: ephemeral\nobelisk:\n  version: \"1.0.0\"\n")
             )
             .unwrap(),
-            "obelisk:\n  repo: r\n  target: preview\n  unit: app\n  ephemeral: pr-7\n  git: null\n\
+            "obelisk:\n  repo: r\n  target: preview\n  unit: app\n  cluster:\n    name: c\n    supernet: null\n    subnet: null\n  ephemeral: pr-7\n  git: null\n\
              a: preview\nb: global\nc: ephemeral\n"
         );
         // A plain target gets `ephemeral: null`, and none of the ephemeral values.
@@ -429,7 +444,7 @@ mod tests {
         )
         .unwrap();
         let report = config
-            .values_report(dir.path(), &selection, None, Some(&ephemeral))
+            .values_report(dir.path(), &selection, None, Some(&ephemeral), &global())
             .unwrap();
         assert_eq!(
             report.cases[0].sets,
@@ -477,6 +492,23 @@ mod tests {
     }
 
     #[test]
+    fn the_obelisk_block_has_the_targets_cluster() {
+        let dir = base(&[
+            ("targets/prod/target.yaml", "target:\n  cluster: obd\n"),
+            ("targets/dev/target.yaml", "target:\n  cluster: nope\n"),
+        ]);
+        let text = report(&dir, &["prod"], &["app"]).unwrap();
+        assert!(
+            text.contains("  cluster:\n    name: obd\n    supernet: main\n    subnet: sub\n"),
+            "{text}"
+        );
+        assert_eq!(
+            report(&dir, &["dev"], &["app"]).unwrap_err().to_string(),
+            "target `dev` deploys to cluster `nope`, which isn't in the global config at /nowhere (it has: c, obd): add it with `obelisk-k8s config global cluster add`"
+        );
+    }
+
+    #[test]
     fn merges_in_order_with_the_obelisk_block_first() {
         let dir = base(&[
             (
@@ -491,7 +523,7 @@ mod tests {
         ]);
         assert_eq!(
             report(&dir, &["prod"], &["app"]).unwrap(),
-            "obelisk:\n  repo: r\n  target: prod\n  unit: app\n  ephemeral: null\n  git: null\n\
+            "obelisk:\n  repo: r\n  target: prod\n  unit: app\n  cluster:\n    name: c\n    supernet: null\n    subnet: null\n  ephemeral: null\n  git: null\n\
              db:\n  host: prod\n  port: 5432\n  pool:\n    max: 10\n    min: 1\n\
              list:\n- 3\nkeep: g\nextra: null\n"
         );
@@ -529,7 +561,7 @@ mod tests {
         let dir = base(&[("global.yaml", ""), ("prod.yaml", "# nothing\n")]);
         assert_eq!(
             report(&dir, &["prod"], &["app"]).unwrap(),
-            "obelisk:\n  repo: r\n  target: prod\n  unit: app\n  ephemeral: null\n  git: null\n"
+            "obelisk:\n  repo: r\n  target: prod\n  unit: app\n  cluster:\n    name: c\n    supernet: null\n    subnet: null\n  ephemeral: null\n  git: null\n"
         );
     }
 
@@ -550,7 +582,7 @@ mod tests {
         let config = RepoConfig::load(dir.path()).unwrap();
         let selection = config.select(&["prod".into()], &["app".into()]).unwrap();
         let report = config
-            .values_report(dir.path(), &selection, None, None)
+            .values_report(dir.path(), &selection, None, None, &global())
             .unwrap();
         report.cases.into_iter().next().unwrap().sets
     }
@@ -566,7 +598,7 @@ mod tests {
         ]);
         assert_eq!(
             report(&dir, &["prod"], &["app"]).unwrap(),
-            "obelisk:\n  repo: r\n  target: prod\n  unit: app\n  ephemeral: null\n  git: null\nenv: prod\n"
+            "obelisk:\n  repo: r\n  target: prod\n  unit: app\n  cluster:\n    name: c\n    supernet: null\n    subnet: null\n  ephemeral: null\n  git: null\nenv: prod\n"
         );
         let release = |name: Option<&str>, namespace: &str| FileObelisk {
             name: name.map(str::to_owned),
@@ -653,8 +685,8 @@ mod tests {
         let dir = base(&[("dev.yaml", "env: dev\n"), ("prod.yaml", "env: prod\n")]);
         assert_eq!(
             report(&dir, &[], &[]).unwrap(),
-            "# [ target=dev, unit=app ]\nobelisk:\n  repo: r\n  target: dev\n  unit: app\n  ephemeral: null\n  git: null\nenv: dev\n---\n\
-             # [ target=prod, unit=app ]\nobelisk:\n  repo: r\n  target: prod\n  unit: app\n  ephemeral: null\n  git: null\nenv: prod\n"
+            "# [ target=dev, unit=app ]\nobelisk:\n  repo: r\n  target: dev\n  unit: app\n  cluster:\n    name: c\n    supernet: null\n    subnet: null\n  ephemeral: null\n  git: null\nenv: dev\n---\n\
+             # [ target=prod, unit=app ]\nobelisk:\n  repo: r\n  target: prod\n  unit: app\n  cluster:\n    name: c\n    supernet: null\n    subnet: null\n  ephemeral: null\n  git: null\nenv: prod\n"
         );
     }
 
@@ -673,7 +705,13 @@ mod tests {
         let config = RepoConfig::load(dir.path()).unwrap();
         let selection = config.select(&["prod".into()], &["app".into()]).unwrap();
         let error = config
-            .values_report(dir.path(), &selection, Some(Path::new("~/dev/r")), None)
+            .values_report(
+                dir.path(),
+                &selection,
+                Some(Path::new("~/dev/r")),
+                None,
+                &global(),
+            )
             .unwrap_err()
             .to_string();
         assert_eq!(
@@ -689,7 +727,7 @@ mod tests {
         let text = report(&dir, &["prod"], &["app"]).unwrap();
         assert!(
             text.starts_with(
-                "obelisk:\n  repo: r\n  target: prod\n  unit: app\n  ephemeral: null\n  git: null\n"
+                "obelisk:\n  repo: r\n  target: prod\n  unit: app\n  cluster:\n    name: c\n    supernet: null\n    subnet: null\n  ephemeral: null\n  git: null\n"
             ),
             "{text}"
         );

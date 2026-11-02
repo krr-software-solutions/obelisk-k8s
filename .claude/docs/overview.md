@@ -66,7 +66,7 @@ ip-allocator.
   back if the result won't load.
 - `obelisk-k8s template values [-t <target>]... [-u <unit>]...`: the merged values each selected unit
   gets on each selected target: its found config files deep-merged in merge order (maps key by key;
-  lists, scalars and `null` replace), with the tool's `obelisk: { repo, target, unit, ephemeral, git }` block on top.
+  lists, scalars and `null` replace), with the tool's `obelisk: { repo, target, unit, cluster, ephemeral, git }` block on top.
   `obelisk:` is reserved: a config file may only set `obelisk.release.{name, namespace}` and
   `obelisk.version`, as strings (kept per file and left out of this output; they're agreed on after the
   generators: see **Release** and `obelisk.version` below), and anything else under it is an
@@ -75,6 +75,10 @@ ip-allocator.
   (`0755` is `493`), with known limits listed in `config/values.rs`. Same selection as
   `config repo paths`; several cases print as a YAML stream, each under a `# [ target=…, unit=… ]`
   comment. Takes `--repo` too.
+- `obelisk.cluster: { name, supernet, subnet }` is the target's cluster, from the global config:
+  its name, and the obeliskd supernet and subnet it runs on (`null` without `obeliskd`). So every
+  `template` command (and `apply`) loads the global config, and a selected target whose cluster
+  isn't in it is an error.
 - The `obelisk:` block also carries what git says about the repo: `obelisk.git: { sha: { short, value
   }, tag: { exact, value }, dirty: { tracked, untracked, any } }` (`null` outside a git repo; `tag.*`
   null without tags; `dirty` null if `git status` can't say). It's whichever repo the repo root is in,

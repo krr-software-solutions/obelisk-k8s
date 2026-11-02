@@ -17,9 +17,11 @@ use std::fmt;
 use std::path::Path;
 
 use crate::ObeliskK8sError;
-use crate::config::ephemeral::{Ephemeral, RunInputs};
+use crate::config::ephemeral::Ephemeral;
+use crate::config::global::GlobalConfig;
 use crate::config::paths::{Selection, write_yaml_cases};
 use crate::config::repo::{RepoConfig, Target, Unit};
+use crate::config::run::RunInputs;
 use crate::config::values::{Agreed, shown_under};
 use crate::helm;
 
@@ -57,8 +59,9 @@ impl RepoConfig {
         selection: &Selection<'a>,
         shown_root: Option<&Path>,
         ephemeral: Option<&Ephemeral>,
+        global: &GlobalConfig,
     ) -> Result<ManifestsReport<'a>, ObeliskK8sError> {
-        let inputs = RunInputs::new(repo_root, selection, ephemeral)?;
+        let inputs = RunInputs::new(repo_root, selection, ephemeral, global)?;
         let cases = selection
             .cases
             .iter()
@@ -133,7 +136,7 @@ impl fmt::Display for ManifestsReport<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::test_support::{TARGET, helm_installed, write_repo};
+    use crate::config::test_support::{TARGET, global, helm_installed, write_repo};
 
     fn repo(extra: &[(&str, &str)]) -> tempfile::TempDir {
         let mut files = vec![
@@ -162,7 +165,7 @@ mod tests {
         let targets: Vec<String> = targets.iter().map(|t| (*t).to_owned()).collect();
         let selection = config.select(&targets, &["app".to_owned()]).unwrap();
         let text = config
-            .manifests_report(dir.path(), &selection, None, None)?
+            .manifests_report(dir.path(), &selection, None, None, &global())?
             .to_string();
         Ok(anstream::adapter::strip_str(&text).to_string())
     }

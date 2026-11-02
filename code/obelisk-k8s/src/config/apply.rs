@@ -16,11 +16,12 @@ use std::fmt;
 use std::path::Path;
 
 use crate::ObeliskK8sError;
-use crate::config::ephemeral::{Ephemeral, RunInputs};
+use crate::config::ephemeral::Ephemeral;
 use crate::config::global::{Cluster, GlobalConfig, Location};
 use crate::config::manifests::ManifestsCase;
 use crate::config::paths::Selection;
 use crate::config::repo::{RepoConfig, Target};
+use crate::config::run::RunInputs;
 use crate::config::values::Agreed;
 use crate::helm;
 
@@ -125,10 +126,10 @@ impl RepoConfig {
         global: &GlobalConfig,
         remote_ok: bool,
     ) -> Result<Vec<Planned<'a>>, ObeliskK8sError> {
-        let inputs = RunInputs::new(repo_root, selection, ephemeral)?;
+        let inputs = RunInputs::new(repo_root, selection, ephemeral, global)?;
         let mut contexts = Vec::new();
         for (target, _) in &selection.cases {
-            let cluster = cluster_for(target, global)?;
+            let cluster = inputs.cluster(target)?;
             let context = context_for(target, cluster)?;
             check_remote(target, cluster, remote_ok)?;
             contexts.push(context);
@@ -144,21 +145,6 @@ impl RepoConfig {
         }
         Ok(plan)
     }
-}
-
-/// The cluster `target` deploys to.
-fn cluster_for<'g>(
-    target: &Target,
-    global: &'g GlobalConfig,
-) -> Result<&'g Cluster, ObeliskK8sError> {
-    global.cluster(&target.cluster).map_err(|_| {
-        ObeliskK8sError::Usage(format!(
-            "target `{}` deploys to cluster `{}`, which isn't in the global config ({}): add it with `obelisk-k8s config global cluster add`",
-            target.name,
-            target.cluster,
-            global.root.display()
-        ))
-    })
 }
 
 /// The kubectl context to apply `target` with, on `cluster`.

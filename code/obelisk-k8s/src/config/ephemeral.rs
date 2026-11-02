@@ -10,9 +10,8 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::config::paths::Selection;
-use crate::config::repo::Target;
 use crate::config::{NAME_RULE, is_valid_name};
-use crate::{ObeliskK8sError, git, yaml};
+use crate::{ObeliskK8sError, yaml};
 
 /// One copy of an ephemeral target, as given on the command line.
 #[derive(Debug)]
@@ -71,44 +70,13 @@ impl Ephemeral {
     }
 }
 
-/// What every case in a run shares, beyond the repo's config: the git facts and the ephemeral copy.
-#[derive(Debug)]
-pub(crate) struct RunInputs<'e> {
-    pub(crate) git: Value,
-    pub(crate) ephemeral: Option<&'e Ephemeral>,
-}
-
-impl<'e> RunInputs<'e> {
-    /// Gathers them for `selection`, after checking it with [`check_selection`].
-    ///
-    /// # Errors
-    ///
-    /// As [`check_selection`].
-    pub(crate) fn new(
-        repo_root: &Path,
-        selection: &Selection<'_>,
-        ephemeral: Option<&'e Ephemeral>,
-    ) -> Result<Self, ObeliskK8sError> {
-        check_selection(selection, ephemeral)?;
-        Ok(Self {
-            git: git::facts(repo_root),
-            ephemeral,
-        })
-    }
-
-    /// The copy `target` renders as: `None` unless it's ephemeral.
-    pub(crate) fn ephemeral_for(&self, target: &Target) -> Option<&'e Ephemeral> {
-        self.ephemeral.filter(|_| target.ephemeral)
-    }
-}
-
 /// `ephemeral` is needed exactly when a target being rendered (one with a case in `selection`) is
 /// ephemeral.
 ///
 /// # Errors
 ///
 /// [`ObeliskK8sError::Usage`] if one is, without `ephemeral`; or `ephemeral` is given and none is.
-fn check_selection(
+pub(crate) fn check_selection(
     selection: &Selection<'_>,
     ephemeral: Option<&Ephemeral>,
 ) -> Result<(), ObeliskK8sError> {

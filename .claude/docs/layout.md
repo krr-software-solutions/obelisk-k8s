@@ -37,6 +37,8 @@ defines the CLI (the clap types, `--help` headings, completions) and dispatches 
 - `config/apply.rs`: `apply`: rendered manifests installed as Helm releases on each target's cluster.
 - `config/ephemeral.rs`: an ephemeral target's copy (`--ephemeral-name` and its values), and checking
   a selection needs one exactly when it has an ephemeral target.
+- `config/run.rs`: `RunInputs`, what every case in a run shares: the git facts, the ephemeral copy,
+  and the global config its targets' clusters come from (each must be in it).
 - `cluster.rs`: `cluster status` / `up` / `down` / `destroy` for managed clusters (local k3d only).
 - `base.rs`: a managed cluster's base (obeliskd gateway ip and names, MetalLB, Envoy Gateway).
 - `k3d.rs`: running `k3d` (and `docker`, to tell obelisk-k8s's clusters from others).
