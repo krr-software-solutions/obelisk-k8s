@@ -32,6 +32,8 @@ serde = { version = "1", features = ["derive"] }
 serde-saphyr = "~2.0"
 # The generic tree for values files (merging, the `obelisk:` block); YAML stays in serde-saphyr.
 serde_json = { version = "1", features = ["preserve_order"] }
+# Checking a `type: url` render's download against its `sha256`.
+sha2 = "0.11"
 tempfile = "3"
 thiserror = "2"
 # Lossless YAML edits (comments and formatting kept). Pinned: it's 0.x, with one maintainer, and moves fast.

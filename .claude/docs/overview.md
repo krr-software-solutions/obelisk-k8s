@@ -103,7 +103,7 @@ ip-allocator.
   or a tag like `v1.2.3`). Note that `git describe` output like `v1.2.3-4-gabc1234` is SemVer for a
   *prerelease of* 1.2.3, so it sorts before `v1.2.3`.
 - `obelisk-k8s template manifests [-t …]… [-u …]…`: the k8s resources each unit renders: its
-  `templates:` (listed like `generators:`, `{ type: gotmpl, path }`), each rendered on its own through a
+  `templates:` (listed like `generators:`, see the types below), each rendered on its own, e.g. through a
   throwaway Helm chart with the generated values as `.Values`, joined in merge order as Helm prints
   them (each document under a `# Source:` comment naming the template; Helm orders the documents
   *within* one template by kind). A template may print any number of documents. No shared `define`s
@@ -122,12 +122,12 @@ ip-allocator.
   before it stay applied. Takes `--repo` too; the clusters come from the global config.
 - `obelisk-k8s template generated-values [-t …]… [-u …]…`: the merged values with each of the unit's
   generators deep-merged on top, in merge order. `generators:` (in `repo.yaml`, `target.yaml`,
-  `unit.yaml`) lists `{ type: gotmpl, path }` like config paths (interpolated, missing files skipped).
-  Each renders through a throwaway Helm chart (`helm` must be installed) with the merged config values
-  as `.Values` (`.Release` is the unit / `default`: use `.Values.obelisk`); all see the same input. An
-  output must be one mapping or nothing, and may set `obelisk.release.{name, namespace}` like a config
-  file. Takes `--repo` too. Each generator is its own `helm` run (targets × units × generators of them
-  for a full run). A unit with generators needs a name Helm accepts as a release name (≤ 53 chars).
+  `unit.yaml`) lists `{ type, … }` entries like config paths (see the types below); all see the same
+  input, the merged config values. A `gotmpl` one renders through a throwaway Helm chart (`helm` must be
+  installed) with them as `.Values` (`.Release` is the unit / `default`: use `.Values.obelisk`). An
+  output must be one mapping or nothing, and may set `obelisk.release.{name, namespace}` and
+  `obelisk.version` like a config file. Takes `--repo` too. Each `gotmpl` generator is its own `helm`
+  run; a unit with any needs a name Helm accepts as a release name (≤ 53 chars).
 - **Release:** `obelisk.release.{name, namespace}` exists only to be `.Release.{Name, Namespace}` (and
   the Helm release `apply` will install). Like the version, each must have exactly one distinct
   value per unit on a target, from `release: { name, namespace }` in its target or unit
@@ -152,12 +152,34 @@ config files ─▶ values ─▶ generators ─▶ generated values ─▶ temp
 - **Config files** (`configPaths`) deep-merge into the values, with the tool's `obelisk:` block on top.
 - **Generators** (`generators:`) are Go templates that compute more values from those. Logic lives
   here, in the repo's own `.gotmpl` files.
-- **Templates** (`templates:`) are Go templates that render k8s resources from the generated values.
-  Generators and templates each render on their own through a throwaway Helm chart, so they get all of
-  Helm's functions.
-- **Helm** renders, and applies (`helm upgrade --install`): every unit is a Helm
-  release. Upstream charts, raw YAML and YAML from a URL (wrapped into throwaway charts), and
-  executable generators are planned, not built.
+- **Templates** (`templates:`) render k8s resources from the generated values.
+- Both are lists of `{ type, … }` (in `repo.yaml`, `target.yaml`, `unit.yaml`, merged like config
+  paths), and each entry renders on its own:
+  - `{ type: gotmpl, path }`: a Go template, rendered through a throwaway Helm chart (all of Helm's
+    functions; `.Values` is the values).
+  - `{ type: file, path }`: used as it is (raw YAML; nothing in it is templated).
+  - `{ type: url, url, sha256? }`: fetched with `curl` every run (https only, redirects too; 2m
+    timeout), checked against `sha256` when given (without one, loading warns), used as it is.
+  - `{ type: helm, chart, repo?, version, values? }`: an upstream chart, `helm template`d as the
+    case's release, CRDs included. `repo` is a URL or a name in `repo.yaml`'s `helmRepos`; an
+    `oci://` chart takes none. Its values are the generated values' mapping at `values` (a
+    dot-separated key; keys with a `.` can't be reached), or none. Templates only. `apply` renders it
+    for the target cluster's capabilities (its Kubernetes and API versions, from `kubectl` on its
+    context, so charts that check `.Capabilities` render what that cluster can take); `template`
+    renders offline, with Helm's defaults.
+  - `{ type: command, command: [program, args…] }`: run from the repo root with the values (YAML) on
+    stdin; its stdout is the output. `./…` resolves from `.obelisk-k8s/`, an absolute path is used as
+    it is, a bare name is looked up on `PATH` (anything else is a load error). No timeout. Its
+    `# Source:` names only the program (arguments may hold secrets).
+  A `path` starts with `./` and is skipped if missing; `path`, `url` and the `command` words are
+  interpolated. A generator's output must be one values mapping (or nothing); a template's is
+  resources, each from a `file`, `url` or `command` put under its own `# Source:` comment.
+- **Helm** renders, and applies (`helm upgrade --install`): every unit is a Helm release, whatever
+  its templates' types. An upstream chart's resources are installed as part of the unit's release
+  (not as that chart's own release), hooks and CRDs included as rendered; a CRD and resources of its
+  kind in one unit may fail on a first install (put them in separate units). Helm 4 upgrades with
+  server-side apply: a field something else in the cluster owns (an HPA's `spec.replicas`) is a
+  conflict, so don't set what the cluster manages.
 - **obelisk-k8s** will order units (CRDs before what uses them, across namespaces), wait for
   readiness, and resolve `ref+awsssm` refs (on the generated values, before templates).
 

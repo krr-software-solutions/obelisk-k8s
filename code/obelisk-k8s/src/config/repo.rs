@@ -7,6 +7,9 @@
 //!   units/<dir>/unit.yaml     unit: { name, configPaths, generators, templates, targets, release: { name, namespace }, version }
 //! ```
 //!
+//! `generators` and `templates` are lists of [`Render`]s: `{ type: gotmpl | file | url | helm |
+//! command, … }`.
+//!
 //! A target's or unit's name defaults to its directory's name. `null` and missing mean the same thing
 //! everywhere.
 
@@ -38,8 +41,8 @@ pub struct RepoConfig {
     /// Helm repo name → URL, in file order.
     pub helm_repos: IndexMap<String, String>,
     pub config_paths: Vec<InterpString>,
-    pub generators: Vec<RenderFile>,
-    pub templates: Vec<RenderFile>,
+    pub generators: Vec<Render>,
+    pub templates: Vec<Render>,
     /// Sorted by name.
     pub targets: Vec<Target>,
     /// Sorted by name.
@@ -56,8 +59,8 @@ pub struct Target {
     /// The name of a cluster in the global config (not checked yet).
     pub cluster: String,
     pub config_paths: Vec<InterpString>,
-    pub generators: Vec<RenderFile>,
-    pub templates: Vec<RenderFile>,
+    pub generators: Vec<Render>,
+    pub templates: Vec<Render>,
     pub release: Release,
     /// The version its units' Helm releases get (`obelisk.version`), interpolated. Parsed here, agreed
     /// on after generation.
@@ -73,8 +76,8 @@ pub struct Unit {
     /// Relative to the repo root, e.g. `.obelisk-k8s/units/my-app/unit.yaml`.
     pub file: PathBuf,
     pub config_paths: Vec<InterpString>,
-    pub generators: Vec<RenderFile>,
-    pub templates: Vec<RenderFile>,
+    pub generators: Vec<Render>,
+    pub templates: Vec<Render>,
     pub targets: UnitTargets,
     pub release: Release,
     /// The version its Helm release gets (`obelisk.version`), interpolated. Parsed here, agreed on after
@@ -82,20 +85,66 @@ pub struct Unit {
     pub version: Option<InterpString>,
 }
 
-/// A file obelisk-k8s renders: a generator (`generators:`, more values from the merged config values)
-/// or a template (`templates:`, k8s resources from the generated values). Its path is like a config
-/// path: it starts with `./`, is interpolated, and is skipped if it's missing.
+/// Something obelisk-k8s renders: a generator (`generators:`, more values from the merged config
+/// values) or a template (`templates:`, k8s resources from the generated values). Written as
+/// `{ type, … }`:
+///
+/// ```yaml
+/// - { type: gotmpl, path: ./x.yaml.gotmpl }       # a Go template, rendered by Helm
+/// - { type: file, path: ./x.yaml }                 # used as it is
+/// - { type: url, url: https://…/x.yaml, sha256: … }  # fetched (and checked, with `sha256`), used as it is
+/// - { type: helm, chart: metallb, repo: metallb, version: 0.16.1, values: metallb }  # templates only
+/// - { type: command, command: [./render.sh, --flag] }  # run, with the values on stdin
+/// ```
+///
+/// A `path` is like a config path: it starts with `./`, is interpolated, and is skipped if it's
+/// missing. A `url` and a `command`'s words are interpolated too.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RenderFile {
-    pub kind: RenderKind,
-    pub path: InterpString,
+pub enum Render {
+    Gotmpl {
+        path: InterpString,
+    },
+    File {
+        path: InterpString,
+    },
+    Url {
+        url: InterpString,
+        sha256: Option<String>,
+    },
+    Helm(HelmChart),
+    /// The program first: `./…` resolves from `.obelisk-k8s/`, an absolute path is used as it is, and
+    /// a bare name is looked up on `PATH`.
+    Command {
+        command: Vec<InterpString>,
+    },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum RenderKind {
-    /// A Go template, rendered by Helm.
-    Gotmpl,
+/// An upstream Helm chart, rendered (`helm template`) as the unit's release.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HelmChart {
+    /// Its name in `repo`, or an `oci://` reference.
+    pub chart: String,
+    /// The chart repository's URL (`repo:` is one, or a name in `repo.yaml`'s `helmRepos`); `None`
+    /// for an OCI chart.
+    pub repo: Option<String>,
+    pub version: String,
+    /// Where its values are in the generated values: a dot-separated key (`metallb`, `charts.x`);
+    /// none means no values.
+    pub values: Option<String>,
+}
+
+impl Render {
+    /// Its type, as written.
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Gotmpl { .. } => "gotmpl",
+            Self::File { .. } => "file",
+            Self::Url { .. } => "url",
+            Self::Helm(_) => "helm",
+            Self::Command { .. } => "command",
+        }
+    }
 }
 
 /// What a target or unit says about the Helm release its units become: `release: { name, namespace }`,
@@ -135,8 +184,19 @@ impl RepoConfig {
         let RepoFile { repo } = yaml::read_file(&repo_root.join(REPO_FILE), repo_file)?;
         check_name(repo_file, &repo.name)?;
         let config_paths = check_config_paths(repo_file, repo.config_paths)?;
-        let generators = check_render_files(repo_file, repo.generators, GENERATOR_PATH)?;
-        let templates = check_render_files(repo_file, repo.templates, TEMPLATE_PATH)?;
+        let helm_repos = repo.helm_repos.unwrap_or_default();
+        let generators = check_renders(
+            repo_file,
+            repo.generators,
+            RenderList::Generators,
+            &helm_repos,
+        )?;
+        let templates = check_renders(
+            repo_file,
+            repo.templates,
+            RenderList::Templates,
+            &helm_repos,
+        )?;
 
         let mut targets = Vec::new();
         for entry in read_entries(&dir, shown, "targets", "target.yaml", &mut warnings)? {
@@ -144,8 +204,18 @@ impl RepoConfig {
             targets.push(Target {
                 name: name_or_dir(&entry, target.name)?,
                 config_paths: check_config_paths(&entry.file, target.config_paths)?,
-                generators: check_render_files(&entry.file, target.generators, GENERATOR_PATH)?,
-                templates: check_render_files(&entry.file, target.templates, TEMPLATE_PATH)?,
+                generators: check_renders(
+                    &entry.file,
+                    target.generators,
+                    RenderList::Generators,
+                    &helm_repos,
+                )?,
+                templates: check_renders(
+                    &entry.file,
+                    target.templates,
+                    RenderList::Templates,
+                    &helm_repos,
+                )?,
                 cluster: target.cluster,
                 release: target.release.unwrap_or_default(),
                 version: target.version,
@@ -164,8 +234,18 @@ impl RepoConfig {
             units.push(Unit {
                 name: name_or_dir(&entry, unit.name)?,
                 config_paths: check_config_paths(&entry.file, unit.config_paths)?,
-                generators: check_render_files(&entry.file, unit.generators, GENERATOR_PATH)?,
-                templates: check_render_files(&entry.file, unit.templates, TEMPLATE_PATH)?,
+                generators: check_renders(
+                    &entry.file,
+                    unit.generators,
+                    RenderList::Generators,
+                    &helm_repos,
+                )?,
+                templates: check_renders(
+                    &entry.file,
+                    unit.templates,
+                    RenderList::Templates,
+                    &helm_repos,
+                )?,
                 targets: check_unit_targets(&entry.file, unit.targets, &targets)?,
                 release: unit.release.unwrap_or_default(),
                 version: unit.version,
@@ -177,11 +257,12 @@ impl RepoConfig {
             "unit",
         )?;
 
+        warnings.extend(unpinned_urls(&generators, &templates, &targets, &units));
         targets.sort_by(|a, b| a.name.cmp(&b.name));
         units.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(Self {
             name: repo.name.value,
-            helm_repos: repo.helm_repos.unwrap_or_default(),
+            helm_repos,
             config_paths,
             generators,
             templates,
@@ -272,8 +353,8 @@ struct RepoSection {
     name: Spanned<String>,
     helm_repos: Option<IndexMap<String, String>>,
     config_paths: Option<Vec<Spanned<InterpString>>>,
-    generators: Option<Vec<RenderFileIn>>,
-    templates: Option<Vec<RenderFileIn>>,
+    generators: Option<Vec<RenderIn>>,
+    templates: Option<Vec<RenderIn>>,
 }
 
 #[derive(Deserialize)]
@@ -288,8 +369,8 @@ struct TargetSection {
     name: Option<Spanned<String>>,
     cluster: String,
     config_paths: Option<Vec<Spanned<InterpString>>>,
-    generators: Option<Vec<RenderFileIn>>,
-    templates: Option<Vec<RenderFileIn>>,
+    generators: Option<Vec<RenderIn>>,
+    templates: Option<Vec<RenderIn>>,
     release: Option<Release>,
     version: Option<InterpString>,
     ephemeral: Option<bool>,
@@ -306,8 +387,8 @@ struct UnitFile {
 struct UnitSection {
     name: Option<Spanned<String>>,
     config_paths: Option<Vec<Spanned<InterpString>>>,
-    generators: Option<Vec<RenderFileIn>>,
-    templates: Option<Vec<RenderFileIn>>,
+    generators: Option<Vec<RenderIn>>,
+    templates: Option<Vec<RenderIn>>,
     targets: Option<Vec<Spanned<String>>>,
     release: Option<Release>,
     version: Option<InterpString>,
@@ -315,28 +396,242 @@ struct UnitSection {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RenderFileIn {
+struct RenderIn {
     #[serde(rename = "type")]
-    kind: RenderKind,
-    path: Spanned<InterpString>,
+    kind: Spanned<String>,
+    path: Option<Spanned<InterpString>>,
+    url: Option<InterpString>,
+    sha256: Option<String>,
+    chart: Option<String>,
+    repo: Option<String>,
+    version: Option<String>,
+    values: Option<String>,
+    command: Option<Vec<InterpString>>,
 }
 
-/// Every config path must start with `./` (it resolves from `.obelisk-k8s/`).
-fn check_render_files(
+/// Which list renders are in: generators make values, templates make resources.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RenderList {
+    Generators,
+    Templates,
+}
+
+impl RenderList {
+    fn what(self) -> &'static str {
+        match self {
+            Self::Generators => GENERATOR_PATH,
+            Self::Templates => TEMPLATE_PATH,
+        }
+    }
+}
+
+fn check_renders(
     file: &Path,
-    files: Option<Vec<RenderFileIn>>,
-    what: &str,
-) -> Result<Vec<RenderFile>, ObeliskK8sError> {
-    let files = files.unwrap_or_default();
-    let paths = files.iter().map(|f| f.path.clone()).collect();
-    check_paths(file, Some(paths), what)?;
-    Ok(files
+    renders: Option<Vec<RenderIn>>,
+    list: RenderList,
+    helm_repos: &IndexMap<String, String>,
+) -> Result<Vec<Render>, ObeliskK8sError> {
+    renders
+        .unwrap_or_default()
         .into_iter()
-        .map(|f| RenderFile {
-            kind: f.kind,
-            path: f.path.value,
-        })
-        .collect())
+        .map(|r| check_render(file, r, list, helm_repos))
+        .collect()
+}
+
+fn check_render(
+    file: &Path,
+    r: RenderIn,
+    list: RenderList,
+    helm_repos: &IndexMap<String, String>,
+) -> Result<Render, ObeliskK8sError> {
+    let at = Some(r.kind.at);
+    let error = |message: String| config_error(file, at, message);
+    let kind = r.kind.value.as_str();
+    let given = [
+        ("path", r.path.is_some()),
+        ("url", r.url.is_some()),
+        ("sha256", r.sha256.is_some()),
+        ("chart", r.chart.is_some()),
+        ("repo", r.repo.is_some()),
+        ("version", r.version.is_some()),
+        ("values", r.values.is_some()),
+        ("command", r.command.is_some()),
+    ];
+    let takes: &[&str] = match kind {
+        "gotmpl" | "file" => &["path"],
+        "url" => &["url", "sha256"],
+        "helm" => &["chart", "repo", "version", "values"],
+        "command" => &["command"],
+        _ => {
+            return Err(error(format!(
+                "unknown type `{kind}` (expected gotmpl, file, url, helm or command)"
+            )));
+        }
+    };
+    if let Some((extra, _)) = given.iter().find(|(key, set)| *set && !takes.contains(key)) {
+        return Err(error(format!(
+            "`type: {kind}` takes {}, not `{extra}`",
+            takes
+                .iter()
+                .map(|k| format!("`{k}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    }
+    let required = |key: &str, set: bool| {
+        if set {
+            Ok(())
+        } else {
+            Err(error(format!("`type: {kind}` needs `{key}`")))
+        }
+    };
+    match kind {
+        "gotmpl" | "file" => {
+            let path = r
+                .path
+                .ok_or_else(|| error(format!("`type: {kind}` needs `path`")))?;
+            let path = check_paths(file, Some(vec![path]), list.what())?.remove(0);
+            Ok(if kind == "gotmpl" {
+                Render::Gotmpl { path }
+            } else {
+                Render::File { path }
+            })
+        }
+        "url" => {
+            let url = r
+                .url
+                .ok_or_else(|| error("`type: url` needs `url`".to_owned()))?;
+            check_url(url, r.sha256).map_err(error)
+        }
+        "helm" => {
+            if list == RenderList::Generators {
+                return Err(error(
+                    "a Helm chart renders resources, not values: put it in `templates:`".to_owned(),
+                ));
+            }
+            required("chart", r.chart.is_some())?;
+            required("version", r.version.is_some())?;
+            let chart = HelmChart {
+                chart: r.chart.unwrap_or_default(),
+                repo: r.repo,
+                version: r.version.unwrap_or_default(),
+                values: r.values,
+            };
+            check_helm(chart, helm_repos).map_err(error)
+        }
+        _ => {
+            let command = r.command.unwrap_or_default();
+            let Some(program) = command.first().map(InterpString::raw) else {
+                return Err(error(
+                    "`type: command` needs a `command`: the program, then its arguments".to_owned(),
+                ));
+            };
+            // `./x`, `/abs/x` or a bare name: not a path relative to who knows where.
+            if program.is_empty()
+                || (program.contains('/')
+                    && !program.starts_with("./")
+                    && !program.starts_with('/'))
+            {
+                return Err(error(format!(
+                    "program `{program}` must be `./…` (from `{REPO_CONFIG_DIR}/`), an absolute path, or a name on `PATH`"
+                )));
+            }
+            Ok(Render::Command { command })
+        }
+    }
+}
+
+/// A warning for each `url` render without a `sha256`, by the file declaring it.
+fn unpinned_urls(
+    generators: &[Render],
+    templates: &[Render],
+    targets: &[Target],
+    units: &[Unit],
+) -> Vec<String> {
+    let declared = std::iter::once((Path::new(REPO_FILE), generators, templates))
+        .chain(targets.iter().map(|t| {
+            (
+                t.file.as_path(),
+                t.generators.as_slice(),
+                t.templates.as_slice(),
+            )
+        }))
+        .chain(units.iter().map(|u| {
+            (
+                u.file.as_path(),
+                u.generators.as_slice(),
+                u.templates.as_slice(),
+            )
+        }));
+    let mut warnings = Vec::new();
+    for (file, generators, templates) in declared {
+        for render in generators.iter().chain(templates) {
+            if let Render::Url { url, sha256: None } = render {
+                warnings.push(format!(
+                    "{}: url `{url}` has no `sha256`: what it fetches can change under you",
+                    file.display()
+                ));
+            }
+        }
+    }
+    warnings
+}
+
+/// A `type: url`: https, and a `sha256` (if any) that looks like one.
+fn check_url(url: InterpString, sha256: Option<String>) -> Result<Render, String> {
+    if !url.raw().starts_with("https://") {
+        return Err(format!(
+            "url `{url}` must be https:// (it's applied to clusters)"
+        ));
+    }
+    if let Some(sha) = &sha256
+        && (sha.len() != 64
+            || !sha
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()))
+    {
+        return Err(format!(
+            "sha256 `{sha}` isn't a SHA-256: 64 lowercase hex digits"
+        ));
+    }
+    Ok(Render::Url { url, sha256 })
+}
+
+/// A `type: helm`'s chart, with `repo` (as written) resolved: an `oci://` chart takes none; any
+/// other takes a URL, or a name in `helm_repos`.
+fn check_helm(
+    mut chart: HelmChart,
+    helm_repos: &IndexMap<String, String>,
+) -> Result<Render, String> {
+    let name = &chart.chart;
+    chart.repo = match (name.starts_with("oci://"), chart.repo.take()) {
+        (true, None) => None,
+        (true, Some(_)) => {
+            return Err(format!(
+                "chart `{name}` is an OCI reference: it takes no `repo`"
+            ));
+        }
+        (false, None) => {
+            return Err(format!(
+                "chart `{name}` needs a `repo` (a URL, or a name in `helmRepos`), or to be an `oci://` reference"
+            ));
+        }
+        (false, Some(repo)) if repo.starts_with("https://") || repo.starts_with("http://") => {
+            Some(repo)
+        }
+        (false, Some(repo)) => Some(helm_repos.get(&repo).cloned().ok_or_else(|| {
+            let known: Vec<_> = helm_repos.keys().map(String::as_str).collect();
+            format!(
+                "repo `{repo}` isn't a URL or a name in `helmRepos` (there are: {})",
+                if known.is_empty() {
+                    "none".to_owned()
+                } else {
+                    known.join(", ")
+                }
+            )
+        })?),
+    };
+    Ok(Render::Helm(chart))
 }
 
 fn check_config_paths(
@@ -545,8 +840,10 @@ mod tests {
             .file("units/app/unit.yaml", "unit:\n  generators: null\n")
             .load()
             .unwrap();
-        assert_eq!(repo.generators[0].kind, RenderKind::Gotmpl);
-        assert_eq!(repo.generators[0].path.raw(), "./g.gotmpl");
+        let Render::Gotmpl { path } = &repo.generators[0] else {
+            panic!("{:?}", repo.generators[0])
+        };
+        assert_eq!(path.raw(), "./g.gotmpl");
         assert_eq!(repo.units[0].generators, []);
         let repo = base()
             .file(
@@ -555,7 +852,7 @@ mod tests {
             )
             .load()
             .unwrap();
-        assert_eq!(repo.templates[0].path.raw(), "./t.gotmpl");
+        assert_eq!(repo.templates[0].kind(), "gotmpl");
         let e = base()
             .file(
                 "units/app/unit.yaml",
@@ -570,12 +867,139 @@ mod tests {
             e,
             ".obelisk-k8s/units/app/unit.yaml:2:38: generator path `g.gotmpl` must start with `./` (paths resolve from `.obelisk-k8s/`)"
         );
-        let e = error("unit:\n  generators: [{ type: helm, path: ./g }]\n");
-        assert!(e.contains("helm") && e.contains("gotmpl"), "{e}");
+        let e = error("unit:\n  generators: [{ type: nope, path: ./g }]\n");
+        assert!(e.contains("unknown type `nope`"), "{e}");
         let e = error("unit:\n  generators: [{ type: gotmpl, path: ./g, extra: 1 }]\n");
         assert!(e.contains("extra"), "{e}");
         let e = error("unit:\n  generators: [{ path: ./g }]\n");
         assert!(e.contains("type"), "{e}");
+    }
+
+    #[test]
+    fn loads_every_render_type() {
+        let sha = "a".repeat(64);
+        let repo = base()
+            .file(
+                "repo.yaml",
+                "repo:\n  name: r\n  helmRepos: { metallb: https://metallb.github.io/metallb }\n",
+            )
+            .file(
+                "units/app/unit.yaml",
+                &format!(
+                    "unit:\n  generators:\n    - {{ type: file, path: ./v.yaml }}\n    - {{ type: url, url: https://x/v.yaml }}\n    - {{ type: command, command: [./gen.sh, \"${{{{obelisk:target}}}}\"] }}\n  templates:\n    - {{ type: url, url: https://x/crds.yaml, sha256: {sha} }}\n    - {{ type: helm, chart: metallb, repo: metallb, version: 0.16.1, values: metallb }}\n    - {{ type: helm, chart: oci://docker.io/envoyproxy/gateway-helm, version: 1.9.3 }}\n    - {{ type: helm, chart: x, repo: https://charts.example.com, version: \"1\" }}\n"
+                ),
+            )
+            .load()
+            .unwrap();
+        let unit = &repo.units[0];
+        let kinds: Vec<_> = unit.generators.iter().map(Render::kind).collect();
+        assert_eq!(kinds, ["file", "url", "command"]);
+        let Render::Command { command } = &unit.generators[2] else {
+            panic!("{:?}", unit.generators[2])
+        };
+        assert_eq!(command[1].raw(), "${{obelisk:target}}");
+        assert_eq!(
+            unit.templates[1],
+            Render::Helm(HelmChart {
+                chart: "metallb".to_owned(),
+                repo: Some("https://metallb.github.io/metallb".to_owned()),
+                version: "0.16.1".to_owned(),
+                values: Some("metallb".to_owned()),
+            })
+        );
+        let Render::Helm(oci) = &unit.templates[2] else {
+            panic!()
+        };
+        assert_eq!(oci.repo, None);
+        let Render::Helm(by_url) = &unit.templates[3] else {
+            panic!()
+        };
+        assert_eq!(by_url.repo.as_deref(), Some("https://charts.example.com"));
+    }
+
+    #[test]
+    fn rejects_bad_renders() {
+        let error = |list: &str, render: &str| {
+            base()
+                .file(
+                    "units/app/unit.yaml",
+                    &format!("unit:\n  {list}: [{render}]\n"),
+                )
+                .error()
+        };
+        for (list, render, expected) in [
+            (
+                "generators",
+                "{ type: helm, chart: x, repo: https://x, version: 1 }",
+                "a Helm chart renders resources, not values",
+            ),
+            (
+                "templates",
+                "{ type: file, url: https://x }",
+                "`type: file` takes `path`, not `url`",
+            ),
+            ("templates", "{ type: file }", "`type: file` needs `path`"),
+            (
+                "templates",
+                "{ type: url, url: ftp://x }",
+                "must be https://",
+            ),
+            (
+                "templates",
+                "{ type: url, url: https://x, sha256: ABC }",
+                "isn't a SHA-256",
+            ),
+            (
+                "templates",
+                "{ type: helm, chart: x, version: 1 }",
+                "needs a `repo`",
+            ),
+            (
+                "templates",
+                "{ type: helm, chart: x, repo: nope, version: 1 }",
+                "repo `nope` isn't a URL or a name in `helmRepos` (there are: none)",
+            ),
+            (
+                "templates",
+                "{ type: helm, chart: oci://x/y, repo: https://x, version: 1 }",
+                "takes no `repo`",
+            ),
+            (
+                "templates",
+                "{ type: helm, chart: x, repo: https://x }",
+                "`type: helm` needs `version`",
+            ),
+            (
+                "templates",
+                "{ type: command, command: [] }",
+                "needs a `command`",
+            ),
+            (
+                "templates",
+                "{ type: command, command: [bin/gen] }",
+                "must be `./…`",
+            ),
+        ] {
+            let e = error(list, render);
+            assert!(e.contains(expected), "{render}: {e}");
+        }
+    }
+
+    #[test]
+    fn warns_about_an_unpinned_url() {
+        let repo = base()
+            .file(
+                "units/app/unit.yaml",
+                "unit:\n  templates: [{ type: url, url: https://x/y.yaml }]\n",
+            )
+            .load()
+            .unwrap();
+        assert_eq!(
+            repo.warnings,
+            [
+                ".obelisk-k8s/units/app/unit.yaml: url `https://x/y.yaml` has no `sha256`: what it fetches can change under you"
+            ]
+        );
     }
 
     #[test]

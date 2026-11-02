@@ -137,6 +137,149 @@ pub(crate) fn render(
     ))
 }
 
+/// What a cluster can do, for charts that render by it (`.Capabilities`): its Kubernetes version and
+/// API versions. Without them, `helm template` assumes its own defaults, and a chart that renders a
+/// resource only if the cluster has its API (a `ServiceMonitor`, an `HTTPRoute`) leaves it out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Capabilities {
+    pub(crate) kube_version: String,
+    pub(crate) api_versions: Vec<String>,
+}
+
+/// The capabilities of the cluster at kubectl context `context`.
+///
+/// # Errors
+///
+/// [`ObeliskK8sError::Kubectl`] if `kubectl` can't be run, fails (e.g. the cluster isn't up), or
+/// prints something unexpected.
+pub(crate) fn capabilities(context: &str) -> Result<Capabilities, ObeliskK8sError> {
+    let kubectl = |args: &[&str]| -> Result<String, ObeliskK8sError> {
+        let output = Command::new("kubectl")
+            .args(["--context", context])
+            .args(args)
+            .output()
+            .map_err(|error| {
+                ObeliskK8sError::Kubectl(format!("can't run `kubectl` (is it installed?): {error}"))
+            })?;
+        if !output.status.success() {
+            return Err(ObeliskK8sError::Kubectl(format!(
+                "couldn't ask `{context}` what it can do (`kubectl {}`): {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    };
+    let version: serde_json::Value =
+        serde_json::from_str(&kubectl(&["version", "--output", "json"])?).map_err(|error| {
+            ObeliskK8sError::Kubectl(format!(
+                "`kubectl version` printed something unexpected: {error}"
+            ))
+        })?;
+    let kube_version = version["serverVersion"]["gitVersion"]
+        .as_str()
+        .ok_or_else(|| ObeliskK8sError::Kubectl(format!("`{context}` didn't say its version")))?
+        .to_owned();
+    let api_versions = kubectl(&["api-versions"])?
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_owned)
+        .collect();
+    Ok(Capabilities {
+        kube_version,
+        api_versions,
+    })
+}
+
+/// `helm template`s `chart` as release `release` in `namespace`, with `values` (YAML) as its values,
+/// CRDs included, for a cluster with `capabilities` (Helm's defaults without), and returns what it
+/// printed.
+///
+/// # Errors
+///
+/// [`ObeliskK8sError::Helm`] if `helm` can't be run or fails; [`ObeliskK8sError::Io`] if the values
+/// can't be written.
+pub(crate) fn template_chart(
+    chart: &crate::config::repo::HelmChart,
+    release: &str,
+    namespace: &str,
+    values: Option<&str>,
+    capabilities: Option<&Capabilities>,
+) -> Result<String, ObeliskK8sError> {
+    let dir = tempfile::tempdir().map_err(|source| ObeliskK8sError::Io {
+        path: format!("<values for {}>", chart.chart).into(),
+        source,
+    })?;
+    let values_file = dir.path().join("values.yaml");
+    if let Some(values) = values {
+        std::fs::write(&values_file, values).map_err(|source| ObeliskK8sError::Io {
+            path: format!("<values for {}>", chart.chart).into(),
+            source,
+        })?;
+    }
+    let args = template_args(
+        chart,
+        release,
+        namespace,
+        values.map(|_| values_file.as_path()),
+        capabilities,
+    );
+    let output = run(&args.iter().map(String::as_str).collect::<Vec<_>>())?;
+    if !output.status.success() {
+        return Err(ObeliskK8sError::Helm(format!(
+            "chart `{}` {}: helm couldn't render it: {}",
+            chart.chart,
+            chart.version,
+            helm_message(&String::from_utf8_lossy(&output.stderr))
+        )));
+    }
+    String::from_utf8(output.stdout).map_err(|_| {
+        ObeliskK8sError::Helm(format!(
+            "chart `{}`: helm printed something that isn't UTF-8",
+            chart.chart
+        ))
+    })
+}
+
+fn template_args(
+    chart: &crate::config::repo::HelmChart,
+    release: &str,
+    namespace: &str,
+    values: Option<&Path>,
+    capabilities: Option<&Capabilities>,
+) -> Vec<String> {
+    let mut args: Vec<String> = ["template", release, &chart.chart]
+        .map(str::to_owned)
+        .into();
+    if let Some(repo) = &chart.repo {
+        args.extend(["--repo".to_owned(), repo.clone()]);
+    }
+    args.extend(
+        [
+            "--version",
+            &chart.version,
+            "--namespace",
+            namespace,
+            "--include-crds",
+        ]
+        .map(str::to_owned),
+    );
+    if let Some(values) = values {
+        args.extend(["--values".to_owned(), values.display().to_string()]);
+    }
+    if let Some(capabilities) = capabilities {
+        args.extend([
+            "--kube-version".to_owned(),
+            capabilities.kube_version.clone(),
+        ]);
+        for api in &capabilities.api_versions {
+            args.extend(["--api-versions".to_owned(), api.clone()]);
+        }
+    }
+    args
+}
+
 /// A chart to install: from a chart repository, or an OCI reference.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Chart<'a> {
@@ -365,6 +508,41 @@ mod tests {
         );
         assert_eq!(read("manifests.yaml"), "a: '{{ not a template }}'\n");
         assert_eq!(read("templates/manifests.yaml"), MANIFESTS_TEMPLATE);
+    }
+
+    #[test]
+    fn templates_a_chart_for_the_clusters_capabilities() {
+        let chart = crate::config::repo::HelmChart {
+            chart: "metallb".to_owned(),
+            repo: Some("https://example.org/charts".to_owned()),
+            version: "0.16.1".to_owned(),
+            values: None,
+        };
+        let capabilities = Capabilities {
+            kube_version: "v1.35.5+k3s1".to_owned(),
+            api_versions: vec!["v1".to_owned(), "monitoring.coreos.com/v1".to_owned()],
+        };
+        assert_eq!(
+            template_args(
+                &chart,
+                "r",
+                "ns",
+                Some(Path::new("/v.yaml")),
+                Some(&capabilities)
+            )
+            .join(" "),
+            "template r metallb --repo https://example.org/charts --version 0.16.1 --namespace ns --include-crds \
+             --values /v.yaml --kube-version v1.35.5+k3s1 --api-versions v1 --api-versions monitoring.coreos.com/v1"
+        );
+        let oci = crate::config::repo::HelmChart {
+            chart: "oci://docker.io/x/y".to_owned(),
+            repo: None,
+            ..chart
+        };
+        assert_eq!(
+            template_args(&oci, "r", "ns", None, None).join(" "),
+            "template r oci://docker.io/x/y --version 0.16.1 --namespace ns --include-crds"
+        );
     }
 
     #[test]

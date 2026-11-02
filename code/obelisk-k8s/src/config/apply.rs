@@ -20,6 +20,7 @@ use crate::config::ephemeral::Ephemeral;
 use crate::config::global::{Cluster, GlobalConfig, Location};
 use crate::config::manifests::ManifestsCase;
 use crate::config::paths::Selection;
+use crate::config::paths::Source;
 use crate::config::repo::{RepoConfig, Target};
 use crate::config::run::RunInputs;
 use crate::config::values::Agreed;
@@ -135,8 +136,21 @@ impl RepoConfig {
             contexts.push(context);
         }
         let mut plan: Vec<Planned<'a>> = Vec::new();
+        let mut capabilities: Vec<(String, helm::Capabilities)> = Vec::new();
         for ((target, unit), context) in selection.cases.iter().zip(contexts) {
-            let case = self.manifests_for(repo_root, shown_root, target, unit, &inputs)?;
+            // A chart renders for the cluster it goes to: ask each such cluster once.
+            let has_chart = self
+                .resolve_templates(repo_root, target, unit)?
+                .iter()
+                .any(|t| matches!(t.source, Source::Helm(_)));
+            if has_chart && !capabilities.iter().any(|(c, _)| *c == context) {
+                capabilities.push((context.clone(), helm::capabilities(&context)?));
+            }
+            let found = capabilities
+                .iter()
+                .find(|(c, _)| has_chart && *c == context)
+                .map(|(_, caps)| caps);
+            let case = self.manifests_for(repo_root, shown_root, target, unit, &inputs, found)?;
             if let Some(release) = &case.release {
                 check_renders_something(&case, release)?;
                 check_unique(&plan, &case, release, &context)?;

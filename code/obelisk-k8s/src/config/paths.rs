@@ -18,7 +18,9 @@ use std::fmt::{self, Write as _};
 use std::path::{Path, PathBuf};
 
 use crate::ObeliskK8sError;
-use crate::config::repo::{REPO_CONFIG_DIR, REPO_FILE, RenderFile, RepoConfig, Target, Unit};
+use crate::config::repo::{
+    HelmChart, REPO_CONFIG_DIR, REPO_FILE, Render, RepoConfig, Target, Unit,
+};
 use anstyle::{AnsiColor, Style};
 
 use crate::interp::{InterpString, InterpolationParams, StringPart, Var};
@@ -194,9 +196,9 @@ impl RepoConfig {
         repo_root: &Path,
         target: &'a Target,
         unit: &'a Unit,
-    ) -> Result<Vec<ResolvedPath<'a>>, ObeliskK8sError> {
+    ) -> Result<Vec<ResolvedRender<'a>>, ObeliskK8sError> {
         let lists = [&self.generators, &target.generators, &unit.generators];
-        resolve_render_files(repo_root, target, unit, lists)
+        resolve_renders(repo_root, target, unit, lists)
     }
 
     /// `unit`'s templates on `target`, in the same order (and with the same rules) as config paths.
@@ -205,9 +207,9 @@ impl RepoConfig {
         repo_root: &Path,
         target: &'a Target,
         unit: &'a Unit,
-    ) -> Result<Vec<ResolvedPath<'a>>, ObeliskK8sError> {
+    ) -> Result<Vec<ResolvedRender<'a>>, ObeliskK8sError> {
         let lists = [&self.templates, &target.templates, &unit.templates];
-        resolve_render_files(repo_root, target, unit, lists)
+        resolve_renders(repo_root, target, unit, lists)
     }
 
     fn target(&self, name: &str) -> Result<&Target, ObeliskK8sError> {
@@ -231,20 +233,140 @@ impl RepoConfig {
     }
 }
 
-/// Resolves render files declared at the repo, target and unit levels (`lists`, in that order).
-fn resolve_render_files<'a>(
+/// A generator or template for one case: where it goes in the merge order, and what to run.
+#[derive(Debug)]
+pub(crate) struct ResolvedRender<'a> {
+    pub(crate) scope: Scope,
+    pub(crate) source: Source<'a>,
+}
+
+/// What a [`ResolvedRender`] reads or runs, interpolated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Source<'a> {
+    /// Relative to the repo root, and whether it exists (if not, it's skipped).
+    Gotmpl {
+        path: PathBuf,
+        found: bool,
+    },
+    /// As [`Source::Gotmpl`].
+    File {
+        path: PathBuf,
+        found: bool,
+    },
+    Url {
+        url: String,
+        sha256: Option<&'a str>,
+    },
+    Helm(&'a HelmChart),
+    /// The program (`./…` made relative to the repo root), then its arguments.
+    Command(Vec<String>),
+}
+
+impl ResolvedRender<'_> {
+    /// Whether it runs: everything but a missing file does.
+    pub(crate) fn present(&self) -> bool {
+        !matches!(
+            self.source,
+            Source::Gotmpl { found: false, .. } | Source::File { found: false, .. }
+        )
+    }
+
+    /// What it is, for messages, `# Source:` comments and what a generator set under `obelisk:`: its
+    /// path (relative to the repo root), URL, chart, or (not its arguments, which may hold secrets) a
+    /// command's program.
+    pub(crate) fn describe(&self) -> PathBuf {
+        match &self.source {
+            Source::Gotmpl { path, .. } | Source::File { path, .. } => path.clone(),
+            Source::Url { url, .. } => url.into(),
+            Source::Helm(chart) => format!("{}@{}", chart.chart, chart.version).into(),
+            Source::Command(words) => words[0].clone().into(),
+        }
+    }
+
+    /// [`ResolvedRender::describe`], as the user should see it: a path under `shown_root`.
+    pub(crate) fn shown(&self, shown_root: Option<&Path>) -> PathBuf {
+        match &self.source {
+            Source::Gotmpl { path, .. } | Source::File { path, .. } => {
+                crate::config::values::shown_under(shown_root, path)
+            }
+            _ => self.describe(),
+        }
+    }
+}
+
+/// Resolves the renders declared at the repo, target and unit levels (`lists`, in that order),
+/// ordered like config paths: by scope, then as declared.
+fn resolve_renders<'a>(
     repo_root: &Path,
     target: &'a Target,
     unit: &'a Unit,
-    [repo, target_files, unit_files]: [&'a Vec<RenderFile>; 3],
-) -> Result<Vec<ResolvedPath<'a>>, ObeliskK8sError> {
-    let paths = |files: &'a Vec<RenderFile>| files.iter().map(|f| &f.path).collect();
+    [repo, target_renders, unit_renders]: [&'a Vec<Render>; 3],
+) -> Result<Vec<ResolvedRender<'a>>, ObeliskK8sError> {
+    let params = InterpolationParams {
+        target: Some(&target.name),
+        unit: Some(&unit.name),
+    };
     let declared = [
-        (Level::Repo, Path::new(REPO_FILE), paths(repo)),
-        (Level::Target, target.file.as_path(), paths(target_files)),
-        (Level::Unit, unit.file.as_path(), paths(unit_files)),
+        (Level::Repo, Path::new(REPO_FILE), repo),
+        (Level::Target, target.file.as_path(), target_renders),
+        (Level::Unit, unit.file.as_path(), unit_renders),
     ];
-    resolve_declared(repo_root, target, unit, declared)
+    let mut resolved = Vec::new();
+    for (level, declared_in, renders) in declared {
+        for render in renders {
+            let interpolate = |s: &InterpString| {
+                s.interpolate(&params)
+                    .map_err(|var| ObeliskK8sError::Config {
+                        file: declared_in.to_owned(),
+                        at: None,
+                        message: format!(
+                            "`{s}`: `${{{{obelisk:{}}}}}` has no value here",
+                            var.name()
+                        ),
+                    })
+            };
+            let from_repo_config = |written: &str| {
+                Path::new(REPO_CONFIG_DIR).join(written.strip_prefix("./").unwrap_or(written))
+            };
+            let (source, interpolated): (Source, Vec<&InterpString>) = match render {
+                Render::Gotmpl { path: written } | Render::File { path: written } => {
+                    let path = from_repo_config(&interpolate(written)?);
+                    let found = repo_root.join(&path).is_file();
+                    let source = if matches!(render, Render::Gotmpl { .. }) {
+                        Source::Gotmpl { path, found }
+                    } else {
+                        Source::File { path, found }
+                    };
+                    (source, vec![written])
+                }
+                Render::Url { url, sha256 } => (
+                    Source::Url {
+                        url: interpolate(url)?,
+                        sha256: sha256.as_deref(),
+                    },
+                    vec![url],
+                ),
+                Render::Helm(chart) => (Source::Helm(chart), Vec::new()),
+                Render::Command { command } => {
+                    let mut words = command
+                        .iter()
+                        .map(&interpolate)
+                        .collect::<Result<Vec<_>, _>>()?;
+                    if words[0].starts_with("./") {
+                        words[0] = from_repo_config(&words[0]).display().to_string();
+                    }
+                    (Source::Command(words), command.iter().collect())
+                }
+            };
+            resolved.push(ResolvedRender {
+                scope: scope_of(level, &interpolated),
+                source,
+            });
+        }
+    }
+    // Stable: `declared` is already in level order, and each in the order written.
+    resolved.sort_by_key(|r| r.scope);
+    Ok(resolved)
 }
 
 /// Interpolates and orders paths declared at each level (repo, target, unit).
@@ -291,7 +413,12 @@ fn resolve_declared<'a>(
 }
 
 fn scope(level: Level, path: &InterpString) -> Scope {
-    let vars = path.vars();
+    scope_of(level, &[path])
+}
+
+/// A scope from the level something's declared at and the variables it uses.
+fn scope_of(level: Level, written: &[&InterpString]) -> Scope {
+    let vars: std::collections::BTreeSet<Var> = written.iter().flat_map(|w| w.vars()).collect();
     let target = level == Level::Target || vars.contains(&Var::Target);
     let unit = level == Level::Unit || vars.contains(&Var::Unit);
     match (target, unit) {
@@ -896,7 +1023,10 @@ mod tests {
             .resolve_generators(dir.path(), target, unit)
             .unwrap()
             .into_iter()
-            .map(|p| (p.scope, p.path.display().to_string(), p.found))
+            .map(|p| match p.source {
+                Source::Gotmpl { path, found } => (p.scope, path.display().to_string(), found),
+                other => panic!("{other:?}"),
+            })
             .collect();
         assert_eq!(
             order,
@@ -913,9 +1043,38 @@ mod tests {
         );
         // Config paths, generators and templates are separate lists.
         assert_eq!(config.resolve(dir.path(), target, unit).unwrap(), []);
+        assert!(
+            config
+                .resolve_templates(dir.path(), target, unit)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn orders_any_render_by_the_variables_it_uses() {
+        let dir = write_repo(&[
+            (
+                "repo.yaml",
+                "repo:\n  name: r\n  templates:\n    - { type: command, command: [gen, \"${{obelisk:unit}}\"] }\n    - { type: url, url: \"https://x/${{obelisk:target}}.yaml\", sha256: null }\n    - { type: command, command: [gen, plain] }\n",
+            ),
+            ("targets/prod/target.yaml", "target:\n  cluster: c\n"),
+            ("units/app/unit.yaml", "unit: {}\n"),
+        ]);
+        let config = RepoConfig::load(dir.path()).unwrap();
+        let order: Vec<_> = config
+            .resolve_templates(dir.path(), &config.targets[0], &config.units[0])
+            .unwrap()
+            .into_iter()
+            .map(|r| (r.scope, r.describe().display().to_string()))
+            .collect();
         assert_eq!(
-            config.resolve_templates(dir.path(), target, unit).unwrap(),
-            []
+            order,
+            [
+                (Scope::Repo, "gen".to_owned()),
+                (Scope::Target, "https://x/prod.yaml".to_owned()),
+                (Scope::Unit, "gen".to_owned()),
+            ]
         );
     }
 

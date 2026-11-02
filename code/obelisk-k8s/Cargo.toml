@@ -16,6 +16,7 @@ indexmap.workspace = true
 serde.workspace = true
 serde-saphyr.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 # The throwaway charts Go templates render through.
 tempfile.workspace = true
 thiserror.workspace = true

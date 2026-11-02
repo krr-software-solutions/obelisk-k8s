@@ -2,27 +2,32 @@
 //! its generated values (see `config::generate`), joined in merge order.
 //!
 //! Templates are listed like config paths (`templates:` in `repo.yaml`, `target.yaml` and
-//! `unit.yaml`; interpolated; missing files skipped). Each is a Go template (`type: gotmpl`), rendered
-//! on its own by Helm through a throwaway chart, with the generated values as `.Values`, so a template
-//! can't use another one's `define`s. `.Release.Name` and `.Release.Namespace` are the case's agreed
+//! `unit.yaml`; interpolated; missing files skipped), and each renders on its own (see
+//! `config::render` for the types). A Go template (`type: gotmpl`) renders through a throwaway chart,
+//! with the generated values as `.Values`, so it can't use another one's `define`s; an upstream
+//! chart (`type: helm`) renders as the case's release. `.Release.Name` and `.Release.Namespace` are
+//! the case's agreed
 //! release (`obelisk.release.{name, namespace}`, which also need agreeing on before anything renders),
 //! and the chart's `version` and `appVersion` its agreed `obelisk.version`.
 //!
 //! What Helm prints is kept as is: documents separated by `---`, each under a `# Source:` comment naming
-//! the template file. A template may print any number of documents, or none (one that prints only a
+//! the template file; a `file`, `url` or `command` template's output goes under one `# Source:` of
+//! its own (its later documents keep theirs, if any). A template may print any number of documents, or none (one that prints only a
 //! comment gives an empty document, which `kubectl` ignores). A unit with no templates renders
 //! nothing, and its generators don't run.
 
 use std::fmt;
+use std::fmt::Write as _;
 use std::path::Path;
 
 use crate::ObeliskK8sError;
 use crate::config::ephemeral::Ephemeral;
 use crate::config::global::GlobalConfig;
-use crate::config::paths::{Selection, write_yaml_cases};
+use crate::config::paths::{ResolvedRender, Selection, Source, write_yaml_cases};
+use crate::config::render;
 use crate::config::repo::{RepoConfig, Target, Unit};
 use crate::config::run::RunInputs;
-use crate::config::values::{Agreed, shown_under};
+use crate::config::values::Agreed;
 use crate::helm;
 
 /// One (target, unit) case's rendered resources.
@@ -65,7 +70,10 @@ impl RepoConfig {
         let cases = selection
             .cases
             .iter()
-            .map(|(target, unit)| self.manifests_for(repo_root, shown_root, target, unit, &inputs))
+            // Offline: charts render with Helm's default capabilities.
+            .map(|(target, unit)| {
+                self.manifests_for(repo_root, shown_root, target, unit, &inputs, None)
+            })
             .collect::<Result<_, _>>()?;
         Ok(ManifestsReport {
             cases,
@@ -80,12 +88,13 @@ impl RepoConfig {
         target: &'a Target,
         unit: &'a Unit,
         inputs: &RunInputs<'_>,
+        capabilities: Option<&helm::Capabilities>,
     ) -> Result<ManifestsCase<'a>, ObeliskK8sError> {
         let templates = self.resolve_templates(repo_root, target, unit)?;
         let mut manifests = String::new();
         let mut release = None;
-        // Nothing to render: skip the generators too (each is a `helm` run).
-        if templates.iter().any(|p| p.found) {
+        // Nothing to render: skip the generators too (each may be a `helm` run).
+        if templates.iter().any(ResolvedRender::present) {
             let (generated, agreed) =
                 self.generated_for(repo_root, shown_root, target, unit, inputs)?;
             let version = &agreed.version;
@@ -95,20 +104,31 @@ impl RepoConfig {
                     unit.name, target.name
                 )));
             }
-            let values = &generated.yaml;
-            for path in templates.iter().filter(|p| p.found) {
-                let shown = shown_under(shown_root, &path.path);
-                let rendered = helm::render(
-                    &repo_root.join(&path.path),
-                    &shown,
-                    values,
-                    &agreed.release_name,
-                    &agreed.namespace,
-                    Some(version),
-                )?;
+            let render_inputs = render::Inputs {
+                repo_root,
+                values: &generated.values,
+                values_yaml: &generated.yaml,
+                release: &agreed.release_name,
+                namespace: &agreed.namespace,
+                chart_version: Some(version),
+                capabilities,
+            };
+            for template in templates.iter().filter(|t| t.present()) {
+                let shown = template.shown(shown_root);
+                let rendered = render::text(template, &shown, &render_inputs)?;
                 // A template that renders nothing still gets a newline from Helm.
-                if !rendered.trim().is_empty() {
+                if rendered.trim().is_empty() {
+                    continue;
+                }
+                // Helm names each document's template (`# Source:`); the others are named here.
+                if matches!(template.source, Source::Gotmpl { .. } | Source::Helm(_)) {
                     manifests.push_str(&rendered);
+                } else {
+                    let _ = write!(manifests, "---\n# Source: {}\n", shown.display());
+                    manifests.push_str(rendered.strip_prefix("---\n").unwrap_or(&rendered));
+                    if !rendered.ends_with('\n') {
+                        manifests.push('\n');
+                    }
                 }
             }
             release = Some(agreed);
@@ -334,6 +354,57 @@ mod tests {
             text.contains("  chart: \"1.0.0\"\n  app: \"1.0.0\"\n  values: \"1.0.0\"\n"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn file_and_command_templates_need_no_helm_to_join_the_stream() {
+        // No gotmpl anywhere (and no generators): nothing here runs `helm`.
+        let dir = write_repo(&[
+            ("repo.yaml", "repo:\n  name: r\n"),
+            ("targets/dev/target.yaml", TARGET),
+            (
+                "units/app/unit.yaml",
+                "unit:\n  version: 1.0.0\n  templates:\n    - { type: file, path: ./raw.yaml }\n    - { type: command, command: [sh, -c, \"grep -c 'unit: app' | sed 's/^/count: /'\"] }\n",
+            ),
+            ("raw.yaml", "---\nkind: Raw\n"),
+        ]);
+        let text = manifests(&dir, &["dev"]).unwrap();
+        assert_eq!(
+            text,
+            "---\n# Source: .obelisk-k8s/raw.yaml\nkind: Raw\n---\n# Source: sh\ncount: 1\n"
+        );
+    }
+
+    #[test]
+    fn every_template_type_joins_the_stream_under_its_source() {
+        if !helm_installed() {
+            return;
+        }
+        let dir = repo(&[
+            (
+                "units/app/unit.yaml",
+                "unit:\n  version: 1.0.0\n  templates:\n    - { type: gotmpl, path: ./app.gotmpl }\n    - { type: file, path: ./raw.yaml }\n    - { type: command, command: [sh, -c, \"printf 'kind: FromCommand\\\\n'\"] }\n",
+            ),
+            ("app.gotmpl", CONFIG_MAP),
+            ("raw.yaml", "kind: Raw\nkeep: '{{ as is }}'\n"),
+        ]);
+        let text = manifests(&dir, &["dev"]).unwrap();
+        let sources: Vec<&str> = text
+            .lines()
+            .filter_map(|l| l.strip_prefix("# Source: "))
+            .collect();
+        assert_eq!(
+            sources,
+            [".obelisk-k8s/app.gotmpl", ".obelisk-k8s/raw.yaml", "sh"],
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "---\n# Source: .obelisk-k8s/raw.yaml\nkind: Raw\nkeep: '{{ as is }}'\n---\n"
+            ),
+            "{text}"
+        );
+        assert!(text.ends_with("kind: FromCommand\n"), "{text}");
     }
 
     #[test]

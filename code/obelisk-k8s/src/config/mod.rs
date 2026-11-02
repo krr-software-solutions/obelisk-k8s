@@ -13,6 +13,7 @@ pub mod generate;
 pub mod global;
 pub mod manifests;
 pub mod paths;
+mod render;
 pub mod repo;
 mod run;
 pub mod values;

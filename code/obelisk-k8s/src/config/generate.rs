@@ -23,17 +23,18 @@
 
 use std::path::{Path, PathBuf};
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::ObeliskK8sError;
 use crate::config::ephemeral::Ephemeral;
 use crate::config::global::GlobalConfig;
 use crate::config::paths::Selection;
+use crate::config::paths::Source;
+use crate::config::render;
 use crate::config::repo::{Release, RepoConfig, Target, Unit};
 use crate::config::run::RunInputs;
 use crate::config::values::{
-    Agreed, FileObelisk, FileObelisks, OBELISK_KEY, ValuesCase, ValuesReport, absorb, shown_under,
-    values_yaml,
+    Agreed, FileObelisk, FileObelisks, OBELISK_KEY, ValuesCase, ValuesReport, absorb, values_yaml,
 };
 use crate::config::{NAME_RULE, is_valid_name};
 use crate::interp::{InterpString, InterpolationParams};
@@ -87,21 +88,29 @@ impl RepoConfig {
     ) -> Result<(ValuesCase<'a>, Agreed), ObeliskK8sError> {
         let (mut values, mut sets) =
             self.config_values(repo_root, shown_root, target, unit, inputs)?;
+        // Every generator sees the config values (`input`), not the others' outputs.
         let input = values_yaml(&values, target, unit)?;
         let generators = self.resolve_generators(repo_root, target, unit)?;
-        if generators.iter().any(|p| p.found) {
+        if generators
+            .iter()
+            .any(|g| g.present() && matches!(g.source, Source::Gotmpl { .. }))
+        {
             helm::check_generator_release(&unit.name)?;
         }
-        for path in generators.iter().filter(|p| p.found) {
-            let shown = shown_under(shown_root, &path.path);
-            let rendered = helm::render(
-                &repo_root.join(&path.path),
-                &shown,
-                &input,
-                &unit.name,
-                GENERATOR_NAMESPACE,
-                None,
-            )?;
+        // Only a chart reads the values as a tree, and a chart can't be a generator.
+        let no_tree = Map::new();
+        let render_inputs = render::Inputs {
+            repo_root,
+            values: &no_tree,
+            values_yaml: &input,
+            release: &unit.name,
+            namespace: GENERATOR_NAMESPACE,
+            chart_version: None,
+            capabilities: None,
+        };
+        for generator in generators.iter().filter(|g| g.present()) {
+            let shown = generator.shown(shown_root);
+            let rendered = render::text(generator, &shown, &render_inputs)?;
             let mut documents = yaml::parse_values_stream(&rendered, &shown)?;
             if documents.len() > 1 {
                 return Err(ObeliskK8sError::Config {
@@ -118,7 +127,7 @@ impl RepoConfig {
                     &mut values,
                     &mut sets,
                     output,
-                    &path.path,
+                    &generator.describe(),
                     &shown,
                     "a generator's output",
                 )?;
@@ -394,6 +403,24 @@ mod tests {
 
         // `dev` has no `dev.gen.yaml.gotmpl`: skipped.
         assert!(!generated(&dir, "dev").unwrap().0.contains("replicas"));
+    }
+
+    #[test]
+    fn file_and_command_generators_merge_like_any_other() {
+        // Neither runs `helm`.
+        let dir = plain(&[
+            (
+                "repo.yaml",
+                "repo:\n  name: r\n  configPaths: [./values.yaml]\n  generators:\n    - { type: file, path: ./more.yaml }\n    - { type: command, command: [sh, -c, \"printf 'seen: %s\\\\n' $(grep -c 'unit: app')\"] }\n",
+            ),
+            ("values.yaml", "a: 1\n"),
+            ("more.yaml", "b: 2\nobelisk:\n  version: v9\n"),
+        ]);
+        let (yaml, _) = generated(&dir, "prod").unwrap();
+        assert!(
+            yaml.contains("  version: v9\na: 1\nb: 2\nseen: 1\n"),
+            "{yaml}"
+        );
     }
 
     #[test]

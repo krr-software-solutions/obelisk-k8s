@@ -32,6 +32,8 @@ defines the CLI (the clap types, `--help` headings, completions) and dispatches 
   `serde_json::Value` tree (`preserve_order`); YAML in and out still goes through `yaml.rs`.
 - `config/generate.rs`: the generated values (`template generated-values`): generators rendered and
   merged over the config values.
+- `config/render.rs`: running one generator or template, by type (`gotmpl`, `file`, `url`, `helm`,
+  `command`).
 - `config/manifests.rs`: the rendered resources (`template manifests`): templates rendered with the
   generated values.
 - `config/apply.rs`: `apply`: rendered manifests installed as Helm releases on each target's cluster.

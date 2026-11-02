@@ -28,10 +28,10 @@ config files → values → generators → generated values → templates → k8
 ```
 
 - **Config files:** a repo's values per target and unit, deep-merged in a fixed order.
-- **Generators:** Go templates that compute more values from those (rendered by Helm); executables
-  are planned. This keeps logic out of the templates.
-- **Helm:** does the templating, merges the values files, and applies (`helm upgrade --install`).
-  Raw YAML and YAML from a URL get wrapped into throwaway charts, so every unit is a Helm release.
+- **Generators:** compute more values from those: Go templates (rendered by Helm), files, URLs, or
+  any command (values in on stdin, values out). This keeps logic out of the templates.
+- **Templates:** render the resources: Go templates, raw YAML files or URLs, upstream Helm charts,
+  or commands. Every unit is installed as one Helm release (`helm upgrade --install`).
 - **obelisk-k8s:** orders the units (CRDs before the resources that use them, across namespaces),
   waits for readiness, and resolves SSM refs before values reach Helm. It never prints resolved secrets.
 
@@ -42,7 +42,9 @@ IP allocation and DNS for local clusters come from
 
 - **Done:** `template` (values, generated values, manifests), `apply`, ephemeral targets, and local
   k3d clusters on obeliskd (`cluster up/down/destroy/status`, with MetalLB and a gateway).
-- **Next:** SSM refs, upstream charts and raw/URL YAML as units, `diff`, then up/down hooks (setup,
+- **Also done:** generators and templates of every type: Go templates, raw files, URLs, upstream
+  Helm charts, and commands.
+- **Next:** adopting existing resources, SSM refs, `diff`, then up/down hooks (setup,
   database/topic creation, seeding test data) and blueprints: a spec that pulls apps from several
   repos onto a managed cluster.
 
