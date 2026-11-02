@@ -1,6 +1,6 @@
 #!/bin/sh
-# Install obelisk-k8s from a GitHub release: download and verify the binary for this machine, and
-# put it in ~/.local/bin (no root needed).
+# Install obelisk-k8s from a GitHub release: download and verify the binary for this machine, put
+# it in ~/.local/bin, and install its shell completions for you (no root needed).
 #
 #   curl -fsSL https://github.com/krr-software-solutions/obelisk-k8s/releases/latest/download/install.sh | sh
 #
@@ -9,10 +9,15 @@
 #                                never counts a pre-release, like 1.2.3-rc.1, as the latest)
 #   OBELISK_K8S_TARGET           override the detected target, e.g. aarch64-unknown-linux-musl
 #   OBELISK_K8S_INSTALL_DIR      where to put the binary (default: ~/.local/bin)
+#   OBELISK_K8S_NO_COMPLETIONS   set to skip the shell completions
+#
+# Completions go where each installed shell loads a user's from: bash (bash-completion 2)
+# ~/.local/share/bash-completion/completions, fish ~/.config/fish/completions, zsh
+# ~/.local/share/zsh/site-functions (which zsh only reads if it's on your fpath: see the note).
 #
 # Linux (x86_64, aarch64; static, so any distro) and macOS (x86_64, arm64). It runs `helm`,
 # `kubectl` and (for local clusters) `k3d` and `docker`, which it doesn't install. To uninstall,
-# delete the binary.
+# delete the binary and the three completion files.
 #
 # Everything is inside main(), called on the last line, so a partial download runs nothing.
 set -eu
@@ -65,6 +70,31 @@ sha256_of() { # <file>
   fi
 }
 
+# Writes completions for each installed shell, with the binary at <path>.
+install_completions() { # <path>
+  data="${XDG_DATA_HOME:-$HOME/.local/share}"
+  config="${XDG_CONFIG_HOME:-$HOME/.config}"
+  installed=""
+  for shell in bash zsh fish; do
+    has "$shell" || continue
+    case "$shell" in
+      bash) file="$data/bash-completion/completions/obelisk-k8s" ;;
+      zsh) file="$data/zsh/site-functions/_obelisk-k8s" ;;
+      fish) file="$config/fish/completions/obelisk-k8s.fish" ;;
+    esac
+    if ! { mkdir -p "$(dirname "$file")" && "$1" completions "$shell" > "$file"; }; then
+      die "couldn't write the $shell completions to $file"
+    fi
+    installed="$installed $shell"
+  done
+  if [ -n "$installed" ]; then
+    say "installed shell completions for:$installed"
+  fi
+  case "$installed" in
+    *zsh*) say "note: for zsh, put $data/zsh/site-functions on your fpath before compinit, e.g. in ~/.zshrc: fpath=($data/zsh/site-functions \$fpath)" ;;
+  esac
+}
+
 main() {
   has curl || has wget || die "need curl or wget"
   target="${OBELISK_K8S_TARGET:-$(detect_target)}"
@@ -100,6 +130,9 @@ main() {
   cp "$binary" "$dir/.obelisk-k8s.tmp"
   mv -f "$dir/.obelisk-k8s.tmp" "$dir/obelisk-k8s"
   say "installed $("$dir/obelisk-k8s" --version) to $dir/obelisk-k8s"
+  if [ -z "${OBELISK_K8S_NO_COMPLETIONS:-}" ]; then
+    install_completions "$dir/obelisk-k8s"
+  fi
   case ":$PATH:" in
     *":$dir:"*) ;;
     *) say "note: $dir isn't on your PATH" ;;

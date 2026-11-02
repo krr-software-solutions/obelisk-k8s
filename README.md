@@ -12,7 +12,9 @@ Linux (x86_64, aarch64) and macOS:
 curl -fsSL https://github.com/krr-software-solutions/obelisk-k8s/releases/latest/download/install.sh | sh
 ```
 
-It downloads and verifies the latest release's binary and puts it in `~/.local/bin`; set
+It downloads and verifies the latest release's binary, puts it in `~/.local/bin`, and installs shell
+completions for each of bash, zsh and fish you have (zsh needs `~/.local/share/zsh/site-functions`
+on its `fpath`; the installer says so). Set
 `OBELISK_K8S_VERSION` for another version, `OBELISK_K8S_INSTALL_DIR` for another place. Or take an
 archive from the [releases](https://github.com/krr-software-solutions/obelisk-k8s/releases). It runs
 `helm`, `kubectl`, and for local clusters `k3d` and `docker`, which it doesn't install.
