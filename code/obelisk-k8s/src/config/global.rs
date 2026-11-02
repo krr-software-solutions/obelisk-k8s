@@ -74,7 +74,7 @@ pub struct Cluster {
     pub dir: PathBuf,
     pub k8s: K8s,
     pub location: Location,
-    /// Whether obelisk-k8s creates and destroys it (not acted on yet).
+    /// Whether obelisk-k8s creates and destroys it (`cluster up` / `down` / `destroy`; local k3d only).
     pub managed: bool,
     pub obeliskd: Option<Obeliskd>,
     pub kubectl_cluster: Option<String>,
@@ -95,6 +95,26 @@ pub enum Location {
     Remote,
 }
 
+/// As written in `cluster.yaml`.
+impl fmt::Display for K8s {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::K3d => "k3d",
+            Self::Talos => "talos",
+        })
+    }
+}
+
+/// As written in `cluster.yaml`.
+impl fmt::Display for Location {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Local => "local",
+            Self::Remote => "remote",
+        })
+    }
+}
+
 /// Where a managed cluster's addresses come from.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -104,6 +124,26 @@ pub struct Obeliskd {
 }
 
 impl GlobalConfig {
+    /// The cluster named `name`.
+    ///
+    /// # Errors
+    ///
+    /// [`ObeliskK8sError::Usage`] if there's none, naming the ones there are.
+    pub fn cluster(&self, name: &str) -> Result<&Cluster, ObeliskK8sError> {
+        self.clusters
+            .iter()
+            .find(|c| c.name == name)
+            .ok_or_else(|| {
+                let known: Vec<_> = self.clusters.iter().map(|c| c.name.as_str()).collect();
+                let known = if known.is_empty() {
+                    "none".to_owned()
+                } else {
+                    known.join(", ")
+                };
+                ObeliskK8sError::Usage(format!("no cluster `{name}` (there are: {known})"))
+            })
+    }
+
     /// Loads the global config at `root`. `home` expands `~/` (in `repos.yaml`, and when shown).
     ///
     /// A repo that won't load is a warning, so one broken repo doesn't hide the rest.
@@ -274,16 +314,8 @@ impl fmt::Display for GlobalConfig {
         )?;
         for c in &self.clusters {
             writeln!(f, "  {}:  ({})", c.name, c.file.display())?;
-            let k8s = match c.k8s {
-                K8s::K3d => "k3d",
-                K8s::Talos => "talos",
-            };
-            let location = match c.location {
-                Location::Local => "local",
-                Location::Remote => "remote",
-            };
             let managed = if c.managed { "managed" } else { "not managed" };
-            writeln!(f, "    {k8s}, {location}, {managed}")?;
+            writeln!(f, "    {}, {}, {managed}", c.k8s, c.location)?;
             if let Some(o) = &c.obeliskd {
                 writeln!(
                     f,

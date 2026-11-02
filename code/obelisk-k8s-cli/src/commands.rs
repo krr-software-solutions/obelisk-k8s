@@ -3,13 +3,15 @@
 
 use std::path::{Path, PathBuf};
 
-use obelisk_k8s::ObeliskK8sError;
 use obelisk_k8s::config::ephemeral::{Ephemeral, EphemeralValues};
 use obelisk_k8s::config::global::edit::{self as global_edit, Change};
 use obelisk_k8s::config::global::{GLOBAL_ROOT_ENV, GlobalConfig, default_global_root, tilde};
 use obelisk_k8s::config::repo::RepoConfig;
+use obelisk_k8s::{ObeliskK8sError, cluster};
 
-use crate::{ClusterCommand, EphemeralArgs, GlobalRepoCommand, TemplateCommand};
+use crate::{
+    ClusterCommand, EphemeralArgs, GlobalRepoCommand, ManagedClusterCommand, TemplateCommand,
+};
 
 fn cwd() -> Result<PathBuf, ObeliskK8sError> {
     std::env::current_dir().map_err(|source| ObeliskK8sError::Io {
@@ -157,6 +159,30 @@ pub fn run_config_repo_paths(
     report.shown_root = shown_root;
     // anstream drops the colors when stdout isn't a terminal, or with NO_COLOR set.
     anstream::print!("{report}");
+    Ok(())
+}
+
+pub fn run_cluster(
+    root: Option<PathBuf>,
+    command: &ManagedClusterCommand,
+) -> Result<(), ObeliskK8sError> {
+    let (root, home) = global_root(root)?;
+    let config = GlobalConfig::load(&root, home.as_deref())?;
+    warn(&config.warnings);
+    let report = |report: cluster::Report| {
+        warn(&report.warnings);
+        println!("{report}");
+    };
+    match command {
+        ManagedClusterCommand::Status { name } => {
+            let status = cluster::status(&config, name.as_deref())?;
+            warn(&status.warnings);
+            print!("{status}");
+        }
+        ManagedClusterCommand::Up { name } => report(cluster::up(&config, name)?),
+        ManagedClusterCommand::Down { name } => report(cluster::down(&config, name)?),
+        ManagedClusterCommand::Destroy { name } => report(cluster::destroy(&config, name)?),
+    }
     Ok(())
 }
 

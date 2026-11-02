@@ -143,19 +143,7 @@ pub fn remove_cluster(
     name: &str,
 ) -> Result<Change, ObeliskK8sError> {
     let config = GlobalConfig::load(root, home)?;
-    let cluster = config
-        .clusters
-        .iter()
-        .find(|c| c.name == name)
-        .ok_or_else(|| {
-            let known: Vec<_> = config.clusters.iter().map(|c| c.name.as_str()).collect();
-            let known = if known.is_empty() {
-                "none".to_owned()
-            } else {
-                known.join(", ")
-            };
-            usage(format!("no cluster `{name}` (there are: {known})"))
-        })?;
+    let cluster = config.cluster(name)?;
     let shown = tilde(&cluster.dir, home);
     let io_error = |source| ObeliskK8sError::Io {
         path: shown.clone(),

@@ -8,6 +8,14 @@ pub enum ObeliskK8sError {
     #[error("{0}")]
     Helm(String),
 
+    /// Running `k3d` (or `docker`, to check a k3d cluster) failed, or it said no.
+    #[error("{0}")]
+    K3d(String),
+
+    /// Running `obeliskd` failed, or it said no.
+    #[error("{0}")]
+    Obeliskd(String),
+
     /// The command was asked for something that isn't there (e.g. an unknown target).
     #[error("{0}")]
     Usage(String),

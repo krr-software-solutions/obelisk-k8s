@@ -26,6 +26,23 @@ ip-allocator.
   naming a cluster that isn't there, is a `WARN`.
 - `obelisk-k8s config global init`: creates the global root, an empty `repos.yaml` and `clusters/`
   (whichever are missing), then loads it.
+- `obelisk-k8s cluster up|down|destroy <NAME>`: create (or start, if stopped) / stop (keeping its
+  state) / delete a managed local k3d cluster from the global config. `up` adds its kubectl context
+  `k3d-<NAME>` to the default kubeconfig without switching to it. Each is a no-op when there's
+  nothing to do, and each refuses a k3d cluster of the same name that obelisk-k8s didn't create (it marks its own with the
+  Docker label `obelisk-k8s.managed=true` on `server-0`). Created with k3d's load balancer container
+  and k3s's traefik and servicelb left out: MetalLB is meant to hand out LoadBalancer addresses.
+  With `obeliskd: { supernet, subnet }`, it runs on that obeliskd docker subnet's network
+  (`obd-<supernet>-<subnet>`): the subnet must be in obeliskd's listing (the error says how to
+  allocate it) and its network in Docker; obeliskd keeps both after `destroy`. A `kubectlContext`
+  other than `k3d-<NAME>`, or an existing cluster on a different network than its config says, is a
+  `WARN`. Names longer than 50 characters are refused (k3d's container hostnames must fit). k3d's
+  errors come through as their `ERRO` / `FATA` lines, without colors.
+- `obelisk-k8s cluster status [NAME]`: a table of the global config's clusters (or one): kind,
+  managed, state (`running` / `stopped` / `missing` / `not ours`, for managed local k3d clusters;
+  `-` otherwise), kubectl context and Docker network, as k3d reports them for a local k3d cluster
+  that exists (`-` when it doesn't), else the configured `kubectlContext`. Only asks k3d when there's
+  a local k3d cluster to look at.
 - `obelisk-k8s config global cluster add <NAME> --k8s … --location … [--managed] […]` writes
   `clusters/<NAME>/cluster.yaml`; `cluster remove <NAME>` deletes its directory, only if that holds
   nothing but its `cluster.yaml`. Both check the result by loading the global config again.
@@ -128,6 +145,28 @@ Design the layout format on paper against v1.3, but build only the current phase
 - **Global vs per-instance** deployments are a pattern users build, not a tool feature.
 - **Config comes from files, not env vars.** Prefer a YAML config file over threading env vars
   through a generator.
+
+## k3d dials (TODO)
+
+Every k3d cluster is created the same way for now. The dials it will need, none configurable yet:
+
+- [x] k3d's load balancer container: off (`--no-lb`).
+- [x] k3s's traefik and servicelb (klipper): off; ingress and MetalLB come in as units.
+- [x] The Docker network: obeliskd's docker subnet, when `obeliskd` is set.
+- [ ] MetalLB itself: installing it, and an `IPAddressPool` of obeliskd-allocated ips (`ip alloc`
+      per LoadBalancer service, `autoAssign: false`, so MetalLB never picks an address obeliskd
+      doesn't know about).
+- [ ] DNS: `obeliskd host alloc` names (`*.<cluster>.obd.internal`) for those ips.
+- [ ] Teardown of obeliskd ips/hosts tagged with the cluster on `destroy`.
+- [ ] Port mappings to the host (none: on Linux, the Docker network is reachable directly).
+- [ ] Servers / agents count; memory limits. (With several servers, "running" means all of them.)
+- [ ] The obeliskd subnet's size: the "allocate one" hint suggests `--size 22 --reserve-size 24`;
+      obelisk-k8s could allocate it itself (and ask obeliskd with `--supernet` / `--subnet` filters).
+- [ ] k3s version / image.
+- [ ] A registry (k3d's own, or a shared one) and registry mirrors.
+- [ ] Volumes (host paths), e.g. for local storage or a shared image cache.
+- [ ] The API server's host port (random now) and its address on the obeliskd network.
+- [ ] Other k3s args (e.g. disabling metrics-server or local-storage).
 
 ## Open design questions
 

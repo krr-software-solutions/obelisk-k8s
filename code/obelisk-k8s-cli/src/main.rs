@@ -39,10 +39,40 @@ enum Command {
         #[command(subcommand)]
         command: TemplateCommand,
     },
+    /// Bring managed clusters up, down, and away (local k3d only, so far)
+    Cluster {
+        #[command(subcommand)]
+        command: ManagedClusterCommand,
+    },
     /// Print a shell completion script, e.g. `source <(obelisk-k8s completions bash)`
     Completions {
         /// The shell to complete for
         shell: Shell,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ManagedClusterCommand {
+    /// Show the clusters in the global config: kind, state (managed local k3d ones: running,
+    /// stopped, missing, not ours), kubectl context and Docker network
+    Status {
+        /// Just this cluster [default: every cluster in the global config]
+        name: Option<String>,
+    },
+    /// Create the cluster (or start it, if it's stopped), and add its kubectl context
+    Up {
+        /// The cluster, by its name in the global config
+        name: String,
+    },
+    /// Stop the cluster, keeping its state for the next `up`
+    Down {
+        /// The cluster, by its name in the global config
+        name: String,
+    },
+    /// Delete the cluster, everything in it, and its kubectl context
+    Destroy {
+        /// The cluster, by its name in the global config
+        name: String,
     },
 }
 
@@ -118,7 +148,7 @@ struct ClusterAdd {
     /// Where it runs
     #[arg(long, value_enum)]
     location: LocationArg,
-    /// obelisk-k8s creates and destroys it (not acted on yet)
+    /// obelisk-k8s creates and destroys it (`cluster up` / `down` / `destroy`; local k3d only)
     #[arg(long)]
     managed: bool,
     /// The obeliskd supernet its addresses come from (managed only; needs `--obeliskd-subnet`)
@@ -361,6 +391,7 @@ fn main_impl() -> Result<(), ObeliskK8sError> {
         Command::Template { repo, command } => {
             commands::run_template(repo.as_deref(), cli.global_root, &command)
         }
+        Command::Cluster { command } => commands::run_cluster(cli.global_root, &command),
         Command::Completions { shell } => {
             run_completions(shell);
             Ok(())
