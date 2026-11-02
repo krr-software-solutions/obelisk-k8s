@@ -38,6 +38,18 @@ ip-allocator.
   other than `k3d-<NAME>`, or an existing cluster on a different network than its config says, is a
   `WARN`. Names longer than 50 characters are refused (k3d's container hostnames must fit). k3d's
   errors come through as their `ERRO` / `FATA` lines, without colors.
+- `cluster up` on an obeliskd cluster also installs (or repairs) its **base**, so an app is
+  reachable by name with just an `HTTPRoute`: an obeliskd ip `<cluster>-gateway` (tagged with the
+  cluster) with hostnames `<cluster>.obd.internal` and `*.` / `*.*.` / `*.*.*.<cluster>.obd.internal`;
+  MetalLB (pool: just that ip, `autoAssign: false`); Envoy Gateway; and GatewayClass `envoy` +
+  Gateway `private-default-gateway` in `envoy-gateway-system` on that ip (the home lab's names, so
+  routes carry over). Chart versions are pinned in `base.rs`. `destroy` releases the obeliskd ips
+  tagged with the cluster in its subnet, and their hostnames (renaming the cluster, or dropping its
+  `obeliskd`, before `destroy` leaves them behind). A cluster without `obeliskd` gets no base (a
+  `WARN`). `up` needs `helm` and `kubectl`, and the network (Helm fetches the charts each run). A
+  release that doesn't come up is rolled back, one stuck mid-operation is reported with how to clear
+  it, and each waits up to 5m. Helm doesn't update CRDs: after bumping a pin, apply the new CRDs by
+  hand or `destroy` and `up`.
 - `obelisk-k8s cluster status [NAME]`: a table of the global config's clusters (or one): kind,
   managed, state (`running` / `stopped` / `missing` / `not ours`, for managed local k3d clusters;
   `-` otherwise), kubectl context and Docker network, as k3d reports them for a local k3d cluster
@@ -153,11 +165,11 @@ Every k3d cluster is created the same way for now. The dials it will need, none 
 - [x] k3d's load balancer container: off (`--no-lb`).
 - [x] k3s's traefik and servicelb (klipper): off; ingress and MetalLB come in as units.
 - [x] The Docker network: obeliskd's docker subnet, when `obeliskd` is set.
-- [ ] MetalLB itself: installing it, and an `IPAddressPool` of obeliskd-allocated ips (`ip alloc`
-      per LoadBalancer service, `autoAssign: false`, so MetalLB never picks an address obeliskd
-      doesn't know about).
-- [ ] DNS: `obeliskd host alloc` names (`*.<cluster>.obd.internal`) for those ips.
-- [ ] Teardown of obeliskd ips/hosts tagged with the cluster on `destroy`.
+- [x] MetalLB, with a pool of the gateway's obeliskd ip (`autoAssign: false`).
+- [x] DNS: `<cluster>.obd.internal` and up to three wildcard levels below, at the gateway.
+- [x] Teardown of obeliskd ips/hosts tagged with the cluster on `destroy`.
+- [ ] More LoadBalancer ips (e.g. a database's own): one obeliskd ip each, added to the pool.
+- [ ] HTTPS: cert-manager, a local CA and a wildcard cert on the gateway; trust-manager.
 - [ ] Port mappings to the host (none: on Linux, the Docker network is reachable directly).
 - [ ] Servers / agents count; memory limits. (With several servers, "running" means all of them.)
 - [ ] The obeliskd subnet's size: the "allocate one" hint suggests `--size 22 --reserve-size 24`;

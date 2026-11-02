@@ -37,8 +37,10 @@ defines the CLI (the clap types, `--help` headings, completions) and dispatches 
 - `config/ephemeral.rs`: an ephemeral target's copy (`--ephemeral-name` and its values), and checking
   a selection needs one exactly when it has an ephemeral target.
 - `cluster.rs`: `cluster status` / `up` / `down` / `destroy` for managed clusters (local k3d only).
+- `base.rs`: a managed cluster's base (obeliskd gateway ip and names, MetalLB, Envoy Gateway).
 - `k3d.rs`: running `k3d` (and `docker`, to tell obelisk-k8s's clusters from others).
-- `obeliskd.rs`: asking `obeliskd` for the docker subnet a cluster runs on.
+- `obeliskd.rs`: asking `obeliskd` for the docker subnet a cluster runs on, and claiming /
+  releasing the base's ips and hostnames.
 - `git.rs`: the `obelisk.git` facts (sha, tag, dirt), read with `git`.
 - `helm.rs`: running `helm template` on a throwaway chart (for Go templates).
 - `config/paths.rs`: which config files a unit gets on a target, and their merge order. Behind

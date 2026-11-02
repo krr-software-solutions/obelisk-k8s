@@ -179,7 +179,9 @@ pub fn run_cluster(
             warn(&status.warnings);
             print!("{status}");
         }
-        ManagedClusterCommand::Up { name } => report(cluster::up(&config, name)?),
+        ManagedClusterCommand::Up { name } => {
+            report(cluster::up(&config, name, |step| eprintln!("{step}"))?);
+        }
         ManagedClusterCommand::Down { name } => report(cluster::down(&config, name)?),
         ManagedClusterCommand::Destroy { name } => report(cluster::destroy(&config, name)?),
     }

@@ -12,6 +12,10 @@ pub enum ObeliskK8sError {
     #[error("{0}")]
     K3d(String),
 
+    /// Running `kubectl` failed, or what it waited for didn't happen.
+    #[error("{0}")]
+    Kubectl(String),
+
     /// Running `obeliskd` failed, or it said no.
     #[error("{0}")]
     Obeliskd(String),

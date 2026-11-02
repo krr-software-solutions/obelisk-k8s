@@ -5,11 +5,14 @@
 //! `destroy` deletes it. Each is a no-op when there's nothing to do, and each refuses a k3d cluster of
 //! the same name that obelisk-k8s didn't create. A cluster with `obeliskd: { supernet, subnet }` runs
 //! on that obeliskd docker subnet's network, which must already exist (obeliskd keeps it after
-//! `destroy`).
+//! `destroy`), and `up` installs (or repairs) its base there: see [`crate::base`]. `destroy`
+//! releases the base's obeliskd ip and hostnames.
 
 use std::fmt;
 
 use crate::ObeliskK8sError;
+use crate::base;
+pub use crate::base::Base;
 use crate::config::global::{Cluster, GlobalConfig, K8s, Location};
 use crate::k3d::{self, Existing};
 use crate::obeliskd;
@@ -32,6 +35,8 @@ pub enum Outcome {
 pub struct Report {
     pub cluster: String,
     pub outcome: Outcome,
+    /// What `up` installed the base on.
+    pub base: Option<Base>,
     pub warnings: Vec<String>,
 }
 
@@ -47,23 +52,34 @@ impl fmt::Display for Report {
             Outcome::AlreadyDown => write!(f, "cluster `{name}` is already down"),
             Outcome::Destroyed => write!(f, "destroyed cluster `{name}`"),
             Outcome::Missing => write!(f, "cluster `{name}` doesn't exist"),
+        }?;
+        if let Some(base) = &self.base {
+            write!(f, "\n{base}")?;
         }
+        Ok(())
     }
 }
 
-/// Brings managed cluster `name` up: creates it, or starts it if it's stopped.
+/// Brings managed cluster `name` up: creates it, or starts it if it's stopped; then installs (or
+/// repairs) its base, if it's on obeliskd. `progress` hears about each slow step as it starts.
 ///
 /// # Errors
 ///
 /// [`ObeliskK8sError::Usage`] if `config` has no such cluster, it isn't managed, it isn't a local k3d
-/// cluster, its name is too long for k3d, its obeliskd subnet isn't there, or a k3d cluster of that
-/// name exists that obelisk-k8s didn't create; [`ObeliskK8sError::K3d`] or
-/// [`ObeliskK8sError::Obeliskd`] if those fail.
-pub fn up(config: &GlobalConfig, name: &str) -> Result<Report, ObeliskK8sError> {
+/// cluster, its name won't do for k3d or obeliskd, its obeliskd subnet isn't there, or a k3d cluster
+/// of that name exists that obelisk-k8s didn't create; [`ObeliskK8sError::K3d`],
+/// [`ObeliskK8sError::Obeliskd`], [`ObeliskK8sError::Helm`] or [`ObeliskK8sError::Kubectl`] if
+/// those fail (the last two installing the base).
+pub fn up(
+    config: &GlobalConfig,
+    name: &str,
+    mut progress: impl FnMut(&str),
+) -> Result<Report, ObeliskK8sError> {
     let cluster = managed_k3d(config, name)?;
     let existing = k3d::find(name)?;
     let outcome = match plan_up(name, existing.as_ref())? {
         Outcome::Created => {
+            progress(&format!("creating cluster `{name}`..."));
             let network = match &cluster.obeliskd {
                 Some(o) => Some(obeliskd::docker_network(&o.supernet, &o.subnet)?),
                 None => None,
@@ -72,12 +88,24 @@ pub fn up(config: &GlobalConfig, name: &str) -> Result<Report, ObeliskK8sError> 
             Outcome::Created
         }
         Outcome::Started => {
+            progress(&format!("starting cluster `{name}`..."));
             k3d::start(name)?;
             Outcome::Started
         }
         outcome => outcome,
     };
     let mut warnings = warnings(cluster);
+    let base = if let Some(subnet) = &cluster.obeliskd {
+        progress(
+            "installing the base (MetalLB, Envoy Gateway, the gateway and its obeliskd names)...",
+        );
+        Some(base::install(name, subnet)?)
+    } else {
+        warnings.push(format!(
+            "cluster `{name}` has no `obeliskd`: no base (MetalLB, gateway) installed, as there's no address to give it"
+        ));
+        None
+    };
     if let Some(existing) = &existing {
         let expected = expected_network(cluster);
         if existing.network != expected {
@@ -90,6 +118,7 @@ pub fn up(config: &GlobalConfig, name: &str) -> Result<Report, ObeliskK8sError> 
     Ok(Report {
         cluster: name.to_owned(),
         outcome,
+        base,
         warnings,
     })
 }
@@ -111,17 +140,19 @@ pub fn down(config: &GlobalConfig, name: &str) -> Result<Report, ObeliskK8sError
     Ok(Report {
         cluster: name.to_owned(),
         outcome,
+        base: None,
         warnings: Vec::new(),
     })
 }
 
-/// Destroys managed cluster `name`: deletes it, and everything in it.
+/// Destroys managed cluster `name`: deletes it, and everything in it, and releases its base's
+/// obeliskd ip and hostnames.
 ///
 /// # Errors
 ///
 /// As [`up`].
 pub fn destroy(config: &GlobalConfig, name: &str) -> Result<Report, ObeliskK8sError> {
-    managed_k3d(config, name)?;
+    let cluster = managed_k3d(config, name)?;
     let outcome = match plan_destroy(name, k3d::find(name)?.as_ref())? {
         Outcome::Destroyed => {
             k3d::delete(name)?;
@@ -129,9 +160,13 @@ pub fn destroy(config: &GlobalConfig, name: &str) -> Result<Report, ObeliskK8sEr
         }
         outcome => outcome,
     };
+    if let Some(subnet) = &cluster.obeliskd {
+        base::release(name, subnet)?;
+    }
     Ok(Report {
         cluster: name.to_owned(),
         outcome,
+        base: None,
         warnings: Vec::new(),
     })
 }
@@ -302,6 +337,12 @@ fn managed_k3d<'a>(config: &'a GlobalConfig, name: &str) -> Result<&'a Cluster, 
         return Err(ObeliskK8sError::Usage(format!(
             "cluster name `{name}` is too long for k3d: at most {} characters, so its containers' hostnames fit",
             k3d::NAME_MAX
+        )));
+    }
+    // obeliskd names (the gateway's ip, its hostnames' labels) can't have `--`.
+    if cluster.obeliskd.is_some() && name.contains("--") {
+        return Err(ObeliskK8sError::Usage(format!(
+            "cluster name `{name}` has `--`, which obeliskd doesn't allow in the names its base needs"
         )));
     }
     Ok(cluster)
