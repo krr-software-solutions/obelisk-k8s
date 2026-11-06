@@ -31,6 +31,7 @@ use crate::config::run::RunInputs;
 use crate::config::values::Agreed;
 use crate::helm;
 pub use crate::helm::Takeover;
+use crate::ssm::Ssm;
 
 /// What `apply` did with one case.
 #[derive(Debug)]
@@ -94,10 +95,11 @@ impl RepoConfig {
         global: &GlobalConfig,
         remote_ok: bool,
         takeover: Takeover,
+        ssm: &Ssm,
         mut progress: impl FnMut(&str),
     ) -> Result<ApplyReport<'a>, ObeliskK8sError> {
         let plan = self.plan(
-            repo_root, selection, shown_root, ephemeral, global, remote_ok,
+            repo_root, selection, shown_root, ephemeral, global, remote_ok, ssm,
         )?;
         let mut applied = Vec::new();
         for Planned { case, context } in plan {
@@ -127,6 +129,7 @@ impl RepoConfig {
     }
 
     /// Every case in `selection`, rendered and checked, with the context to install it on.
+    #[allow(clippy::too_many_arguments)]
     fn plan<'a>(
         &'a self,
         repo_root: &Path,
@@ -135,8 +138,9 @@ impl RepoConfig {
         ephemeral: Option<&Ephemeral>,
         global: &GlobalConfig,
         remote_ok: bool,
+        ssm: &Ssm,
     ) -> Result<Vec<Planned<'a>>, ObeliskK8sError> {
-        let inputs = RunInputs::new(repo_root, selection, ephemeral, global)?;
+        let inputs = RunInputs::new(repo_root, selection, ephemeral, global, Some(ssm))?;
         let mut contexts = Vec::new();
         for (target, _) in &selection.cases {
             let cluster = inputs.cluster(target)?;
@@ -327,7 +331,8 @@ mod tests {
     ) -> Result<Vec<Planned<'a>>, ObeliskK8sError> {
         let targets: Vec<String> = targets.iter().map(|t| (*t).to_owned()).collect();
         let selection = config.select(&targets, &[]).unwrap();
-        config.plan(dir.path(), &selection, None, None, global, remote_ok)
+        let ssm = Ssm::with_fetch(Box::new(|_| panic!("no refs here")));
+        config.plan(dir.path(), &selection, None, None, global, remote_ok, &ssm)
     }
 
     #[test]
@@ -458,6 +463,7 @@ mod tests {
                 &global,
                 false,
                 Takeover::default(),
+                &Ssm::with_fetch(Box::new(|_| panic!("no refs here"))),
                 |_| {},
             )
             .unwrap();

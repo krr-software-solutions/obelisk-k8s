@@ -19,7 +19,9 @@ defines the CLI (the clap types, `--help` headings, completions) and dispatches 
   edits that keep comments and formatting. Nothing else names the YAML crates (serde-saphyr to read
   and write, yaml-edit to edit), so they can be swapped here.
 - `interp.rs`: `${{obelisk:...}}` interpolation (`InterpString`: the raw string plus its parts). Only for
-  obelisk-k8s's own config files, never values files.
+  obelisk-k8s's own config files; values files take only `aws-ssm` refs (`ssm.rs`).
+- `ssm.rs`: `${{obelisk:aws-ssm:<key>}}` refs: checking, resolving (the AWS SDK, with credentials
+  from the `AWS_SSM_*` variables, or `AWS_SSM_PROFILE`'s profile), and masking what was resolved (`Ssm::redact`).
 - `config/mod.rs`: what the config files share: scanning `<kind>/<dir>/<file>`, names (DNS labels,
   defaulting to the directory), duplicate checks.
 - `config/global.rs`: `GlobalConfig`, the machine-wide `~/.obelisk-k8s/` (repos, clusters). Behind

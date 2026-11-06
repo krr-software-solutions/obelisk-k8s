@@ -36,6 +36,11 @@ enum Command {
         /// The repo, by its name in the global `repos.yaml` [default: the one in the current directory]
         #[arg(long, global = true, help_heading = SPECIAL, value_name = "NAME")]
         repo: Option<String>,
+        /// Resolve `${{obelisk:aws-ssm:…}}` refs, as `apply` does (needs `AWS_SSM_ACCESS_KEY`,
+        /// `AWS_SSM_SECRET_KEY` and `AWS_SSM_REGION`, or `AWS_SSM_PROFILE`); resolved values print
+        /// masked
+        #[arg(long, global = true)]
+        resolve: bool,
 
         #[command(subcommand)]
         command: TemplateCommand,
@@ -225,7 +230,7 @@ impl From<ClusterAdd> for NewCluster {
 #[derive(Debug, Subcommand)]
 enum TemplateCommand {
     /// The merged values each unit gets on each target: its config files, deep-merged in merge order,
-    /// with the `obelisk:` block on top (SSM refs not resolved)
+    /// with the `obelisk:` block on top (SSM refs as written, unless `--resolve`)
     Values(TemplateArgs),
     /// The values after each unit's generators: its merged values, with every generator's output
     /// deep-merged on top (generators are Go templates, rendered by `helm`)
@@ -410,9 +415,11 @@ fn main_impl() -> Result<(), ObeliskK8sError> {
             &units,
             explain,
         ),
-        Command::Template { repo, command } => {
-            commands::run_template(repo.as_deref(), cli.global_root, &command)
-        }
+        Command::Template {
+            repo,
+            resolve,
+            command,
+        } => commands::run_template(repo.as_deref(), cli.global_root, resolve, &command),
         Command::Apply {
             repo,
             args,

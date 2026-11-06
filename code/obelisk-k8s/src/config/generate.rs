@@ -38,6 +38,7 @@ use crate::config::values::{
 };
 use crate::config::{NAME_RULE, is_valid_name};
 use crate::interp::{InterpString, InterpolationParams};
+use crate::ssm::{self, Ssm};
 use crate::{helm, yaml};
 
 /// What `.Release.Namespace` is while a generator renders.
@@ -61,8 +62,9 @@ impl RepoConfig {
         shown_root: Option<&Path>,
         ephemeral: Option<&Ephemeral>,
         global: &GlobalConfig,
+        ssm: Option<&Ssm>,
     ) -> Result<ValuesReport<'a>, ObeliskK8sError> {
-        let inputs = RunInputs::new(repo_root, selection, ephemeral, global)?;
+        let inputs = RunInputs::new(repo_root, selection, ephemeral, global, ssm)?;
         let cases = selection
             .cases
             .iter()
@@ -112,6 +114,15 @@ impl RepoConfig {
             let shown = generator.shown(shown_root);
             let rendered = render::text(generator, &shown, &render_inputs)?;
             let mut documents = yaml::parse_values_stream(&rendered, &shown)?;
+            // A `file` / `url` generator's values are written in the repo (or pinned), like a config
+            // file's: their refs resolve. The others' output is never looked at.
+            if let Source::Url { sha256, .. } = &generator.source {
+                ssm::check_pinned(&rendered, *sha256, &shown)?;
+            }
+            if matches!(generator.source, Source::File { .. } | Source::Url { .. }) {
+                let what = shown.display().to_string();
+                ssm::resolve_or_check(inputs.ssm, documents.iter_mut().map(|d| (what.clone(), d)))?;
+            }
             if documents.len() > 1 {
                 return Err(ObeliskK8sError::Config {
                     file: shown,
@@ -341,7 +352,7 @@ mod tests {
             .select(&[target.to_owned()], &["app".to_owned()])
             .unwrap();
         let mut report =
-            config.generated_values_report(dir.path(), &selection, None, None, &global())?;
+            config.generated_values_report(dir.path(), &selection, None, None, &global(), None)?;
         let case = report.cases.remove(0);
         let yaml = case
             .yaml
@@ -361,7 +372,7 @@ mod tests {
             .select(&["dev".to_owned()], std::slice::from_ref(&long))
             .unwrap();
         let error = config
-            .generated_values_report(dir.path(), &selection, None, None, &global())
+            .generated_values_report(dir.path(), &selection, None, None, &global(), None)
             .unwrap_err();
         assert!(
             error.to_string().contains("at most 53 characters"),
@@ -502,7 +513,7 @@ mod tests {
             .select(&[target.to_owned()], &["app".to_owned()])
             .unwrap();
         let mut report =
-            config.generated_values_report(dir.path(), &selection, None, None, &global())?;
+            config.generated_values_report(dir.path(), &selection, None, None, &global(), None)?;
         let case = report.cases.remove(0);
         Ok(case.values[OBELISK_KEY]["version"]
             .as_str()
@@ -534,7 +545,7 @@ mod tests {
             .select(&["dev".to_owned()], &["app".to_owned()])
             .unwrap();
         let report = config
-            .generated_values_report(dir.path(), &selection, None, None, &global())
+            .generated_values_report(dir.path(), &selection, None, None, &global(), None)
             .unwrap();
         assert!(
             report.cases[0].yaml.contains("  version: \"1.0\"\nx: 1\n"),
@@ -587,7 +598,14 @@ mod tests {
         let ephemeral =
             Ephemeral::new("pr-7".into(), EphemeralValues::Inline("from: cli".into())).unwrap();
         let report = config
-            .generated_values_report(dir.path(), &selection, None, Some(&ephemeral), &global())
+            .generated_values_report(
+                dir.path(),
+                &selection,
+                None,
+                Some(&ephemeral),
+                &global(),
+                None,
+            )
             .unwrap();
         assert_eq!(report.cases[0].values[OBELISK_KEY]["version"], "0.0.0-pr-7");
         assert_eq!(report.cases[0].values["seen"], "cli");
@@ -609,7 +627,14 @@ mod tests {
         .unwrap();
         assert_eq!(
             config
-                .generated_values_report(dir.path(), &selection, None, Some(&ephemeral), &global())
+                .generated_values_report(
+                    dir.path(),
+                    &selection,
+                    None,
+                    Some(&ephemeral),
+                    &global(),
+                    None
+                )
                 .unwrap_err()
                 .to_string(),
             "unit `app` on target `prod` has 2 different versions, from 2 places: `v1` (.obelisk-k8s/targets/prod/target.yaml), `v2` (--ephemeral-values); they must agree"
@@ -622,7 +647,7 @@ mod tests {
             .select(&[target.to_owned()], &["app".to_owned()])
             .unwrap();
         let mut report =
-            config.generated_values_report(dir.path(), &selection, None, None, &global())?;
+            config.generated_values_report(dir.path(), &selection, None, None, &global(), None)?;
         Ok(report.cases.remove(0).values[OBELISK_KEY]["release"].clone())
     }
 

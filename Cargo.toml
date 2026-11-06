@@ -24,6 +24,12 @@ obelisk-k8s = { path = "code/obelisk-k8s", version = "=0.0.0" }
 
 anstream = "1"
 anstyle = "1"
+# SSM parameters for `${{obelisk:aws-ssm:...}}`, with credentials from the AWS_SSM_* variables only.
+# AWS_SSM_PROFILE: a named profile (~/.aws/config, credentials; SSO, assume-role, credential_process).
+aws-config = "1"
+aws-sdk-ssm = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"] }
+# Masking resolved SSM values in their base64 form too (a Secret's `data`, `b64enc`).
+base64 = "0.22"
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
 indexmap = { version = "2", features = ["serde"] }
@@ -36,6 +42,8 @@ serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.11"
 tempfile = "3"
 thiserror = "2"
+# Only to drive the AWS SDK: one current-thread runtime, made with the client and kept for the run.
+tokio = { version = "1", features = ["rt"] }
 # Lossless YAML edits (comments and formatting kept). Pinned: it's 0.x, with one maintainer, and moves fast.
 yaml-edit = "=0.3.6"
 

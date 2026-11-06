@@ -8,16 +8,19 @@ use crate::config::ephemeral::{Ephemeral, check_selection};
 use crate::config::global::{Cluster, GlobalConfig, normalize};
 use crate::config::paths::Selection;
 use crate::config::repo::Target;
+use crate::ssm::Ssm;
 use crate::{ObeliskK8sError, git};
 
 /// The git facts, the ephemeral copy (if any), the global config the targets' clusters come from,
-/// and where things are (`obelisk.paths`).
+/// where things are (`obelisk.paths`), and what resolves SSM refs (if they're resolved).
 #[derive(Debug)]
 pub(crate) struct RunInputs<'a> {
     pub(crate) git: Value,
     /// `obelisk.paths`: the global root and the repo root, absolute.
     pub(crate) paths: Value,
     pub(crate) ephemeral: Option<&'a Ephemeral>,
+    /// `None`: refs are only checked, and left as written.
+    pub(crate) ssm: Option<&'a Ssm>,
     global: &'a GlobalConfig,
 }
 
@@ -35,6 +38,7 @@ impl<'a> RunInputs<'a> {
         selection: &Selection<'_>,
         ephemeral: Option<&'a Ephemeral>,
         global: &'a GlobalConfig,
+        ssm: Option<&'a Ssm>,
     ) -> Result<Self, ObeliskK8sError> {
         check_selection(selection, ephemeral)?;
         let repo_root_absolute =
@@ -49,6 +53,7 @@ impl<'a> RunInputs<'a> {
                 "repoRoot": utf8(&normalize(&repo_root_absolute))?,
             }),
             ephemeral,
+            ssm,
             global,
         };
         for (target, _) in &selection.cases {
@@ -107,8 +112,14 @@ mod tests {
             cases: Vec::new(),
             single: false,
         };
-        let inputs =
-            RunInputs::new(Path::new("some/./repo/../repo"), &selection, None, &global).unwrap();
+        let inputs = RunInputs::new(
+            Path::new("some/./repo/../repo"),
+            &selection,
+            None,
+            &global,
+            None,
+        )
+        .unwrap();
         let cwd = std::env::current_dir().unwrap();
         assert_eq!(
             inputs.paths,

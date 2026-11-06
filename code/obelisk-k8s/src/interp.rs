@@ -1,5 +1,5 @@
-//! `${{obelisk:...}}` interpolation in obelisk-k8s's own config files (never in values files, and never
-//! in `.gotmpl`, which has its own mechanism).
+//! `${{obelisk:...}}` interpolation in obelisk-k8s's own config files (values files take only SSM
+//! refs, see `ssm`; and never in `.gotmpl`, which has its own mechanism).
 //!
 //! ```text
 //! "./config/${{obelisk:unit}}/values.yaml" → [Text("./config/"), Var(Unit), Text("/values.yaml")]

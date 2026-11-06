@@ -25,6 +25,11 @@ pub enum ObeliskK8sError {
     #[error("{0}")]
     Obeliskd(String),
 
+    /// An SSM ref couldn't be resolved: bad syntax, no credentials, a failed fetch, or a missing
+    /// parameter.
+    #[error("{0}")]
+    Ssm(String),
+
     /// The command was asked for something that isn't there (e.g. an unknown target).
     #[error("{0}")]
     Usage(String),

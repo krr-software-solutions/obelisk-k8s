@@ -29,6 +29,7 @@ use crate::config::repo::{RepoConfig, Target, Unit};
 use crate::config::run::RunInputs;
 use crate::config::values::Agreed;
 use crate::helm;
+use crate::ssm::{self, Ssm};
 
 /// One (target, unit) case's rendered resources.
 #[derive(Debug)]
@@ -65,8 +66,9 @@ impl RepoConfig {
         shown_root: Option<&Path>,
         ephemeral: Option<&Ephemeral>,
         global: &GlobalConfig,
+        ssm: Option<&Ssm>,
     ) -> Result<ManifestsReport<'a>, ObeliskK8sError> {
-        let inputs = RunInputs::new(repo_root, selection, ephemeral, global)?;
+        let inputs = RunInputs::new(repo_root, selection, ephemeral, global, ssm)?;
         let cases = selection
             .cases
             .iter()
@@ -115,7 +117,14 @@ impl RepoConfig {
             };
             for template in templates.iter().filter(|t| t.present()) {
                 let shown = template.shown(shown_root);
-                let rendered = render::text(template, &shown, &render_inputs)?;
+                let mut rendered = render::text(template, &shown, &render_inputs)?;
+                // A raw manifest's refs are its own; the others' come from the (resolved) values.
+                if matches!(template.source, Source::File { .. } | Source::Url { .. }) {
+                    if let Source::Url { sha256, .. } = &template.source {
+                        ssm::check_pinned(&rendered, *sha256, &shown)?;
+                    }
+                    rendered = ssm::in_manifests(inputs.ssm, &rendered, &shown)?;
+                }
                 // A template that renders nothing still gets a newline from Helm.
                 if rendered.trim().is_empty() {
                     continue;
@@ -185,7 +194,7 @@ mod tests {
         let targets: Vec<String> = targets.iter().map(|t| (*t).to_owned()).collect();
         let selection = config.select(&targets, &["app".to_owned()]).unwrap();
         let text = config
-            .manifests_report(dir.path(), &selection, None, None, &global())?
+            .manifests_report(dir.path(), &selection, None, None, &global(), None)?
             .to_string();
         Ok(anstream::adapter::strip_str(&text).to_string())
     }
@@ -461,5 +470,34 @@ mod tests {
         ]);
         let text = manifests(&dir, &["dev"]).unwrap();
         assert!(text.contains("  chart: \"1.0\"\n"), "{text}");
+    }
+
+    #[test]
+    fn a_file_templates_ssm_refs_resolve_when_asked() {
+        let raw = "# kept when there are no refs\napiVersion: v1\nkind: Secret\nmetadata:\n  name: s\nstringData:\n  password: \"${{obelisk:aws-ssm:/p}}\"\n";
+        let dir = write_repo(&[
+            (
+                "repo.yaml",
+                "repo:\n  name: r\n  templates: [{ type: file, path: ./raw.yaml }]\n",
+            ),
+            ("targets/prod/target.yaml", TARGET),
+            ("units/app/unit.yaml", "unit:\n  version: 1.0.0\n"),
+            ("raw.yaml", raw),
+        ]);
+        let config = RepoConfig::load(dir.path()).unwrap();
+        let selection = config.select(&["prod".to_owned()], &[]).unwrap();
+        let rendered = |ssm: Option<&Ssm>| {
+            config
+                .manifests_report(dir.path(), &selection, None, None, &global(), ssm)
+                .unwrap()
+                .cases[0]
+                .manifests
+                .clone()
+        };
+        assert!(rendered(None).ends_with(raw), "{}", rendered(None));
+        let (ssm, _) = crate::ssm::tests::fake(&[("/p", "s3cret")]);
+        let resolved = rendered(Some(&ssm));
+        assert!(resolved.contains("password: s3cret"), "{resolved}");
+        assert!(!resolved.contains("aws-ssm"), "{resolved}");
     }
 }

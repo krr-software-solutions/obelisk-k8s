@@ -5,7 +5,11 @@
 //! A file that's empty or `null` adds nothing. `obelisk:` is the tool's: a file may only set
 //! `obelisk.release.{name, namespace}` and `obelisk.version`, as strings (parsed into
 //! [`ValuesCase::sets`] and left out of the values: the version and the release go back in once
-//! they're agreed, after the generators), and anything else under it is an error. `ref+awsssm` refs aren't resolved yet.
+//! they're agreed, after the generators), and anything else under it is an error.
+//!
+//! `${{obelisk:aws-ssm:<key>}}` refs in the merged values' strings (see `ssm`) are resolved once
+//! they're merged (`apply`, `template --resolve`), so generators and templates see the values; else
+//! they're only checked, and left as written.
 //!
 //! Values go through a generic tree, so quoted strings stay strings (`"0755"`, `"yes"`, `"1e3"` come out
 //! quoted) and block scalars keep their text, but plain scalars come out in their parsed form:
@@ -29,6 +33,7 @@ use crate::config::global::{Cluster, GlobalConfig};
 use crate::config::paths::{Selection, write_yaml_cases};
 use crate::config::repo::{RepoConfig, Target, Unit};
 use crate::config::run::RunInputs;
+use crate::ssm::{self, Ssm};
 use crate::yaml;
 
 /// The key the tool's own block goes under, at the top of the merged values.
@@ -85,8 +90,9 @@ impl RepoConfig {
         shown_root: Option<&Path>,
         ephemeral: Option<&Ephemeral>,
         global: &GlobalConfig,
+        ssm: Option<&Ssm>,
     ) -> Result<ValuesReport<'a>, ObeliskK8sError> {
-        let inputs = RunInputs::new(repo_root, selection, ephemeral, global)?;
+        let inputs = RunInputs::new(repo_root, selection, ephemeral, global, ssm)?;
         let cases = selection
             .cases
             .iter()
@@ -111,7 +117,8 @@ impl RepoConfig {
     }
 
     /// The `obelisk:` block, then `unit`'s config files on `target` merged, then the ephemeral values
-    /// (on an ephemeral target); and what the files set under `obelisk:`.
+    /// (on an ephemeral target), with their SSM refs resolved (or checked); and what the files set
+    /// under `obelisk:`.
     pub(crate) fn config_values(
         &self,
         repo_root: &Path,
@@ -153,6 +160,15 @@ impl RepoConfig {
                 "the ephemeral values",
             )?;
         }
+        let what = format!(
+            "values for unit `{}` on target `{}`",
+            unit.name, target.name
+        );
+        let named = values
+            .iter_mut()
+            .filter(|(k, _)| *k != OBELISK_KEY)
+            .map(|(key, value)| (format!("{what}, at `{key}`"), value));
+        ssm::resolve_or_check(inputs.ssm, named)?;
         Ok((values, sets))
     }
 
@@ -373,7 +389,7 @@ mod tests {
         let owned = |n: &[&str]| n.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
         let selection = config.select(&owned(targets), &owned(units)).unwrap();
         let text = config
-            .values_report(dir.path(), &selection, None, None, &global())?
+            .values_report(dir.path(), &selection, None, None, &global(), None)?
             .to_string();
         Ok(anstream::adapter::strip_str(&text)
             .to_string()
@@ -393,7 +409,14 @@ mod tests {
             .map(|v| Ephemeral::new("pr-7".into(), EphemeralValues::Inline(v.into())))
             .transpose()?;
         let text = config
-            .values_report(dir.path(), &selection, None, ephemeral.as_ref(), &global())?
+            .values_report(
+                dir.path(),
+                &selection,
+                None,
+                ephemeral.as_ref(),
+                &global(),
+                None,
+            )?
             .to_string();
         Ok(anstream::adapter::strip_str(&text)
             .to_string()
@@ -449,7 +472,14 @@ mod tests {
         )
         .unwrap();
         let report = config
-            .values_report(dir.path(), &selection, None, Some(&ephemeral), &global())
+            .values_report(
+                dir.path(),
+                &selection,
+                None,
+                Some(&ephemeral),
+                &global(),
+                None,
+            )
             .unwrap();
         assert_eq!(
             report.cases[0].sets,
@@ -540,7 +570,7 @@ mod tests {
             "global.yaml",
             "quoted: [\"0755\", \"yes\", \"1e3\", \"null\", \"\"]\n\
              mode: 0755\nperm: 0644\nhex: 0x1F\nflag: Yes\nn: 3\nf: 1.50\n\
-             tpl: |\n  {{ .Values.x }}\n  line two\nref: \"ref+awsssm:///app/x\"\n",
+             tpl: |\n  {{ .Values.x }}\n  line two\nref: \"before ref+awsssm:///app/x\"\n",
         )]);
         let text = report(&dir, &["prod"], &["app"]).unwrap();
         let body = text.split_once("repoRoot: <repo>\n").unwrap().1;
@@ -549,7 +579,7 @@ mod tests {
             body,
             "quoted:\n- \"0755\"\n- \"yes\"\n- \"1e3\"\n- \"null\"\n- \"\"\n\
              mode: 493\nperm: 420\nhex: 31\nflag: true\n\"n\": 3\nf: 1.5\n\
-             tpl: |\n  {{ .Values.x }}\n  line two\nref: ref+awsssm:///app/x\n"
+             tpl: |\n  {{ .Values.x }}\n  line two\nref: before ref+awsssm:///app/x\n"
         );
     }
 
@@ -587,7 +617,7 @@ mod tests {
         let config = RepoConfig::load(dir.path()).unwrap();
         let selection = config.select(&["prod".into()], &["app".into()]).unwrap();
         let report = config
-            .values_report(dir.path(), &selection, None, None, &global())
+            .values_report(dir.path(), &selection, None, None, &global(), None)
             .unwrap();
         report.cases.into_iter().next().unwrap().sets
     }
@@ -716,6 +746,7 @@ mod tests {
                 Some(Path::new("~/dev/r")),
                 None,
                 &global(),
+                None,
             )
             .unwrap_err()
             .to_string();
@@ -752,6 +783,39 @@ mod tests {
         assert!(
             e.ends_with("`obelisk.version` must be a string, not `1.5` (quote it)"),
             "{e}"
+        );
+    }
+
+    #[test]
+    fn ssm_refs_resolve_when_asked_and_are_only_checked_otherwise() {
+        let dir = base(&[(
+            "global.yaml",
+            "db:\n  password: \"${{obelisk:aws-ssm:/p}}\"\n  url: \"pg://u:${{obelisk:aws-ssm:/p}}@h\"\n",
+        )]);
+        let config = RepoConfig::load(dir.path()).unwrap();
+        let selection = config.select(&["prod".into()], &["app".into()]).unwrap();
+        let values = |ssm: Option<&Ssm>| {
+            config
+                .values_report(dir.path(), &selection, None, None, &global(), ssm)
+                .map(|r| r.cases[0].values["db"].clone())
+        };
+        assert_eq!(
+            values(None).unwrap(),
+            serde_json::json!({ "password": "${{obelisk:aws-ssm:/p}}", "url": "pg://u:${{obelisk:aws-ssm:/p}}@h" })
+        );
+        let (ssm, _) = crate::ssm::tests::fake(&[("/p", "s3cret")]);
+        assert_eq!(
+            values(Some(&ssm)).unwrap(),
+            serde_json::json!({ "password": "s3cret", "url": "pg://u:s3cret@h" })
+        );
+    }
+
+    #[test]
+    fn a_bad_ssm_ref_is_an_error_even_unresolved() {
+        let dir = base(&[("global.yaml", "x:\n  y: \"${{obelisk:unit}}\"\n")]);
+        assert_eq!(
+            report(&dir, &["prod"], &["app"]).unwrap_err().to_string(),
+            "values for unit `app` on target `prod`, at `x`: `${{obelisk:unit}}` isn't available here: only `${{obelisk:aws-ssm:<key>}}`"
         );
     }
 }

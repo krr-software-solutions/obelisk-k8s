@@ -70,7 +70,7 @@ ip-allocator.
   `obelisk:` is reserved: a config file may only set `obelisk.release.{name, namespace}` and
   `obelisk.version`, as strings (kept per file and left out of this output; they're agreed on after the
   generators: see **Release** and `obelisk.version` below), and anything else under it is an
-  error. SSM refs aren't resolved yet.
+  error. SSM refs (`${{obelisk:aws-ssm:<key>}}`, below) show as written unless `--resolve`.
   Quoted strings stay as written; plain scalars come out parsed, the YAML 1.1 way where it matters
   (`0755` is `493`), with known limits listed in `config/values.rs`. Same selection as
   `config repo paths`; several cases print as a YAML stream, each under a `# [ target=…, unit=… ]`
@@ -188,8 +188,23 @@ config files ─▶ values ─▶ generators ─▶ generated values ─▶ temp
   kind in one unit may fail on a first install (put them in separate units). Helm 4 upgrades with
   server-side apply: a field something else in the cluster owns (an HPA's `spec.replicas`) is a
   conflict, so don't set what the cluster manages.
-- **obelisk-k8s** will order units (CRDs before what uses them, across namespaces), wait for
-  readiness, and resolve `ref+awsssm` refs (on the generated values, before templates).
+- **SSM** (`ssm.rs`): `${{obelisk:aws-ssm:<key>}}` in a string (anywhere in it; never a key) is the
+  SSM parameter `<key>` (a `:version` / `:label` selector works), decrypted; `$${{obelisk:` writes a
+  literal `${{obelisk:` (a `${{` that isn't `obelisk:` is left alone), any other `${{obelisk:…}}` in values is an error, and so is obelisk-local's
+  `ref+awsssm://…`. Refs are resolved in the merged values (before the generators, so generators,
+  Go templates and charts all see plaintext) and in `file` / `url` templates and generators (a `url`
+  with refs needs its `sha256`); never in the output of other generators or commands. A `file` / `url` template with refs is re-written from its parsed form, so its
+  comments go and its plain scalars are re-spelled as in values (`08` → `8.0`): quote them. `apply`
+  always resolves; `template` only with `--resolve` (else refs are only checked), and then prints
+  every resolved value masked as `<aws-ssm:KEY>` (in errors too; every occurrence, so a short value
+  like `5432` masks unrelated text too). Credentials are read the first time a ref is found:
+  `AWS_SSM_ACCESS_KEY`, `AWS_SSM_SECRET_KEY` and `AWS_SSM_REGION` if all are set (the GitLab CI
+  variables), else the named profile `AWS_SSM_PROFILE` (`~/.aws`; SSO, assume-role and
+  `credential_process` work; its region unless `AWS_SSM_REGION` is set), else it's an error. A
+  case's keys are fetched together (Rust AWS SDK, `GetParameters` in tens) and kept for the run;
+  missing ones fail naming them all.
+- **obelisk-k8s** will order units (CRDs before what uses them, across namespaces), and wait for
+  readiness.
 
 ## Roadmap
 
@@ -238,7 +253,8 @@ Nothing below is decided. Don't silently pick an answer in code; raise it.
 
 - The generator contract: inputs, output location and format.
 - Do our own apps need Helm charts, or can a generator emit plain YAML?
-- Do raw/URL YAML units still get `ref+awsssm` resolution once wrapped (obelisk-local's `doTemplate`)?
+- ~~Do raw/URL YAML units still get SSM resolution (obelisk-local's `doTemplate`)?~~ Decided: `file`
+  and `url` templates always do (**SSM**, above).
 - CRD upgrades, given Helm never upgrades `crds/`.
 - ~~Is apply part of v1, or only `template`?~~ Decided: it is (`obelisk-k8s apply`, above).
 - Does the tool own instance identity for clean up/down (v1.1)? Hook shape (v1.2)?

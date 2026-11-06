@@ -7,6 +7,7 @@ mod helm;
 pub mod interp;
 mod k3d;
 mod obeliskd;
+pub mod ssm;
 mod yaml;
 
 pub use error::ObeliskK8sError;

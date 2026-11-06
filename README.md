@@ -44,7 +44,10 @@ IP allocation and DNS for local clusters come from
   k3d clusters on obeliskd (`cluster up/down/destroy/status`, with MetalLB and a gateway).
 - **Also done:** generators and templates of every type: Go templates, raw files, URLs, upstream
   Helm charts, and commands.
-- **Next:** adopting existing resources, SSM refs, `diff`, then up/down hooks (setup,
+- **Also done:** adopting existing resources (`apply --take-ownership`), and SSM refs
+  (`${{obelisk:aws-ssm:<key>}}`, credentials from `AWS_SSM_ACCESS_KEY` / `AWS_SSM_SECRET_KEY` /
+  `AWS_SSM_REGION`, or a profile named by `AWS_SSM_PROFILE`).
+- **Next:** `diff`, then up/down hooks (setup,
   database/topic creation, seeding test data) and blueprints: a spec that pulls apps from several
   repos onto a managed cluster.
 

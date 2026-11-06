@@ -8,6 +8,7 @@ use obelisk_k8s::config::ephemeral::{Ephemeral, EphemeralValues};
 use obelisk_k8s::config::global::edit::{self as global_edit, Change};
 use obelisk_k8s::config::global::{GLOBAL_ROOT_ENV, GlobalConfig, default_global_root, tilde};
 use obelisk_k8s::config::repo::RepoConfig;
+use obelisk_k8s::ssm::Ssm;
 use obelisk_k8s::{ObeliskK8sError, cluster};
 
 use crate::{
@@ -220,6 +221,19 @@ pub fn run_apply(
     yes: bool,
     takeover: Takeover,
 ) -> Result<(), ObeliskK8sError> {
+    let ssm = Ssm::from_env();
+    run_apply_with(repo, global_root_arg, args, yes, takeover, &ssm)
+        .map_err(|e| ssm.redact_error(e))
+}
+
+fn run_apply_with(
+    repo: Option<&str>,
+    global_root_arg: Option<PathBuf>,
+    args: &TemplateArgs,
+    yes: bool,
+    takeover: Takeover,
+    ssm: &Ssm,
+) -> Result<(), ObeliskK8sError> {
     let (global, repo_root, shown_root) = global_and_repo(repo, global_root_arg)?;
     let config = load_repo_config(&repo_root)?;
     let selection = config.select(&args.targets, &args.units)?;
@@ -232,17 +246,38 @@ pub fn run_apply(
         &global,
         yes,
         takeover,
+        ssm,
         |step| eprintln!("{step}"),
     )?;
-    print!("{report}");
+    print!("{}", ssm.redact(&report.to_string()));
     Ok(())
 }
 
 pub fn run_template(
     repo: Option<&str>,
     global_root_arg: Option<PathBuf>,
+    resolve: bool,
     command: &TemplateCommand,
 ) -> Result<(), ObeliskK8sError> {
+    let ssm = resolve.then(Ssm::from_env);
+    let report = template_report(repo, global_root_arg, ssm.as_ref(), command);
+    let report = match &ssm {
+        Some(ssm) => report
+            .map(|r| ssm.redact(&r))
+            .map_err(|e| ssm.redact_error(e))?,
+        None => report?,
+    };
+    // anstream drops the colors when stdout isn't a terminal, or with NO_COLOR set.
+    anstream::print!("{report}");
+    Ok(())
+}
+
+fn template_report(
+    repo: Option<&str>,
+    global_root_arg: Option<PathBuf>,
+    ssm: Option<&Ssm>,
+    command: &TemplateCommand,
+) -> Result<String, ObeliskK8sError> {
     let args = command.args();
     let (global, repo_root, shown_root) = global_and_repo(repo, global_root_arg)?;
     let config = load_repo_config(&repo_root)?;
@@ -251,18 +286,16 @@ pub fn run_template(
     let (shown_root, ephemeral) = (shown_root.as_deref(), ephemeral.as_ref());
     let report = match command {
         TemplateCommand::Values(_) => config
-            .values_report(&repo_root, &selection, shown_root, ephemeral, &global)?
+            .values_report(&repo_root, &selection, shown_root, ephemeral, &global, ssm)?
             .to_string(),
         TemplateCommand::GeneratedValues(_) => config
-            .generated_values_report(&repo_root, &selection, shown_root, ephemeral, &global)?
+            .generated_values_report(&repo_root, &selection, shown_root, ephemeral, &global, ssm)?
             .to_string(),
         TemplateCommand::Manifests(_) => config
-            .manifests_report(&repo_root, &selection, shown_root, ephemeral, &global)?
+            .manifests_report(&repo_root, &selection, shown_root, ephemeral, &global, ssm)?
             .to_string(),
     };
-    // anstream drops the colors when stdout isn't a terminal, or with NO_COLOR set.
-    anstream::print!("{report}");
-    Ok(())
+    Ok(report)
 }
 
 /// The ephemeral copy the flags name, if any.
