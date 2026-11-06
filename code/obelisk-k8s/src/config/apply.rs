@@ -4,13 +4,18 @@
 //! namespace created if it's missing), at its agreed version, through a throwaway chart that ships
 //! them as-is (no second templating), with `helm upgrade --install` on its target's cluster's kubectl
 //! context: k3d's own for a local k3d cluster, else the cluster's `kubectlContext`. A release that
-//! doesn't come up is rolled back. A unit with no templates has nothing to apply, and is skipped.
+//! doesn't come up is rolled back (unless it takes ownership; see below). A unit with no templates
+//! has nothing to apply, and is skipped.
 //!
 //! Everything is planned first (clusters resolved, every case rendered and checked), so a mistake in
 //! one case doesn't leave the others half-applied: two cases that would install the same release on
 //! the same context (the second would replace the first, deleting what it had), and a case whose
 //! templates render nothing (an upgrade to it would delete everything), are errors. Applying to a
 //! remote cluster needs `yes`. If an install fails, the ones before it stay applied.
+//!
+//! What's already in the cluster but not a release's (e.g. applied by obelisk-local) is only adopted
+//! with [`Takeover::take_ownership`], and fields another field manager owns are only taken with
+//! [`Takeover::force_conflicts`]: both one-offs, for moving resources over.
 
 use std::fmt;
 use std::path::Path;
@@ -25,6 +30,7 @@ use crate::config::repo::{RepoConfig, Target};
 use crate::config::run::RunInputs;
 use crate::config::values::Agreed;
 use crate::helm;
+pub use crate::helm::Takeover;
 
 /// What `apply` did with one case.
 #[derive(Debug)]
@@ -69,8 +75,8 @@ struct Planned<'a> {
 
 impl RepoConfig {
     /// Applies every case in `selection` to the clusters in `global` (remote ones only with
-    /// `remote_ok`): plans them all, then installs each. `progress` hears about each install as it
-    /// starts.
+    /// `remote_ok`), taking over what `takeover` allows: plans them all, then installs each.
+    /// `progress` hears about each install as it starts.
     ///
     /// # Errors
     ///
@@ -87,6 +93,7 @@ impl RepoConfig {
         ephemeral: Option<&Ephemeral>,
         global: &GlobalConfig,
         remote_ok: bool,
+        takeover: Takeover,
         mut progress: impl FnMut(&str),
     ) -> Result<ApplyReport<'a>, ObeliskK8sError> {
         let plan = self.plan(
@@ -105,7 +112,9 @@ impl RepoConfig {
                     &case.manifests,
                     &release.namespace,
                     &context,
-                )?;
+                    takeover,
+                )
+                .map_err(|error| takeover_hint(takeover, error))?;
             }
             applied.push(Applied {
                 target: case.target,
@@ -229,6 +238,27 @@ fn check_unique(
         )));
     }
     Ok(())
+}
+
+/// Points a refusal `apply`'s [`Takeover`] flags would get past at the flag, unless it's already on.
+fn takeover_hint(takeover: Takeover, error: ObeliskK8sError) -> ObeliskK8sError {
+    match error {
+        ObeliskK8sError::Helm(message) => {
+            let hint = if !takeover.take_ownership && message.contains("invalid ownership metadata")
+            {
+                " (it's already in the cluster, but not this release's: `--take-ownership` adopts it)"
+            } else if !takeover.force_conflicts
+                && message.contains("Apply failed with")
+                && message.contains("conflict")
+            {
+                " (another field manager owns those fields: `--force-conflicts` takes them)"
+            } else {
+                ""
+            };
+            ObeliskK8sError::Helm(format!("{message}{hint}"))
+        }
+        other => other,
+    }
 }
 
 #[cfg(test)]
@@ -420,11 +450,49 @@ mod tests {
         let (dir, config) = repo(&[("units/app/unit.yaml", "unit:\n  version: v1\n")]);
         let selection = config.select(&["dev".to_owned()], &[]).unwrap();
         let report = config
-            .apply(dir.path(), &selection, None, None, &global, false, |_| {})
+            .apply(
+                dir.path(),
+                &selection,
+                None,
+                None,
+                &global,
+                false,
+                Takeover::default(),
+                |_| {},
+            )
             .unwrap();
         assert_eq!(
             report.to_string(),
             "skipped unit `app` on target `dev`: it has no templates\n"
         );
+    }
+
+    #[test]
+    fn a_refusal_the_takeover_flags_would_pass_points_at_them() {
+        let hinted_with = |takeover, message: &str| match takeover_hint(
+            takeover,
+            ObeliskK8sError::Helm(message.to_owned()),
+        ) {
+            ObeliskK8sError::Helm(message) => message,
+            other => panic!("{other:?}"),
+        };
+        let hinted = |message: &str| hinted_with(Takeover::default(), message);
+        assert!(
+            hinted("x exists and cannot be imported: invalid ownership metadata")
+                .ends_with("`--take-ownership` adopts it)")
+        );
+        assert!(
+            hinted("Apply failed with 1 conflict: conflict with \"kubectl\": .spec.replicas")
+                .ends_with("`--force-conflicts` takes them)")
+        );
+        assert_eq!(hinted("timed out"), "timed out");
+        let both = Takeover {
+            take_ownership: true,
+            force_conflicts: true,
+        };
+        let ownership = "x exists and cannot be imported: invalid ownership metadata";
+        assert_eq!(hinted_with(both, ownership), ownership);
+        let conflict = "Apply failed with 1 conflict: conflict with \"kubectl\": .spec.replicas";
+        assert_eq!(hinted_with(both, conflict), conflict);
     }
 }

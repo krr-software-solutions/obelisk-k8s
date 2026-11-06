@@ -4,6 +4,7 @@ use std::process::ExitCode;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 use obelisk_k8s::ObeliskK8sError;
+use obelisk_k8s::config::apply::Takeover;
 use obelisk_k8s::config::global::edit::NewCluster;
 use obelisk_k8s::config::global::{GLOBAL_ROOT_ENV, K8s, Location, Obeliskd};
 
@@ -50,6 +51,15 @@ enum Command {
         /// Apply to remote clusters too (without it, a remote target is an error)
         #[arg(long)]
         yes: bool,
+        /// Adopt resources already in the cluster that aren't the release's (e.g. applied by
+        /// obelisk-local, but another release's too); a failed install is then left failed, not
+        /// rolled back (that would delete what it adopted), nor by later runs while it stays failed
+        #[arg(long)]
+        take_ownership: bool,
+        /// Take fields another field manager owns, forcing server-side apply on (which the release
+        /// keeps); a one-off: it fights what the cluster manages, like an HPA's replicas
+        #[arg(long)]
+        force_conflicts: bool,
     },
     /// Bring managed clusters up, down, and away (local k3d only, so far)
     Cluster {
@@ -403,9 +413,22 @@ fn main_impl() -> Result<(), ObeliskK8sError> {
         Command::Template { repo, command } => {
             commands::run_template(repo.as_deref(), cli.global_root, &command)
         }
-        Command::Apply { repo, args, yes } => {
-            commands::run_apply(repo.as_deref(), cli.global_root, &args, yes)
-        }
+        Command::Apply {
+            repo,
+            args,
+            yes,
+            take_ownership,
+            force_conflicts,
+        } => commands::run_apply(
+            repo.as_deref(),
+            cli.global_root,
+            &args,
+            yes,
+            Takeover {
+                take_ownership,
+                force_conflicts,
+            },
+        ),
         Command::Cluster { command } => commands::run_cluster(cli.global_root, &command),
         Command::Completions { shell } => {
             run_completions(shell);

@@ -25,7 +25,7 @@ use std::process::Command;
 use serde_json::{Value, json};
 
 use crate::config::global::Obeliskd;
-use crate::helm::{self, Chart, Install};
+use crate::helm::{self, Chart, Install, Takeover};
 use crate::{ObeliskK8sError, k3d, obeliskd, yaml};
 
 /// The zone obeliskd answers for.
@@ -104,6 +104,7 @@ pub(crate) fn install(name: &str, subnet: &Obeliskd) -> Result<Base, ObeliskK8sE
             version,
             namespace,
             context: &context,
+            takeover: Takeover::default(),
         })
     };
     install("metallb", METALLB, Some(METALLB_VERSION), METALLB_NAMESPACE)?;
@@ -123,6 +124,7 @@ pub(crate) fn install(name: &str, subnet: &Obeliskd) -> Result<Base, ObeliskK8sE
             &manifests,
             GATEWAY_NAMESPACE,
             &context,
+            Takeover::default(),
         ) {
             Err(ObeliskK8sError::Helm(message))
                 if message.contains("webhook") && tries < WEBHOOK_RETRIES =>

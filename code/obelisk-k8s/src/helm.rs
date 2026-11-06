@@ -303,6 +303,24 @@ pub(crate) struct Install<'a> {
     pub(crate) namespace: &'a str,
     /// The kubectl context to install on (never the current one by default).
     pub(crate) context: &'a str,
+    /// What it may take over from what's already in the cluster.
+    pub(crate) takeover: Takeover,
+}
+
+/// What an install may take over from what's already in the cluster.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Takeover {
+    /// `--take-ownership`: adopt resources that already exist but aren't the release's (e.g. ones
+    /// obelisk-local applied; Helm doesn't check, so another release's too). A failed install then
+    /// isn't rolled back: the revision it would go back to doesn't have what was just adopted, so
+    /// Helm would delete it (on a first install, by uninstalling the release). A release left
+    /// failed isn't rolled back by later installs either.
+    pub take_ownership: bool,
+    /// `--force-conflicts`, with server-side apply forced on (it's ignored client-side, which a
+    /// release's earlier revision may have used): take fields another field manager owns. One-off:
+    /// left on, it fights what the cluster manages (an HPA's `spec.replicas`). The release stays
+    /// server-side after (Helm's default follows the previous revision's method).
+    pub force_conflicts: bool,
 }
 
 /// How long Helm waits for a release to be ready.
@@ -310,21 +328,26 @@ pub(crate) const TIMEOUT: &str = "5m";
 
 /// `helm upgrade --install`s `install` and waits for it to be ready; if it doesn't get there, rolls
 /// it back to its last good revision (or removes it, on a first install), so a re-run starts clean.
+/// Not when it takes ownership ([`Takeover::take_ownership`]), nor when the release is already
+/// failed (taking ownership leaves one so; so can a rollback that failed, or Helm run by hand):
+/// either way the revision it would go back to may lack what was adopted, and rolling back would
+/// delete it. It's left failed for a re-run to fix.
 ///
 /// # Errors
 ///
-/// [`ObeliskK8sError::Helm`] if `helm` can't be run or fails, or the release is stuck mid-operation
-/// (e.g. an earlier run was interrupted).
+/// [`ObeliskK8sError::Helm`] if `helm` can't be run or fails, the release's status can't be read,
+/// or the release is stuck mid-operation (e.g. an earlier run was interrupted).
 pub(crate) fn upgrade_install(install: &Install<'_>) -> Result<(), ObeliskK8sError> {
-    if let Some(status) = pending(install)? {
+    let status = status(install)?;
+    if let Some(status) = status.as_deref().filter(|s| s.starts_with("pending-")) {
         return Err(ObeliskK8sError::Helm(format!(
-            "release `{release}` on `{context}` is stuck `{status}` (an earlier run was interrupted?): `helm --kube-context {context} --namespace {namespace} rollback {release}` (or `uninstall`), then retry",
+            "release `{release}` on `{context}` is stuck `{status}` (an earlier run was interrupted?): `helm --kube-context {context} --namespace {namespace} rollback {release}` (or `uninstall`), then retry; after an interrupted `--take-ownership` run, either deletes what it adopted (`rollback` deletes what's not in the revision it goes back to; `uninstall`, everything)",
             release = install.release,
             context = install.context,
             namespace = install.namespace,
         )));
     }
-    let args = upgrade_args(install);
+    let args = upgrade_args(install, status.as_deref());
     let output = run(&args.iter().map(String::as_str).collect::<Vec<_>>())?;
     if !output.status.success() {
         return Err(ObeliskK8sError::Helm(format!(
@@ -337,7 +360,14 @@ pub(crate) fn upgrade_install(install: &Install<'_>) -> Result<(), ObeliskK8sErr
     Ok(())
 }
 
-fn upgrade_args(install: &Install<'_>) -> Vec<String> {
+/// Whether a failed install should roll back, given the release's current `status` (see
+/// [`upgrade_install`]).
+fn rolls_back(takeover: Takeover, status: Option<&str>) -> bool {
+    !takeover.take_ownership && status != Some("failed")
+}
+
+/// `status`: the release's current one, for [`rolls_back`].
+fn upgrade_args(install: &Install<'_>, status: Option<&str>) -> Vec<String> {
     let mut args = vec!["upgrade", "--install", install.release];
     let dir;
     match install.chart {
@@ -353,12 +383,27 @@ fn upgrade_args(install: &Install<'_>) -> Vec<String> {
     }
     args.extend(["--namespace", install.namespace, "--create-namespace"]);
     args.extend(["--kube-context", install.context]);
-    args.extend(["--wait", "--rollback-on-failure", "--timeout", TIMEOUT]);
+    args.push("--wait");
+    if install.takeover.take_ownership {
+        args.push("--take-ownership");
+    }
+    if rolls_back(install.takeover, status) {
+        args.push("--rollback-on-failure");
+    }
+    if install.takeover.force_conflicts {
+        args.extend(["--server-side", "true", "--force-conflicts"]);
+    }
+    args.extend(["--timeout", TIMEOUT]);
     args.into_iter().map(str::to_owned).collect()
 }
 
-/// The release's status, if it's stuck mid-operation (`pending-install`, `pending-upgrade`, ...).
-fn pending(install: &Install<'_>) -> Result<Option<String>, ObeliskK8sError> {
+/// The release's status (`deployed`, `failed`, `pending-upgrade`, ...), if it exists.
+///
+/// # Errors
+///
+/// [`ObeliskK8sError::Helm`] if `helm` can't be run, or fails other than by not finding the release
+/// (a release mistaken for missing would be rolled back on failure; see [`upgrade_install`]).
+fn status(install: &Install<'_>) -> Result<Option<String>, ObeliskK8sError> {
     let output = run(&[
         "status",
         install.release,
@@ -370,19 +415,25 @@ fn pending(install: &Install<'_>) -> Result<Option<String>, ObeliskK8sError> {
         "json",
     ])?;
     if !output.status.success() {
-        // No such release yet.
-        return Ok(None);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("release: not found") {
+            // No such release yet.
+            return Ok(None);
+        }
+        return Err(ObeliskK8sError::Helm(format!(
+            "can't read the status of release `{}` on `{}`: {}",
+            install.release,
+            install.context,
+            helm_message(&stderr)
+        )));
     }
     let status: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap_or_default();
-    Ok(status["info"]["status"]
-        .as_str()
-        .filter(|s| s.starts_with("pending-"))
-        .map(str::to_owned))
+    Ok(status["info"]["status"].as_str().map(str::to_owned))
 }
 
 /// `helm upgrade --install`s `manifests` (plain YAML) as release `release` at chart version
-/// `version`, through a throwaway chart ([`write_manifests_chart`]), into `namespace` on `context`;
-/// see [`upgrade_install`].
+/// `version`, through a throwaway chart ([`write_manifests_chart`]), into `namespace` on `context`,
+/// taking over what `takeover` allows; see [`upgrade_install`].
 ///
 /// # Errors
 ///
@@ -393,6 +444,7 @@ pub(crate) fn install_manifests(
     manifests: &str,
     namespace: &str,
     context: &str,
+    takeover: Takeover,
 ) -> Result<(), ObeliskK8sError> {
     let chart = tempfile::tempdir().map_err(|source| ObeliskK8sError::Io {
         path: format!("<chart for {release}>").into(),
@@ -405,6 +457,7 @@ pub(crate) fn install_manifests(
         version: None,
         namespace,
         context,
+        takeover,
     })
 }
 
@@ -462,33 +515,90 @@ mod tests {
 
     #[test]
     fn installs_on_the_given_context_and_rolls_back_on_failure() {
-        let args = upgrade_args(&Install {
-            release: "metallb",
-            chart: Chart::Repo {
-                url: "https://example.org/charts",
-                name: "metallb",
+        let args = upgrade_args(
+            &Install {
+                release: "metallb",
+                chart: Chart::Repo {
+                    url: "https://example.org/charts",
+                    name: "metallb",
+                },
+                version: Some("0.16.1"),
+                namespace: "metallb-system",
+                context: "k3d-c",
+                takeover: Takeover::default(),
             },
-            version: Some("0.16.1"),
-            namespace: "metallb-system",
-            context: "k3d-c",
-        });
+            Some("deployed"),
+        );
         assert_eq!(
             args.join(" "),
             "upgrade --install metallb metallb --repo https://example.org/charts --version 0.16.1 \
              --namespace metallb-system --create-namespace --kube-context k3d-c \
              --wait --rollback-on-failure --timeout 5m"
         );
-        let args = upgrade_args(&Install {
-            release: "base",
-            chart: Chart::Dir(Path::new("/tmp/chart")),
-            version: None,
-            namespace: "ns",
-            context: "k3d-c",
-        });
+        let args = upgrade_args(
+            &Install {
+                release: "base",
+                chart: Chart::Dir(Path::new("/tmp/chart")),
+                version: None,
+                namespace: "ns",
+                context: "k3d-c",
+                takeover: Takeover::default(),
+            },
+            None,
+        );
         assert!(
             args.join(" ")
                 .starts_with("upgrade --install base /tmp/chart --namespace ns ")
         );
+    }
+
+    #[test]
+    fn taking_ownership_adopts_and_never_rolls_back() {
+        let install = |take_ownership, force_conflicts| {
+            let takeover = Takeover {
+                take_ownership,
+                force_conflicts,
+            };
+            upgrade_args(
+                &Install {
+                    release: "r",
+                    chart: Chart::Dir(Path::new("/tmp/chart")),
+                    version: None,
+                    namespace: "ns",
+                    context: "c",
+                    takeover,
+                },
+                Some("deployed"),
+            )
+            .join(" ")
+        };
+        let tail = |args: String| args.split_once("--kube-context c ").unwrap().1.to_owned();
+        assert_eq!(
+            tail(install(true, false)),
+            "--wait --take-ownership --timeout 5m"
+        );
+        assert_eq!(
+            tail(install(false, true)),
+            "--wait --rollback-on-failure --server-side true --force-conflicts --timeout 5m"
+        );
+        assert_eq!(
+            tail(install(true, true)),
+            "--wait --take-ownership --server-side true --force-conflicts --timeout 5m"
+        );
+    }
+
+    #[test]
+    fn a_release_left_failed_is_never_rolled_back() {
+        let plain = Takeover::default();
+        assert!(rolls_back(plain, None));
+        assert!(rolls_back(plain, Some("deployed")));
+        assert!(!rolls_back(plain, Some("failed")));
+        let taking = Takeover {
+            take_ownership: true,
+            force_conflicts: false,
+        };
+        assert!(!rolls_back(taking, None));
+        assert!(!rolls_back(taking, Some("failed")));
     }
 
     #[test]

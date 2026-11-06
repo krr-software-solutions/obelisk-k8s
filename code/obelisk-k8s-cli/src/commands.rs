@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
+use obelisk_k8s::config::apply::Takeover;
 use obelisk_k8s::config::ephemeral::{Ephemeral, EphemeralValues};
 use obelisk_k8s::config::global::edit::{self as global_edit, Change};
 use obelisk_k8s::config::global::{GLOBAL_ROOT_ENV, GlobalConfig, default_global_root, tilde};
@@ -217,6 +218,7 @@ pub fn run_apply(
     global_root_arg: Option<PathBuf>,
     args: &TemplateArgs,
     yes: bool,
+    takeover: Takeover,
 ) -> Result<(), ObeliskK8sError> {
     let (global, repo_root, shown_root) = global_and_repo(repo, global_root_arg)?;
     let config = load_repo_config(&repo_root)?;
@@ -229,6 +231,7 @@ pub fn run_apply(
         ephemeral.as_ref(),
         &global,
         yes,
+        takeover,
         |step| eprintln!("{step}"),
     )?;
     print!("{report}");

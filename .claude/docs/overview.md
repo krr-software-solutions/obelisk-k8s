@@ -109,7 +109,7 @@ ip-allocator.
   *within* one template by kind). A template may print any number of documents. No shared `define`s
   across files for now (tentative). `.Release.{Name, Namespace}` is the case's agreed release (see
   below). Takes `--repo` too.
-- `obelisk-k8s apply [-t …]… [-u …]… [--ephemeral-*] [--yes]`: installs what `template manifests`
+- `obelisk-k8s apply [-t …]… [-u …]… [--ephemeral-*] [--yes] [--take-ownership] [--force-conflicts]`: installs what `template manifests`
   renders, one Helm release per unit on a target: its agreed release name, into its agreed namespace
   (created if missing), at its agreed version, via a throwaway chart that ships the rendered
   manifests as-is (`{{ .Files.Get }}`, no second templating), with `helm upgrade --install
@@ -119,7 +119,15 @@ ip-allocator.
   context (the second would replace the first), or a case whose templates render nothing (an upgrade
   would empty the release), are errors. A remote cluster needs `--yes`. A unit with no templates is
   skipped. Each install waits up to 5m and rolls back if it doesn't come up; if one fails, the ones
-  before it stay applied. Takes `--repo` too; the clusters come from the global config.
+  before it stay applied. Takes `--repo` too; the clusters come from the global config. Two
+  one-offs, named as Helm's, for moving resources over from obelisk-local: `--take-ownership` adopts
+  resources already in the cluster that aren't the release's, another release's included (without
+  it Helm refuses them: "invalid ownership metadata"), and then a failed install isn't rolled back
+  (the revision it would go back to doesn't have what was adopted, so Helm would delete it), nor is
+  a release left failed by any later run;
+  `--force-conflicts` forces server-side apply (which the release then keeps) and takes fields
+  another field manager owns (left on, it fights what the cluster manages). A refusal either would
+  get past (without it already on) says which.
 - `obelisk-k8s template generated-values [-t …]… [-u …]…`: the merged values with each of the unit's
   generators deep-merged on top, in merge order. `generators:` (in `repo.yaml`, `target.yaml`,
   `unit.yaml`) lists `{ type, … }` entries like config paths (see the types below); all see the same
