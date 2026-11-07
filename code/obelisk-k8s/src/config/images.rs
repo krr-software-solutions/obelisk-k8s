@@ -1,6 +1,6 @@
 //! The images a unit declares on a target (`template images`): its build plan's images sources,
 //! each rendered against the values of the phases before its own (see `config::phases`), as image
-//! specs, checked; and building them locally (`images build`: see `docker`).
+//! specs, checked; and building them (`images build`: see `docker`, and `config::push` for pushing).
 //!
 //! An images source renders as a manifests source does (see `config::render` for the types), but
 //! its output is image specs: a YAML stream, one spec per document (`---` between them), or none.
@@ -25,7 +25,8 @@
 //! `version`. A unit with no images sources declares none, and its values phases don't run.
 //!
 //! `images build` builds each tag (`<name>:<version>`) once, however many cases declare it: its
-//! `preBuild`, then `docker build`. One tag declared two ways is an error. Nothing is pushed.
+//! `preBuild`, then `docker build`. One tag declared two ways is an error. Without `--no-push`, it
+//! then pushes them (`config::push`).
 
 use std::fmt;
 use std::fmt::Write as _;
@@ -301,24 +302,33 @@ impl RepoConfig {
     ) -> Result<BuiltImages<'a>, ObeliskK8sError> {
         let report =
             self.images_report(repo_root, selection, shown_root, ephemeral, global, warn)?;
-        let builds = distinct(&report, only)?;
         let mut images = Vec::new();
-        for (tag, image, cases) in builds {
-            if image.pre_build.is_some() {
-                step(&format!("Running the `preBuild` of image `{tag}`"));
-                crate::docker::pre_build(image, repo_root)?;
-            }
-            step(&format!("Building image `{tag}`"));
-            crate::docker::build(image)?;
+        for (tag, image, cases) in distinct(&report, only)? {
+            build_one(&tag, image, repo_root, &mut step)?;
             images.push(Built { tag, cases });
         }
         Ok(BuiltImages { images })
     }
 }
 
+/// Builds `image` (tagged `tag`): its `preBuild`, then `docker build`, telling `step` each.
+pub(crate) fn build_one(
+    tag: &str,
+    image: &Image,
+    repo_root: &Path,
+    step: &mut impl FnMut(&str),
+) -> Result<(), ObeliskK8sError> {
+    if image.pre_build.is_some() {
+        step(&format!("Running the `preBuild` of image `{tag}`"));
+        crate::docker::pre_build(image, repo_root)?;
+    }
+    step(&format!("Building image `{tag}`"));
+    crate::docker::build(image)
+}
+
 /// `report`'s images, each tag once (with the image and the cases that declare it), only those
 /// named `only` if any.
-fn distinct<'r, 'a>(
+pub(crate) fn distinct<'r, 'a>(
     report: &'r ImagesReport<'a>,
     only: &[String],
 ) -> Result<Vec<(String, &'r Image, Cases<'a>)>, ObeliskK8sError> {

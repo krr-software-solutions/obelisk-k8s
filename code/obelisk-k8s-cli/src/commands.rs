@@ -261,28 +261,39 @@ fn run_apply_with(
     Ok(())
 }
 
-/// `images build`: builds the selected units' images (only `images`, if any), printing each step
-/// on stderr and what was built on stdout.
+/// `images build`: builds the selected units' images (only `images`, if any) and, unless
+/// `--no-push`, delivers them to their targets' clusters; each step on stderr, the result on stdout.
 pub fn run_images(
     global_root_arg: Option<PathBuf>,
     command: &ImagesCommand,
 ) -> Result<(), ObeliskK8sError> {
-    let ImagesCommand::Build { repo, args, images } = command;
+    let ImagesCommand::Build {
+        repo,
+        args,
+        images,
+        no_push,
+    } = command;
     let (global, repo_root, shown_root) = global_and_repo(repo.as_deref(), global_root_arg)?;
     let config = load_repo_config(&repo_root)?;
     let selection = config.select(&args.targets, &args.units)?;
     let ephemeral = ephemeral(&args.ephemeral)?;
-    let built = config.images_build(
-        &repo_root,
-        &selection,
-        shown_root.as_deref(),
-        ephemeral.as_ref(),
-        &global,
-        images,
-        warn_one,
-        |step| eprintln!("{step}"),
-    )?;
-    print!("{built}");
+    let (shown_root, ephemeral) = (shown_root.as_deref(), ephemeral.as_ref());
+    let step = |step: &str| eprintln!("{step}");
+    if *no_push {
+        let built = config.images_build(
+            &repo_root, &selection, shown_root, ephemeral, &global, images, warn_one, step,
+        )?;
+        print!("{built}");
+        return Ok(());
+    }
+    // Push credentials' refs resolve as they're needed; their values never print.
+    let ssm = Ssm::from_env();
+    let pushed = config
+        .images_push(
+            &repo_root, &selection, shown_root, ephemeral, &global, images, &ssm, warn_one, step,
+        )
+        .map_err(|e| ssm.redact_error(e))?;
+    print!("{}", ssm.redact(&pushed.to_string()));
     Ok(())
 }
 

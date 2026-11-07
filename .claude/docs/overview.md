@@ -31,8 +31,25 @@ ip-allocator.
 - `obelisk-k8s config global show`: loads and checks the machine-wide config (`~/.obelisk-k8s/`, or
   `--global-root` / `OBELISK_K8S_GLOBAL_ROOT`): `repos.yaml` (repo paths: relative to the global root, `~/`, or
   absolute; a trailing `/*` for every repo in a directory; names come from each repo's `repo.yaml`) and
-  `clusters/<dir>/cluster.yaml`. Prints the repos and clusters. A repo that won't load, or a target
-  naming a cluster that isn't there, is a `WARN`.
+  `clusters/<dir>/cluster.yaml` (and its optional `docker.yaml`). Prints the repos and clusters. A
+  repo that won't load, or a target naming a cluster that isn't there, is a `WARN`.
+- **A cluster's `docker.yaml`** (`clusters/<dir>/docker.yaml`): where its images push, and the
+  credentials its pods pull them with. No selector: pods pull by the name an image is pushed as.
+
+  ```yaml
+  docker:
+    push:
+      prefix: docker.private.homelab-1.krr-software-solutions.com/krrss   # → <prefix>/<name>:<version>
+      username: "${{obelisk:aws-ssm:/infra/homelab-1/nexus/push/username}}"   # optional, with password;
+      password: "${{obelisk:aws-ssm:/infra/homelab-1/nexus/push/password}}"   #   else your docker login
+    pull:                                       # optional; used by the pull Secret (not yet)
+      auths:
+        - host: docker.krr-software-solutions.com
+          username: "${{obelisk:aws-ssm:/infra/homelab-1/nexus/pull/username}}"
+          password: "${{obelisk:aws-ssm:/infra/homelab-1/nexus/pull/password}}"
+  ```
+
+  A local k3d cluster without one gets its images with `k3d image import`.
 - `obelisk-k8s config global init`: creates the global root, an empty `repos.yaml` and `clusters/`
   (whichever are missing), then loads it.
 - `obelisk-k8s cluster up|down|destroy <NAME>`: create (or start, if stopped) / stop (keeping its
@@ -148,11 +165,18 @@ ip-allocator.
 
   The Dockerfile, a `preBuild` script, its `cwd` and the `contextPath` must exist. An image's ref
   isn't added to the values (yet): templates make it from the same name and version.
-- `obelisk-k8s images build [-t …]… [-u …]… [-i <image>]…`: builds those images locally, each tag
+- `obelisk-k8s images build [-t …]… [-u …]… [-i <image>]… [--no-push]`: builds those images, each tag
   (`<name>:<version>`) once however many cases declare it: its `preBuild` (in its `cwd`), then
-  `docker build --file <dockerfile> --tag <name>:<version> <contextPath>`. Their output goes to
-  stderr; stdout lists what was built. Nothing is pushed or imported, and `apply` doesn't build.
-  One tag declared two different ways is an error.
+  `docker build --file <dockerfile> --tag <name>:<version> <contextPath>`. Then (unless
+  `--no-push`) delivers each to each selected target's cluster, once per destination: with a
+  `docker.yaml`, `docker tag` + `docker push` as `<prefix>/<name>:<version>` (with its `push`
+  credentials, SSM refs resolved, written to a throwaway docker client config on your own docker
+  context, just before the push; else your own login), each ref once however many clusters push
+  it the same way; a local k3d cluster without one, `k3d image import`; any other cluster is an
+  error. Destinations and credentials are checked before anything builds. Tools' output goes to
+  stderr; stdout lists what was built, pushed or imported. One tag declared two different ways is
+  an error. `apply` doesn't build or push. A push `prefix` must start with a registry host (a `.`
+  or `:`, or `localhost`), not Docker Hub.
 - `obelisk-k8s apply [-t …]… [-u …]… [--ephemeral-*] [--yes] [--take-ownership] [--force-conflicts]`: installs what `template manifests`
   renders, one Helm release per unit on a target: its agreed release name, into its agreed namespace
   (created if missing), at its agreed version, via a throwaway chart that ships the rendered
@@ -353,10 +377,10 @@ Nothing below is decided. Don't silently pick an answer in code; raise it.
 - Do our own apps need Helm charts, or can a Go template / command emit plain YAML?
 - ~~Images in a phase (`images:`): what they declare.~~ Decided: image specs (`template images`,
   above), any number per source; images sources are `gotmpl`, `file`, `command` or `inline`.
-- ~~Building images.~~ Decided, to start: `images build`, plain `docker build`, tagged
-  `<name>:<version>`, context `contextPath` (default the repo root). Still open: where built images
-  go (registry from the target, or the spec? a name prefix?), k3d (import, or a registry?), whether
-  the ref is injected under `obelisk.images`, and whether `apply` builds.
+- ~~Building and pushing images.~~ Decided: `images build` (plain `docker build`, tagged
+  `<name>:<version>`, context `contextPath`), pushing per the cluster's `docker.yaml` or
+  `k3d image import`, unless `--no-push`. Next: the ref under `obelisk.images` in values, and the
+  pull Secret from `pull.auths`. Still open: whether `apply` builds.
 - ~~Do raw/URL YAML units still get SSM resolution (obelisk-local's `doTemplate`)?~~ Decided: `file`
   and `url` manifests sources always do (**SSM**, above).
 - CRD upgrades, given Helm never upgrades `crds/`.

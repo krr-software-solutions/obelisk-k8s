@@ -53,8 +53,8 @@ IP allocation and DNS for local clusters come from
 - **Also done:** adopting existing resources (`apply --take-ownership`), and SSM refs
   (`${{obelisk:aws-ssm:<key>}}`, credentials from `AWS_SSM_ACCESS_KEY` / `AWS_SSM_SECRET_KEY` /
   `AWS_SSM_REGION`, or a profile named by `AWS_SSM_PROFILE`).
-- **Also done:** image specs in a phase (`template images`), built locally with `images build`
-  (`docker build`; not pushed yet).
+- **Also done:** image specs in a phase (`template images`), built and pushed with `images build`
+  (`docker build`, then `docker push` per the cluster's `docker.yaml`, or `k3d image import`).
 - **Next:** images built in a phase, then up/down hooks (setup,
   database/topic creation, seeding test data) and blueprints: a spec that pulls apps from several
   repos onto a managed cluster.

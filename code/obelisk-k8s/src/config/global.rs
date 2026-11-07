@@ -5,6 +5,7 @@
 //!   repos.yaml                    repos: [<path>, ...]  (relative to the global root, or `~/`, or absolute;
 //!                                 a trailing `/*` means every repo in a dir)
 //!   clusters/<dir>/cluster.yaml   cluster: { name, k8s, location, managed, obeliskd, kubectlCluster, kubectlContext }
+//!   clusters/<dir>/docker.yaml    optional: docker: { push: { prefix, … }, pull: { auths } } (see `docker`)
 //! ```
 //!
 //! A repo's name comes from its own `repo.yaml`; a cluster's defaults to its directory's name.
@@ -20,6 +21,7 @@ use crate::config::repo::RepoConfig;
 use crate::config::{check_unique, config_error, name_or_dir, read_entries};
 use crate::yaml::{self, Spanned};
 
+pub mod docker;
 pub mod edit;
 
 /// The env var that overrides the default global root.
@@ -81,6 +83,8 @@ pub struct Cluster {
     pub obeliskd: Option<Obeliskd>,
     pub kubectl_cluster: Option<String>,
     pub kubectl_context: Option<String>,
+    /// Its `docker.yaml`: where its images push, and how its pods pull them.
+    pub docker: Option<docker::Docker>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -284,6 +288,8 @@ fn load_clusters(
                 entry.file.display()
             ));
         }
+        let shown_dir = entry.file.parent().unwrap_or(Path::new(""));
+        let docker = docker::load(&entry.dir, shown_dir)?;
         clusters.push(Cluster {
             name: name_or_dir(&entry, c.name)?,
             file: entry.file,
@@ -294,6 +300,7 @@ fn load_clusters(
             obeliskd: c.obeliskd.map(|o| o.value),
             kubectl_cluster: c.kubectl_cluster,
             kubectl_context: c.kubectl_context,
+            docker,
         });
     }
     check_unique(
@@ -356,6 +363,20 @@ impl fmt::Display for GlobalConfig {
                 "    kubectl context: {}",
                 c.kubectl_context.as_deref().unwrap_or(unset)
             )?;
+            if let Some(docker) = &c.docker {
+                let login = if docker.push.credentials.is_some() {
+                    "its credentials"
+                } else {
+                    "your docker login"
+                };
+                writeln!(
+                    f,
+                    "    images push to: {} (with {login})",
+                    docker.push.prefix
+                )?;
+                let hosts: Vec<String> = docker.pull_auths.iter().map(|a| a.host.clone()).collect();
+                writeln!(f, "    images pull auths: {}", list(&hosts))?;
+            }
         }
         Ok(())
     }

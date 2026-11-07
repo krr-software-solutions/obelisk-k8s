@@ -16,6 +16,7 @@ pub mod images;
 pub mod manifests;
 pub mod paths;
 pub mod phases;
+pub mod push;
 mod render;
 pub mod repo;
 mod run;
@@ -240,6 +241,7 @@ pub(crate) mod test_support {
             obeliskd,
             kubectl_cluster: None,
             kubectl_context: None,
+            docker: None,
         };
         GlobalConfig {
             root: "~/.obelisk-k8s".into(),
