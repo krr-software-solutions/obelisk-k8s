@@ -11,6 +11,7 @@ use obelisk_k8s::config::global::edit::{self as global_edit, Change};
 use obelisk_k8s::config::global::{GLOBAL_ROOT_ENV, GlobalConfig, default_global_root, tilde};
 use obelisk_k8s::config::pull_secret::PullSecretOptions;
 use obelisk_k8s::config::repo::RepoConfig;
+use obelisk_k8s::export::ExportFormat;
 use obelisk_k8s::ssm::Ssm;
 use obelisk_k8s::{ObeliskK8sError, cluster};
 
@@ -106,6 +107,25 @@ fn warn(warnings: &[String]) {
 /// A warning, as it comes (e.g. a build plan's, before anything renders from it).
 fn warn_one(warning: &str) {
     eprintln!("WARN - {warning}");
+}
+
+/// `export`: the values on stdin, a subtree exported to a temp file, its path printed as values.
+pub fn run_export(
+    in_path: &str,
+    out_path: &str,
+    format: ExportFormat,
+) -> Result<(), ObeliskK8sError> {
+    let mut input = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin(), &mut input).map_err(|source| {
+        ObeliskK8sError::Io {
+            path: "stdin".into(),
+            source,
+        }
+    })?;
+    let out =
+        obelisk_k8s::export::export(&input, in_path, out_path, format, &std::env::temp_dir())?;
+    print!("{out}");
+    Ok(())
 }
 
 /// `config global …`.

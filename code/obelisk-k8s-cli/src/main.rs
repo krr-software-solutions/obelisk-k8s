@@ -10,6 +10,7 @@ use obelisk_k8s::config::apply::Takeover;
 use obelisk_k8s::config::diff::DiffOptions;
 use obelisk_k8s::config::global::edit::NewCluster;
 use obelisk_k8s::config::global::{GLOBAL_ROOT_ENV, K8s, Location, Obeliskd};
+use obelisk_k8s::export::ExportFormat;
 
 mod commands;
 
@@ -106,6 +107,20 @@ enum Command {
     Cluster {
         #[command(subcommand)]
         command: ManagedClusterCommand,
+    },
+    /// Write the subtree of the values on stdin at --in-path to a new temp file, and print values
+    /// setting --out-path to its path: a `command` values source that hands a subtree to something
+    /// wanting a file
+    Export {
+        /// Where the subtree is, as dot-separated keys (`a.b.c`)
+        #[arg(long, value_name = "PATH")]
+        in_path: String,
+        /// Where the file's path goes in the printed values (`d.e.f`)
+        #[arg(long, value_name = "PATH")]
+        out_path: String,
+        /// What the file is written as
+        #[arg(long, value_enum, default_value_t = ExportFormatArg::Yaml)]
+        format: ExportFormatArg,
     },
     /// Print a shell completion script, e.g. `source <(obelisk-k8s completions bash)`
     Completions {
@@ -346,6 +361,12 @@ struct ClusterAdd {
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
+enum ExportFormatArg {
+    Yaml,
+    Json,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
 enum K8sArg {
     K3d,
     Talos,
@@ -355,6 +376,15 @@ enum K8sArg {
 enum LocationArg {
     Local,
     Remote,
+}
+
+impl From<ExportFormatArg> for ExportFormat {
+    fn from(format: ExportFormatArg) -> Self {
+        match format {
+            ExportFormatArg::Yaml => Self::Yaml,
+            ExportFormatArg::Json => Self::Json,
+        }
+    }
 }
 
 impl From<ClusterAdd> for NewCluster {
@@ -660,6 +690,11 @@ fn main_impl() -> Result<ExitCode, ObeliskK8sError> {
         }
         Command::Images { command } => commands::run_images(cli.global_root, &command),
         Command::Cluster { command } => commands::run_cluster(cli.global_root, &command),
+        Command::Export {
+            in_path,
+            out_path,
+            format,
+        } => commands::run_export(&in_path, &out_path, format.into()),
         Command::Completions { shell } => {
             run_completions(shell);
             Ok(())

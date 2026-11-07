@@ -3,6 +3,7 @@ pub mod cluster;
 pub mod config;
 mod docker;
 pub mod error;
+pub mod export;
 mod git;
 mod helm;
 pub mod interp;

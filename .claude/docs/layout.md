@@ -57,6 +57,7 @@ defines the CLI (the clap types, `--help` headings, completions) and dispatches 
   the global config its targets' clusters come from (each must be in it), and `obelisk.paths`.
 - `cluster.rs`: `cluster status` / `up` / `down` / `destroy` for managed clusters (local k3d only).
 - `base.rs`: a managed cluster's base (obeliskd gateway ip and names, MetalLB, Envoy Gateway).
+- `export.rs`: `export`: a values subtree to a temp file, its path printed as values.
 - `docker.rs`: running `preBuild`, `docker build`, `docker login` / `tag` / `push`, and
   `k3d image import`.
 - `k3d.rs`: running `k3d` (and `docker`, to tell obelisk-k8s's clusters from others).

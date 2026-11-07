@@ -170,6 +170,18 @@ ip-allocator.
   source may print any number of documents. No shared `define`s across files for now (tentative).
   `.Release.{Name, Namespace}` is the case's agreed release (see below). A unit with no manifests
   sources (or only missing files) renders nothing, and its values phases don't run.
+- `obelisk-k8s export --in-path a.b.c --out-path d.e.f [--format yaml|json]` (default yaml): for a
+  `command` values source, which gets the values (YAML) on stdin. Writes what's at `a.b.c` to a new
+  file in the temp dir (mode 0600, kept), and prints `d: { e: { f: <its path> } }`, so later phases
+  see the path, e.g. to hand a values subtree to something that wants a file:
+  `{ type: command, command: [obelisk-k8s, export, --in-path, app.config, --out-path, files.config] }`.
+  Dot-separated keys into mappings (no key may hold a `.`; no list indices); nothing at
+  `--in-path` is an error (a `null` there exports as `null`), and so is an `--out-path` under
+  `obelisk:`. The command runs `obelisk-k8s` from `PATH`, which may not be the binary rendering.
+  The file is kept (nothing deletes it) and named at random, so the path differs every run (keep it
+  out of manifests, or `diff` always shows a change). On `apply` / `template --resolve` the values
+  have SSM refs resolved: don't export a subtree holding secrets (it's meant for things like
+  `obeliskd batch alloc`'s input).
 - `obelisk-k8s template images [-t …]… [-u …]…`: the image specs each unit declares: every phase's
   images sources, rendered like manifests sources (against the values of the phases before their
   own, plus the agreed release), each a YAML stream of specs, printed under a `# Source:` comment
