@@ -16,6 +16,7 @@ pub mod images;
 pub mod manifests;
 pub mod paths;
 pub mod phases;
+pub mod pull_secret;
 pub mod push;
 mod render;
 pub mod repo;

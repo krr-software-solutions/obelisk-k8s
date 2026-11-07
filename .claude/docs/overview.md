@@ -42,7 +42,7 @@ ip-allocator.
       prefix: docker.private.homelab-1.krr-software-solutions.com/krrss   # → <prefix>/<name>:<version>
       username: "${{obelisk:aws-ssm:/infra/homelab-1/nexus/push/username}}"   # optional, with password;
       password: "${{obelisk:aws-ssm:/infra/homelab-1/nexus/push/password}}"   #   else your docker login
-    pull:                                       # optional; used by the pull Secret (not yet)
+    pull:                                       # optional: for `images pull-secret`
       auths:
         - host: docker.krr-software-solutions.com
           username: "${{obelisk:aws-ssm:/infra/homelab-1/nexus/pull/username}}"
@@ -50,6 +50,18 @@ ip-allocator.
   ```
 
   A local k3d cluster without one gets its images with `k3d image import`.
+- `obelisk-k8s images pull-secret --cluster <name> --namespace <ns> [--yes] [--force-conflicts] [--dry-run]`:
+  obelisk-local's `docker add-pull-config`. In namespace `<ns>` on cluster `<name>` (from the global
+  config, through its kubectl context) it server-side applies (field manager `obelisk-k8s`, outside
+  any Helm release) the Secret `docker-pull` (a `kubernetes.io/dockerconfigjson`, `{ auths: { <host>:
+  { username, password } } }` from the cluster's `pull.auths`, SSM refs resolved, base64 in `data`:
+  `stringData` would always conflict with obelisk-local's ownership) and the namespace's `default`
+  ServiceAccount with `imagePullSecrets: [docker-pull]`, so its pods pull without their charts saying
+  so. That list is atomic to server-side apply: another manager's entries in it conflict, and
+  `--force-conflicts` replaces them. The namespace must exist (run it after `apply`); no repo is
+  needed. A remote cluster needs `--yes`; `--dry-run` prints them (SSM refs as written, other
+  passwords masked unless they're just one SSM ref; `stringData`, for reading: the apply writes
+  `data`), and needs neither `--yes` nor a kubectl context.
 - `obelisk-k8s config global init`: creates the global root, an empty `repos.yaml` and `clusters/`
   (whichever are missing), then loads it.
 - `obelisk-k8s cluster up|down|destroy <NAME>`: create (or start, if stopped) / stop (keeping its
@@ -387,8 +399,9 @@ Nothing below is decided. Don't silently pick an answer in code; raise it.
   above), any number per source; images sources are `gotmpl`, `file`, `command` or `inline`.
 - ~~Building and pushing images.~~ Decided: `images build` (plain `docker build`, tagged
   `<name>:<version>`, context `contextPath`), pushing per the cluster's `docker.yaml` or
-  `k3d image import`, unless `--no-push`; manifests get the refs under `obelisk.images`. Next:
-  the pull Secret from `pull.auths`. Still open: whether `apply` builds.
+  `k3d image import`, unless `--no-push`; manifests get the refs under `obelisk.images`; the pull
+  secret is `images pull-secret` (outside `apply`). Still open: whether `apply` builds or applies
+  the pull secret.
 - ~~Do raw/URL YAML units still get SSM resolution (obelisk-local's `doTemplate`)?~~ Decided: `file`
   and `url` manifests sources always do (**SSM**, above).
 - CRD upgrades, given Helm never upgrades `crds/`.

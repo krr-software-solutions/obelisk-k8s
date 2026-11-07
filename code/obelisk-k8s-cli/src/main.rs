@@ -309,6 +309,27 @@ enum ImagesCommand {
         #[arg(long)]
         no_push: bool,
     },
+    /// Server-side apply the pull secret `docker-pull` (from the cluster's `docker.yaml`
+    /// `pull.auths`) and the `default` service account using it, in a namespace on a cluster
+    /// (obelisk-local's `docker add-pull-config`); outside any Helm release
+    PullSecret {
+        /// The cluster, by its name in the global config
+        #[arg(long, value_name = "NAME")]
+        cluster: String,
+        /// The namespace (it must exist)
+        #[arg(long, value_name = "NAMESPACE")]
+        namespace: String,
+        /// Apply to a remote cluster (without it, a remote cluster is an error)
+        #[arg(long)]
+        yes: bool,
+        /// Take fields another field manager owns with other values (e.g. obelisk-local's, or
+        /// others' entries in the default service account's `imagePullSecrets`, which this replaces)
+        #[arg(long)]
+        force_conflicts: bool,
+        /// Print what would be applied (SSM refs as written, other passwords masked), and apply nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Debug, Args)]

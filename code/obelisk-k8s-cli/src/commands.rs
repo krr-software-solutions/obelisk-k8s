@@ -9,6 +9,7 @@ use obelisk_k8s::config::diff::DiffOptions;
 use obelisk_k8s::config::ephemeral::{Ephemeral, EphemeralValues};
 use obelisk_k8s::config::global::edit::{self as global_edit, Change};
 use obelisk_k8s::config::global::{GLOBAL_ROOT_ENV, GlobalConfig, default_global_root, tilde};
+use obelisk_k8s::config::pull_secret::PullSecretOptions;
 use obelisk_k8s::config::repo::RepoConfig;
 use obelisk_k8s::ssm::Ssm;
 use obelisk_k8s::{ObeliskK8sError, cluster};
@@ -267,19 +268,46 @@ pub fn run_images(
     global_root_arg: Option<PathBuf>,
     command: &ImagesCommand,
 ) -> Result<(), ObeliskK8sError> {
-    let ImagesCommand::Build {
-        repo,
-        args,
-        images,
-        no_push,
-    } = command;
-    let (global, repo_root, shown_root) = global_and_repo(repo.as_deref(), global_root_arg)?;
+    match command {
+        ImagesCommand::Build {
+            repo,
+            args,
+            images,
+            no_push,
+        } => run_images_build(global_root_arg, repo.as_deref(), args, images, *no_push),
+        ImagesCommand::PullSecret {
+            cluster,
+            namespace,
+            yes,
+            force_conflicts,
+            dry_run,
+        } => {
+            let options = PullSecretOptions {
+                remote_ok: *yes,
+                force_conflicts: *force_conflicts,
+                dry_run: *dry_run,
+            };
+            run_pull_secret(global_root_arg, cluster, namespace, options)
+        }
+    }
+}
+
+/// `images build`: builds the selected units' images (only `images`, if any) and, unless
+/// `no_push`, delivers them to their targets' clusters; each step on stderr, the result on stdout.
+fn run_images_build(
+    global_root_arg: Option<PathBuf>,
+    repo: Option<&str>,
+    args: &TemplateArgs,
+    images: &[String],
+    no_push: bool,
+) -> Result<(), ObeliskK8sError> {
+    let (global, repo_root, shown_root) = global_and_repo(repo, global_root_arg)?;
     let config = load_repo_config(&repo_root)?;
     let selection = config.select(&args.targets, &args.units)?;
     let ephemeral = ephemeral(&args.ephemeral)?;
     let (shown_root, ephemeral) = (shown_root.as_deref(), ephemeral.as_ref());
     let step = |step: &str| eprintln!("{step}");
-    if *no_push {
+    if no_push {
         let built = config.images_build(
             &repo_root, &selection, shown_root, ephemeral, &global, images, warn_one, step,
         )?;
@@ -294,6 +322,27 @@ pub fn run_images(
         )
         .map_err(|e| ssm.redact_error(e))?;
     print!("{}", ssm.redact(&pushed.to_string()));
+    Ok(())
+}
+
+/// `images pull-secret`: applies (or, `--dry-run`, prints) the pull secret in `namespace` on
+/// `cluster`.
+fn run_pull_secret(
+    root: Option<PathBuf>,
+    cluster: &str,
+    namespace: &str,
+    options: PullSecretOptions,
+) -> Result<(), ObeliskK8sError> {
+    let (root, home) = global_root(root)?;
+    let global = GlobalConfig::load(&root, home.as_deref())?;
+    warn(&global.warnings);
+    let ssm = Ssm::from_env();
+    let applied = global
+        .pull_secret(cluster, namespace, options, &ssm, |step| {
+            eprintln!("{}", ssm.redact(step));
+        })
+        .map_err(|e| ssm.redact_error(e))?;
+    print!("{}", ssm.redact(&applied.to_string()));
     Ok(())
 }
 

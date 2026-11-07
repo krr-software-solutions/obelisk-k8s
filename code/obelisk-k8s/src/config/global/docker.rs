@@ -15,8 +15,9 @@
 //! ```
 //!
 //! Its pods pull an image by the name it's pushed as. `pull.auths` only supplies credentials (one
-//! per host), and isn't used yet. Strings may hold `${{obelisk:aws-ssm:…}}` refs, resolved when
-//! they're used. A local k3d cluster without one gets its images with `k3d image import`.
+//! per host), for `images pull-secret` (see `config::pull_secret`). Strings may hold
+//! `${{obelisk:aws-ssm:…}}` refs, resolved when they're used. A local k3d cluster without one gets
+//! its images with `k3d image import`.
 
 use std::path::{Path, PathBuf};
 
