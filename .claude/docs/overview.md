@@ -67,10 +67,10 @@ ip-allocator.
 - `obelisk-k8s template values [-t <target>]... [-u <unit>]...`: the merged values each selected unit
   gets on each selected target: its found config files deep-merged in merge order (maps key by key;
   lists, scalars and `null` replace), with the tool's `obelisk: { repo, target, unit, cluster, ephemeral, git, paths }` block on top.
-  `obelisk:` is reserved: a config file may only set `obelisk.release.{name, namespace}` and
-  `obelisk.version`, as strings (kept per file and left out of this output; they're agreed on after the
-  generators: see **Release** and `obelisk.version` below), and anything else under it is an
-  error. SSM refs (`${{obelisk:aws-ssm:<key>}}`, below) show as written unless `--resolve`.
+  `obelisk:` is reserved: a config file may only set `obelisk.release.{name, namespace, version}`, as
+  strings (kept per file and left out of this output; they're agreed on after the generators: see
+  **Release** below), and anything else under it is an error (`obelisk.version`, the version's old
+  place, says to move it to `obelisk.release.version`). SSM refs (`${{obelisk:aws-ssm:<key>}}`, below) show as written unless `--resolve`.
   Quoted strings stay as written; plain scalars come out parsed, the YAML 1.1 way where it matters
   (`0755` is `493`), with known limits listed in `config/values.rs`. Same selection as
   `config repo paths`; several cases print as a YAML stream, each under a `# [ target=…, unit=… ]`
@@ -94,11 +94,13 @@ ip-allocator.
   none of the targets being rendered is ephemeral is an error too (a target counts if a selected
   unit renders on it). `obelisk.ephemeral` is the name (`null` on other
   targets), and the values are the last config layer, merged over every config file under the same
-  rules (so they can set `obelisk.version` too, and it shows up as `--ephemeral-values` or the path).
+  rules (so they can set `obelisk.release.version` too, and it shows up as `--ephemeral-values` or the path).
   diff/apply will take the same flags.
-- `obelisk.version`: after the generators, exactly one distinct version is required for each unit on
-  each target, from any of: `version` in its target or unit (interpolated), or `obelisk.version` in a
-  config file or generator. It's added to the generated values, and templates' charts get it as
+- `obelisk.release.version`: after the generators, exactly one distinct version is required for each
+  unit on each target, from any of: `release.version` in its target or unit (interpolated), or
+  `obelisk.release.version` in a config file or generator. A top-level `version` in a target or unit
+  (its old place) is a load error saying to move it under `release`. It's added to the generated
+  values (at `obelisk.release.version`), and templates' charts get it as
   `version` and `appVersion`, so it must be `SemVer`-ish for `template manifests` (e.g. `0.0.0-<sha>`,
   or a tag like `v1.2.3`). Note that `git describe` output like `v1.2.3-4-gabc1234` is SemVer for a
   *prerelease of* 1.2.3, so it sorts before `v1.2.3`.
@@ -133,14 +135,15 @@ ip-allocator.
   `unit.yaml`) lists `{ type, … }` entries like config paths (see the types below); all see the same
   input, the merged config values. A `gotmpl` one renders through a throwaway Helm chart (`helm` must be
   installed) with them as `.Values` (`.Release` is the unit / `default`: use `.Values.obelisk`). An
-  output must be one mapping or nothing, and may set `obelisk.release.{name, namespace}` and
-  `obelisk.version` like a config file. Takes `--repo` too. Each `gotmpl` generator is its own `helm`
+  output must be one mapping or nothing, and may set `obelisk.release.{name, namespace, version}` like
+  a config file. Takes `--repo` too. Each `gotmpl` generator is its own `helm`
   run; a unit with any needs a name Helm accepts as a release name (≤ 53 chars).
 - **Release:** `obelisk.release.{name, namespace}` exists only to be `.Release.{Name, Namespace}` (and
-  the Helm release `apply` will install). Like the version, each must have exactly one distinct
-  value per unit on a target, from `release: { name, namespace }` in its target or unit
-  (interpolated) or `obelisk.release.*` in a config file or generator; none is an error, as is a
-  conflict. Both must be valid names; a release name at most 53 characters. Generators still render
+  the Helm release `apply` will install), with `obelisk.release.version` (above) as its version. Like
+  the version, each must have exactly one distinct value per unit on a target, from
+  `release: { name, namespace, version }` in its target or unit (interpolated) or `obelisk.release.*`
+  in a config file or generator; none is an error, as is a conflict. Name and namespace must be valid
+  names; a release name at most 53 characters. Generators still render
   with `.Release` as the unit / `default` (the release isn't agreed until after them).
 - `config repo …` works on the repo in the current directory, or with `--repo <name>`, on the one with
   that name in the global `repos.yaml` (paths are then shown under it, so they work from anywhere).

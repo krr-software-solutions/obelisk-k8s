@@ -3,9 +3,9 @@
 //!
 //! Maps merge key by key, recursively; anything else (lists, scalars, `null`) replaces what was there.
 //! A file that's empty or `null` adds nothing. `obelisk:` is the tool's: a file may only set
-//! `obelisk.release.{name, namespace}` and `obelisk.version`, as strings (parsed into
-//! [`ValuesCase::sets`] and left out of the values: the version and the release go back in once
-//! they're agreed, after the generators), and anything else under it is an error.
+//! `obelisk.release.{name, namespace, version}`, as strings (parsed into [`ValuesCase::sets`] and left
+//! out of the values: the release goes back in once it's agreed, after the generators), and anything
+//! else under it is an error.
 //!
 //! `${{obelisk:aws-ssm:<key>}}` refs in the merged values' strings (see `ssm`) are resolved once
 //! they're merged (`apply`, `template --resolve`), so generators and templates see the values; else
@@ -63,7 +63,7 @@ pub struct Agreed {
     pub release_name: String,
     /// `obelisk.release.namespace`: `.Release.Namespace`, and where the release goes.
     pub namespace: String,
-    /// `obelisk.version`: the chart's `version` and `appVersion`.
+    /// `obelisk.release.version`: the chart's `version` and `appVersion`.
     pub version: String,
 }
 
@@ -249,9 +249,8 @@ pub(crate) fn shown_under(shown_root: Option<&Path>, path: &Path) -> PathBuf {
 }
 
 /// Merges one file's values (a config file, or a generator's output) into `values`: it must be a
-/// mapping or nothing, and may only set `obelisk.release.{name, namespace}` and `obelisk.version` under
-/// `obelisk:`, which is recorded in `sets` (as `path`) and kept out of `values`. `what` names the kind
-/// of file.
+/// mapping or nothing, and may only set `obelisk.release.{name, namespace, version}` under `obelisk:`,
+/// which is recorded in `sets` (as `path`) and kept out of `values`. `what` names the kind of file.
 pub(crate) fn absorb(
     values: &mut Map<String, Value>,
     sets: &mut FileObelisks,
@@ -281,8 +280,8 @@ pub(crate) fn absorb(
     }
 }
 
-/// What a config file (or generator) set under `obelisk:`: the Helm release's name and namespace
-/// (`obelisk.release.{name, namespace}`), and the version (`obelisk.version`).
+/// What a config file (or generator) set under `obelisk:`: the Helm release's name, namespace and
+/// version (`obelisk.release.{name, namespace, version}`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FileObelisk {
     pub name: Option<String>,
@@ -290,11 +289,11 @@ pub struct FileObelisk {
     pub version: Option<String>,
 }
 
-/// The `obelisk:` a config file set: `null`, or `{ release?: null | { name?, namespace? }, version? }`,
+/// The `obelisk:` a config file set: `null`, or `{ release?: null | { name?, namespace?, version? } }`,
 /// where each is a string (or `null`). Values files are typed, so a plain `123` is a number: quote it.
 fn obelisk_in_file(obelisk: &Value, what: &str) -> Result<FileObelisk, String> {
     let only = format!(
-        "`{OBELISK_KEY}:` is reserved; {what} may only set `{OBELISK_KEY}.release.name`, `{OBELISK_KEY}.release.namespace` and `{OBELISK_KEY}.version`"
+        "`{OBELISK_KEY}:` is reserved; {what} may only set `{OBELISK_KEY}.release.name`, `{OBELISK_KEY}.release.namespace` and `{OBELISK_KEY}.release.version`"
     );
     let string = |map: &Map<String, Value>, key: &str, shown: &str| match map.get(key) {
         None | Some(Value::Null) => Ok(None),
@@ -308,17 +307,17 @@ fn obelisk_in_file(obelisk: &Value, what: &str) -> Result<FileObelisk, String> {
         Value::Object(map) => map,
         _ => return Err(format!("{only}, so `{OBELISK_KEY}:` must be a mapping")),
     };
-    if let Some(other) = obelisk.keys().find(|k| *k != "release" && *k != "version") {
+    // Where the version used to be: say where it went.
+    if obelisk.contains_key("version") {
+        return Err(format!(
+            "`{OBELISK_KEY}.version` is now `{OBELISK_KEY}.release.version`: move it under `{OBELISK_KEY}.release`"
+        ));
+    }
+    if let Some(other) = obelisk.keys().find(|k| *k != "release") {
         return Err(format!("{only}, not `{OBELISK_KEY}.{other}`"));
     }
-    let version = string(obelisk, "version", "version")?;
     let release = match obelisk.get("release") {
-        None | Some(Value::Null) => {
-            return Ok(FileObelisk {
-                version,
-                ..FileObelisk::default()
-            });
-        }
+        None | Some(Value::Null) => return Ok(FileObelisk::default()),
         Some(Value::Object(map)) => map,
         Some(_) => {
             return Err(format!(
@@ -326,13 +325,16 @@ fn obelisk_in_file(obelisk: &Value, what: &str) -> Result<FileObelisk, String> {
             ));
         }
     };
-    if let Some(other) = release.keys().find(|k| *k != "name" && *k != "namespace") {
+    if let Some(other) = release
+        .keys()
+        .find(|k| !matches!(k.as_str(), "name" | "namespace" | "version"))
+    {
         return Err(format!("{only}, not `{OBELISK_KEY}.release.{other}`"));
     }
     Ok(FileObelisk {
         name: string(release, "name", "release.name")?,
         namespace: string(release, "namespace", "release.namespace")?,
-        version,
+        version: string(release, "version", "release.version")?,
     })
 }
 
@@ -446,7 +448,7 @@ mod tests {
             ephemeral_report(
                 &dir,
                 &["preview"],
-                Some("c: ephemeral\nobelisk:\n  version: \"1.0.0\"\n")
+                Some("c: ephemeral\nobelisk:\n  release: { version: \"1.0.0\" }\n")
             )
             .unwrap(),
             "obelisk:\n  repo: r\n  target: preview\n  unit: app\n  cluster:\n    name: c\n    supernet: null\n    subnet: null\n  ephemeral: pr-7\n  git: null\n  paths:\n    globalRoot: /home/me/.obelisk-k8s\n    repoRoot: <repo>\n\
@@ -467,7 +469,7 @@ mod tests {
         let ephemeral = Ephemeral::new(
             "pr-7".into(),
             crate::config::ephemeral::EphemeralValues::Inline(
-                "obelisk:\n  version: \"1.0.0\"\n".into(),
+                "obelisk:\n  release: { version: \"1.0.0\" }\n".into(),
             ),
         )
         .unwrap();
@@ -671,7 +673,7 @@ mod tests {
 
     #[test]
     fn reserves_the_rest_of_the_obelisk_key() {
-        let only = "`obelisk:` is reserved; a config file may only set `obelisk.release.name`, `obelisk.release.namespace` and `obelisk.version`";
+        let only = "`obelisk:` is reserved; a config file may only set `obelisk.release.name`, `obelisk.release.namespace` and `obelisk.release.version`";
         for (bad, why) in [
             (
                 "obelisk:\n  target: other\n",
@@ -771,18 +773,27 @@ mod tests {
 
     #[test]
     fn keeps_a_config_files_version_out_of_the_values() {
-        let dir = base(&[("prod.yaml", "obelisk:\n  version: v1.2.3\n")]);
+        let dir = base(&[("prod.yaml", "obelisk:\n  release: { version: v1.2.3 }\n")]);
         assert!(
             !report(&dir, &["prod"], &["app"])
                 .unwrap()
                 .contains("version")
         );
         assert_eq!(case_sets(&dir)[0].1.version.as_deref(), Some("v1.2.3"));
-        let dir = base(&[("prod.yaml", "obelisk:\n  version: 1.5\n")]);
+        let dir = base(&[("prod.yaml", "obelisk:\n  release: { version: 1.5 }\n")]);
         let e = report(&dir, &["prod"], &["app"]).unwrap_err().to_string();
         assert!(
-            e.ends_with("`obelisk.version` must be a string, not `1.5` (quote it)"),
+            e.ends_with("`obelisk.release.version` must be a string, not `1.5` (quote it)"),
             "{e}"
+        );
+    }
+
+    #[test]
+    fn says_where_obelisk_version_went() {
+        let dir = base(&[("prod.yaml", "obelisk:\n  version: v1.2.3\n")]);
+        assert_eq!(
+            report(&dir, &["prod"], &["app"]).unwrap_err().to_string(),
+            ".obelisk-k8s/prod.yaml: `obelisk.version` is now `obelisk.release.version`: move it under `obelisk.release`"
         );
     }
 

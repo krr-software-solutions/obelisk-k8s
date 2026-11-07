@@ -3,8 +3,8 @@
 //! ```text
 //! .obelisk-k8s/
 //!   repo.yaml                 repo: { name, helmRepos, configPaths, generators, templates }
-//!   targets/<dir>/target.yaml target: { name, cluster, configPaths, generators, templates, release: { name, namespace }, version, ephemeral }
-//!   units/<dir>/unit.yaml     unit: { name, configPaths, generators, templates, targets, release: { name, namespace }, version }
+//!   targets/<dir>/target.yaml target: { name, cluster, configPaths, generators, templates, release: { name, namespace, version }, ephemeral }
+//!   units/<dir>/unit.yaml     unit: { name, configPaths, generators, templates, targets, release: { name, namespace, version } }
 //! ```
 //!
 //! `generators` and `templates` are lists of [`Render`]s: `{ type: gotmpl | file | url | helm |
@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 
 use indexmap::IndexMap;
 use serde::Deserialize;
+use serde::de::IgnoredAny;
 
 use crate::ObeliskK8sError;
 use crate::config::{check_name, check_unique, config_error, name_or_dir, read_entries};
@@ -62,9 +63,6 @@ pub struct Target {
     pub generators: Vec<Render>,
     pub templates: Vec<Render>,
     pub release: Release,
-    /// The version its units' Helm releases get (`obelisk.version`), interpolated. Parsed here, agreed
-    /// on after generation.
-    pub version: Option<InterpString>,
     /// Whether it's a stack that runs many times side by side, each copy named on the command line
     /// (`--ephemeral-name`). Missing or null means no.
     pub ephemeral: bool,
@@ -80,9 +78,6 @@ pub struct Unit {
     pub templates: Vec<Render>,
     pub targets: UnitTargets,
     pub release: Release,
-    /// The version its Helm release gets (`obelisk.version`), interpolated. Parsed here, agreed on after
-    /// generation.
-    pub version: Option<InterpString>,
 }
 
 /// Something obelisk-k8s renders: a generator (`generators:`, more values from the merged config
@@ -147,14 +142,17 @@ impl Render {
     }
 }
 
-/// What a target or unit says about the Helm release its units become: `release: { name, namespace }`,
-/// both optional and interpolated. Like every value in these files, a plain scalar is read as its text
-/// (`name: 123` is `"123"`). Agreed on, with config files and generators, after the generators.
+/// What a target or unit says about the Helm release its units become: `release: { name, namespace,
+/// version }`, each optional and interpolated. Like every value in these files, a plain scalar is read
+/// as its text (`name: 123` is `"123"`). Agreed on, with config files and generators, after the
+/// generators.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Release {
     pub name: Option<InterpString>,
     pub namespace: Option<InterpString>,
+    /// The release's version (`obelisk.release.version`): the chart's `version` and `appVersion`.
+    pub version: Option<InterpString>,
 }
 
 /// Which targets a unit deploys to.
@@ -201,6 +199,7 @@ impl RepoConfig {
         let mut targets = Vec::new();
         for entry in read_entries(&dir, shown, "targets", "target.yaml", &mut warnings)? {
             let TargetFile { target } = yaml::read_file(&entry.path, &entry.file)?;
+            check_no_version(&entry.file, target.version)?;
             targets.push(Target {
                 name: name_or_dir(&entry, target.name)?,
                 config_paths: check_config_paths(&entry.file, target.config_paths)?,
@@ -218,7 +217,6 @@ impl RepoConfig {
                 )?,
                 cluster: target.cluster,
                 release: target.release.unwrap_or_default(),
-                version: target.version,
                 ephemeral: target.ephemeral.unwrap_or(false),
                 file: entry.file,
             });
@@ -231,6 +229,7 @@ impl RepoConfig {
         let mut units = Vec::new();
         for entry in read_entries(&dir, shown, "units", "unit.yaml", &mut warnings)? {
             let UnitFile { unit } = yaml::read_file(&entry.path, &entry.file)?;
+            check_no_version(&entry.file, unit.version)?;
             units.push(Unit {
                 name: name_or_dir(&entry, unit.name)?,
                 config_paths: check_config_paths(&entry.file, unit.config_paths)?,
@@ -248,7 +247,6 @@ impl RepoConfig {
                 )?,
                 targets: check_unit_targets(&entry.file, unit.targets, &targets)?,
                 release: unit.release.unwrap_or_default(),
-                version: unit.version,
                 file: entry.file,
             });
         }
@@ -372,7 +370,8 @@ struct TargetSection {
     generators: Option<Vec<RenderIn>>,
     templates: Option<Vec<RenderIn>>,
     release: Option<Release>,
-    version: Option<InterpString>,
+    /// Moved to `release.version`: only read to say so.
+    version: Option<Spanned<IgnoredAny>>,
     ephemeral: Option<bool>,
 }
 
@@ -391,7 +390,8 @@ struct UnitSection {
     templates: Option<Vec<RenderIn>>,
     targets: Option<Vec<Spanned<String>>>,
     release: Option<Release>,
-    version: Option<InterpString>,
+    /// Moved to `release.version`: only read to say so.
+    version: Option<Spanned<IgnoredAny>>,
 }
 
 #[derive(Deserialize)]
@@ -407,6 +407,21 @@ struct RenderIn {
     version: Option<String>,
     values: Option<String>,
     command: Option<Vec<InterpString>>,
+}
+
+/// A top-level `version` (now `release.version`) is an error that says where it went.
+fn check_no_version(
+    file: &Path,
+    version: Option<Spanned<IgnoredAny>>,
+) -> Result<(), ObeliskK8sError> {
+    match version {
+        Some(version) => Err(config_error(
+            file,
+            Some(version.at),
+            "`version` is now `release.version`: move it under `release:`",
+        )),
+        None => Ok(()),
+    }
 }
 
 /// Which list renders are in: generators make values, templates make resources.
@@ -803,6 +818,49 @@ mod tests {
             )
             .error();
         assert!(error.contains("unknown var `obelisk:untis`"), "{error}");
+    }
+
+    #[test]
+    fn parses_the_release_version() {
+        let repo = base()
+            .file(
+                "targets/prod/target.yaml",
+                "target:\n  cluster: c\n  release: { version: \"0.0.0-${{obelisk:target}}\" }\n",
+            )
+            .file(
+                "units/app/unit.yaml",
+                "unit:\n  release: { version: 1.0.0 }\n",
+            )
+            .load()
+            .unwrap();
+        let version = repo.targets[0].release.version.as_ref().unwrap();
+        assert_eq!(version.raw(), "0.0.0-${{obelisk:target}}");
+        assert_eq!(
+            repo.units[0].release.version.as_ref().unwrap().raw(),
+            "1.0.0"
+        );
+    }
+
+    #[test]
+    fn says_where_a_top_level_version_went() {
+        let moved = "`version` is now `release.version`: move it under `release:`";
+        let error = base()
+            .file("units/app/unit.yaml", "unit:\n  version: 1.0.0\n")
+            .error();
+        assert_eq!(
+            error,
+            format!(".obelisk-k8s/units/app/unit.yaml:2:12: {moved}")
+        );
+        let error = base()
+            .file(
+                "targets/prod/target.yaml",
+                "target:\n  cluster: c\n  version: [not, a, string]\n",
+            )
+            .error();
+        assert_eq!(
+            error,
+            format!(".obelisk-k8s/targets/prod/target.yaml:3:12: {moved}")
+        );
     }
 
     #[test]

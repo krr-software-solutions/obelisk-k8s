@@ -1,9 +1,9 @@
 //! `apply`: installs what `template manifests` renders, one Helm release per unit on a target.
 //!
 //! Each case's manifests go in as its agreed release (`obelisk.release.{name, namespace}`, the
-//! namespace created if it's missing), at its agreed version, through a throwaway chart that ships
-//! them as-is (no second templating), with `helm upgrade --install` on its target's cluster's kubectl
-//! context: k3d's own for a local k3d cluster, else the cluster's `kubectlContext`. A release that
+//! namespace created if it's missing), at its agreed version (`obelisk.release.version`), through a
+//! throwaway chart that ships them as-is (no second templating), with `helm upgrade --install` on its
+//! target's cluster's kubectl context: k3d's own for a local k3d cluster, else the cluster's `kubectlContext`. A release that
 //! doesn't come up is rolled back (unless it takes ownership; see below). A unit with no templates
 //! has nothing to apply, and is skipped.
 //!
@@ -311,7 +311,7 @@ mod tests {
             ("targets/blind/target.yaml", blind.as_str()),
             (
                 "units/app/unit.yaml",
-                "unit:\n  version: v1\n  templates: [{ type: gotmpl, path: ./app.gotmpl }]\n",
+                "unit:\n  release: { version: v1 }\n  templates: [{ type: gotmpl, path: ./app.gotmpl }]\n",
             ),
             ("app.gotmpl", CONFIG_MAP),
         ];
@@ -422,7 +422,7 @@ mod tests {
             ),
             (
                 "units/other/unit.yaml",
-                "unit:\n  version: v1\n  templates: [{ type: gotmpl, path: ./app.gotmpl }]\n",
+                "unit:\n  release: { version: v1 }\n  templates: [{ type: gotmpl, path: ./app.gotmpl }]\n",
             ),
         ]);
         assert_eq!(
@@ -452,7 +452,7 @@ mod tests {
     #[test]
     fn a_unit_without_templates_is_skipped() {
         let (_g, global) = global(&CLUSTERS);
-        let (dir, config) = repo(&[("units/app/unit.yaml", "unit:\n  version: v1\n")]);
+        let (dir, config) = repo(&[("units/app/unit.yaml", "unit:\n  release: { version: v1 }\n")]);
         let selection = config.select(&["dev".to_owned()], &[]).unwrap();
         let report = config
             .apply(

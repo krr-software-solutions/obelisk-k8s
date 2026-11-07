@@ -8,7 +8,7 @@
 //! chart (`type: helm`) renders as the case's release. `.Release.Name` and `.Release.Namespace` are
 //! the case's agreed
 //! release (`obelisk.release.{name, namespace}`, which also need agreeing on before anything renders),
-//! and the chart's `version` and `appVersion` its agreed `obelisk.version`.
+//! and the chart's `version` and `appVersion` its agreed `obelisk.release.version`.
 //!
 //! What Helm prints is kept as is: documents separated by `---`, each under a `# Source:` comment naming
 //! the template file; a `file`, `url` or `command` template's output goes under one `# Source:` of
@@ -177,7 +177,7 @@ mod tests {
             ("targets/dev/target.yaml", TARGET),
             (
                 "units/app/unit.yaml",
-                "unit:\n  version: 1.0.0\n  templates: [{ type: gotmpl, path: ./app.gotmpl }]\n",
+                "unit:\n  release: { version: 1.0.0 }\n  templates: [{ type: gotmpl, path: ./app.gotmpl }]\n",
             ),
             ("values.yaml", "port: 8080\n"),
             (
@@ -258,7 +258,7 @@ mod tests {
             ),
             (
                 "units/app/unit.yaml",
-                "unit:\n  version: 1.0.0\n  templates:\n    - { type: gotmpl, path: \"./${{obelisk:target}}-unit.gotmpl\" }\n    - { type: gotmpl, path: ./app.gotmpl }\n",
+                "unit:\n  release: { version: 1.0.0 }\n  templates:\n    - { type: gotmpl, path: \"./${{obelisk:target}}-unit.gotmpl\" }\n    - { type: gotmpl, path: ./app.gotmpl }\n",
             ),
             ("all.gotmpl", CONFIG_MAP),
             ("target.gotmpl", &target_cm),
@@ -356,7 +356,7 @@ mod tests {
         }
         let dir = repo(&[(
             "all.gotmpl",
-            "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\ndata:\n  chart: {{ .Chart.Version | quote }}\n  app: {{ .Chart.AppVersion | quote }}\n  values: {{ .Values.obelisk.version | quote }}\n",
+            "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\ndata:\n  chart: {{ .Chart.Version | quote }}\n  app: {{ .Chart.AppVersion | quote }}\n  values: {{ .Values.obelisk.release.version | quote }}\n",
         )]);
         let text = manifests(&dir, &["dev"]).unwrap();
         assert!(
@@ -373,7 +373,7 @@ mod tests {
             ("targets/dev/target.yaml", TARGET),
             (
                 "units/app/unit.yaml",
-                "unit:\n  version: 1.0.0\n  templates:\n    - { type: file, path: ./raw.yaml }\n    - { type: command, command: [sh, -c, \"grep -c 'unit: app' | sed 's/^/count: /'\"] }\n",
+                "unit:\n  release: { version: 1.0.0 }\n  templates:\n    - { type: file, path: ./raw.yaml }\n    - { type: command, command: [sh, -c, \"grep -c 'unit: app' | sed 's/^/count: /'\"] }\n",
             ),
             ("raw.yaml", "---\nkind: Raw\n"),
         ]);
@@ -392,7 +392,7 @@ mod tests {
         let dir = repo(&[
             (
                 "units/app/unit.yaml",
-                "unit:\n  version: 1.0.0\n  templates:\n    - { type: gotmpl, path: ./app.gotmpl }\n    - { type: file, path: ./raw.yaml }\n    - { type: command, command: [sh, -c, \"printf 'kind: FromCommand\\\\n'\"] }\n",
+                "unit:\n  release: { version: 1.0.0 }\n  templates:\n    - { type: gotmpl, path: ./app.gotmpl }\n    - { type: file, path: ./raw.yaml }\n    - { type: command, command: [sh, -c, \"printf 'kind: FromCommand\\\\n'\"] }\n",
             ),
             ("app.gotmpl", CONFIG_MAP),
             ("raw.yaml", "kind: Raw\nkeep: '{{ as is }}'\n"),
@@ -439,7 +439,7 @@ mod tests {
             ("all.gotmpl", CONFIG_MAP),
             (
                 "units/app/unit.yaml",
-                "unit:\n  version: b84d8f6\n  templates: [{ type: gotmpl, path: ./app.gotmpl }]\n",
+                "unit:\n  release: { version: b84d8f6 }\n  templates: [{ type: gotmpl, path: ./app.gotmpl }]\n",
             ),
             (
                 "repo.yaml",
@@ -461,7 +461,7 @@ mod tests {
         let dir = repo(&[
             (
                 "units/app/unit.yaml",
-                "unit:\n  version: \"1.0\"\n  templates: [{ type: gotmpl, path: ./app.gotmpl }]\n",
+                "unit:\n  release: { version: \"1.0\" }\n  templates: [{ type: gotmpl, path: ./app.gotmpl }]\n",
             ),
             (
                 "app.gotmpl",
@@ -481,7 +481,10 @@ mod tests {
                 "repo:\n  name: r\n  templates: [{ type: file, path: ./raw.yaml }]\n",
             ),
             ("targets/prod/target.yaml", TARGET),
-            ("units/app/unit.yaml", "unit:\n  version: 1.0.0\n"),
+            (
+                "units/app/unit.yaml",
+                "unit:\n  release: { version: 1.0.0 }\n",
+            ),
             ("raw.yaml", raw),
         ]);
         let config = RepoConfig::load(dir.path()).unwrap();

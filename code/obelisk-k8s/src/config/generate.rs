@@ -10,14 +10,14 @@
 //! a full `template generated-values` costs targets × units × generators of them.
 //!
 //! A generator's output must be one mapping, or nothing. Like a config file, it may only set
-//! `obelisk.release.{name, namespace}` and `obelisk.version` under `obelisk:` (kept on
-//! [`ValuesCase::sets`], not in the values).
+//! `obelisk.release.{name, namespace, version}` under `obelisk:` (kept on [`ValuesCase::sets`], not in
+//! the values).
 //!
-//! After the generators, the case must agree on one version, one release name and one release
-//! namespace: every value given (its target's and unit's `version` / `release.name` /
-//! `release.namespace`, and `obelisk.version` / `obelisk.release.{name, namespace}` in its config
-//! files and generators) must be the same, and there must be one of each. They're added to the
-//! values as `obelisk.version` and `obelisk.release.{name, namespace}`; templates get the release as
+//! After the generators, the case must agree on one release name, one release namespace and one
+//! version: every value given (its target's and unit's `release.{name, namespace, version}`, and
+//! `obelisk.release.{name, namespace, version}` in its config files and generators) must be the
+//! same, and there must be one of each. They're added to the values as
+//! `obelisk.release.{name, namespace, version}`; templates get the release as
 //! `.Release.{Name, Namespace}`. A release name is a valid name of at most 53 characters (Helm's
 //! limit), a namespace one of at most 63.
 
@@ -52,7 +52,7 @@ impl RepoConfig {
     ///
     /// Whatever building the config values fails with; [`ObeliskK8sError::Helm`] if a generator
     /// doesn't render; [`ObeliskK8sError::Config`] for an output that isn't one mapping, or sets
-    /// something under `obelisk:` other than `release.{name, namespace}` and `version`;
+    /// something under `obelisk:` other than `release.{name, namespace, version}`;
     /// [`ObeliskK8sError::Usage`] if a case has no version, release name or release namespace, more
     /// than one of any, or a release that isn't a valid name (or too long a release name).
     pub fn generated_values_report<'a>(
@@ -153,9 +153,12 @@ impl RepoConfig {
         if let Some(Value::Object(obelisk)) = values.get_mut(OBELISK_KEY) {
             obelisk.insert(
                 "release".to_owned(),
-                serde_json::json!({ "name": agreed.release_name, "namespace": agreed.namespace }),
+                serde_json::json!({
+                    "name": agreed.release_name,
+                    "namespace": agreed.namespace,
+                    "version": agreed.version,
+                }),
             );
-            obelisk.insert("version".to_owned(), Value::String(agreed.version.clone()));
         }
         let case = ValuesCase::new(target, unit, values, sets, Some(agreed.clone()))?;
         Ok((case, agreed))
@@ -165,7 +168,7 @@ impl RepoConfig {
 /// One of the things a case agrees on ([`Agreed`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Field {
-    /// `obelisk.version`: the chart's `version` and `appVersion`.
+    /// `obelisk.release.version`: the chart's `version` and `appVersion`.
     Version,
     /// `obelisk.release.name`: `.Release.Name`, and the Helm release.
     ReleaseName,
@@ -186,20 +189,16 @@ impl Field {
     /// Its key in a target or unit, e.g. `release.name`.
     fn key(self) -> &'static str {
         match self {
-            Self::Version => "version",
+            Self::Version => "release.version",
             Self::ReleaseName => "release.name",
             Self::ReleaseNamespace => "release.namespace",
         }
     }
 
     /// What a target or unit says.
-    fn in_target_or_unit<'a>(
-        self,
-        version: Option<&'a InterpString>,
-        release: &'a Release,
-    ) -> Option<&'a InterpString> {
+    fn in_target_or_unit(self, release: &Release) -> Option<&InterpString> {
         match self {
-            Self::Version => version,
+            Self::Version => release.version.as_ref(),
             Self::ReleaseName => release.name.as_ref(),
             Self::ReleaseNamespace => release.namespace.as_ref(),
         }
@@ -239,11 +238,8 @@ fn agree(
         unit: Some(&unit.name),
     };
     let mut given: Vec<(String, PathBuf)> = Vec::new();
-    for (file, version, release) in [
-        (&target.file, &target.version, &target.release),
-        (&unit.file, &unit.version, &unit.release),
-    ] {
-        if let Some(raw) = what.in_target_or_unit(version.as_ref(), release) {
+    for (file, release) in [(&target.file, &target.release), (&unit.file, &unit.release)] {
+        if let Some(raw) = what.in_target_or_unit(release) {
             let value = raw
                 .interpolate(&params)
                 .map_err(|var| ObeliskK8sError::Config {
@@ -331,7 +327,7 @@ mod tests {
             ("targets/dev/target.yaml", TARGET),
             (
                 "units/app/unit.yaml",
-                "unit:\n  version: 1.0.0\n  generators: [{ type: gotmpl, path: ./app.gen.yaml.gotmpl }]\n",
+                "unit:\n  release: { version: 1.0.0 }\n  generators: [{ type: gotmpl, path: ./app.gen.yaml.gotmpl }]\n",
             ),
             (
                 "values.yaml",
@@ -404,7 +400,7 @@ mod tests {
         assert_eq!(
             yaml,
             "obelisk:\n  repo: r\n  target: prod\n  unit: app\n  cluster:\n    name: c\n    supernet: null\n    subnet: null\n  ephemeral: null\n  git: null\n  paths:\n    globalRoot: /home/me/.obelisk-k8s\n    repoRoot: <repo>\n\
-             \x20 release:\n    name: app\n    namespace: mc-prod\n  version: \"1.0.0\"\n\
+             \x20 release:\n    name: app\n    namespace: mc-prod\n    version: \"1.0.0\"\n\
              db:\n  host: h\n  port: 6543\n  url: postgres://h:5432\n\
              mode: \"0755\"\nrelease: app/default\nreplicas: 3\n"
         );
@@ -425,11 +421,11 @@ mod tests {
                 "repo:\n  name: r\n  configPaths: [./values.yaml]\n  generators:\n    - { type: file, path: ./more.yaml }\n    - { type: command, command: [sh, -c, \"printf 'seen: %s\\\\n' $(grep -c 'unit: app')\"] }\n",
             ),
             ("values.yaml", "a: 1\n"),
-            ("more.yaml", "b: 2\nobelisk:\n  version: v9\n"),
+            ("more.yaml", "b: 2\nobelisk:\n  release: { version: v9 }\n"),
         ]);
         let (yaml, _) = generated(&dir, "prod").unwrap();
         assert!(
-            yaml.contains("  version: v9\na: 1\nb: 2\nseen: 1\n"),
+            yaml.contains("    version: v9\na: 1\nb: 2\nseen: 1\n"),
             "{yaml}"
         );
     }
@@ -486,7 +482,7 @@ mod tests {
         assert_eq!(
             error("obelisk:\n  target: x\n"),
             format!(
-                "{file}: `obelisk:` is reserved; a generator's output may only set `obelisk.release.name`, `obelisk.release.namespace` and `obelisk.version`, not `obelisk.target`"
+                "{file}: `obelisk:` is reserved; a generator's output may only set `obelisk.release.name`, `obelisk.release.namespace` and `obelisk.release.version`, not `obelisk.target`"
             )
         );
     }
@@ -515,7 +511,7 @@ mod tests {
         let mut report =
             config.generated_values_report(dir.path(), &selection, None, None, &global(), None)?;
         let case = report.cases.remove(0);
-        Ok(case.values[OBELISK_KEY]["version"]
+        Ok(case.values[OBELISK_KEY]["release"]["version"]
             .as_str()
             .unwrap()
             .to_owned())
@@ -526,20 +522,23 @@ mod tests {
         // From the unit, interpolated.
         let dir = plain(&[(
             "units/app/unit.yaml",
-            "unit:\n  version: \"0.0.0-${{obelisk:unit}}\"\n",
+            "unit:\n  release: { version: \"0.0.0-${{obelisk:unit}}\" }\n",
         )]);
         assert_eq!(version(&dir, "prod").unwrap(), "0.0.0-app");
         // The same value from the target and a config file is one version.
         let dir = plain(&[
             (
                 "targets/prod/target.yaml",
-                "target:\n  cluster: c\n  version: v2.0.0\n  release: { name: \"${{obelisk:unit}}\", namespace: \"${{obelisk:target}}\" }\n",
+                "target:\n  cluster: c\n  release: { name: \"${{obelisk:unit}}\", namespace: \"${{obelisk:target}}\", version: v2.0.0 }\n",
             ),
-            ("prod.yaml", "obelisk:\n  version: v2.0.0\n"),
+            ("prod.yaml", "obelisk:\n  release: { version: v2.0.0 }\n"),
         ]);
         assert_eq!(version(&dir, "prod").unwrap(), "v2.0.0");
         // A config file's version isn't merged in as a value; only the agreed one is.
-        let dir = plain(&[("values.yaml", "obelisk:\n  version: \"1.0\"\nx: 1\n")]);
+        let dir = plain(&[(
+            "values.yaml",
+            "obelisk:\n  release: { version: \"1.0\" }\nx: 1\n",
+        )]);
         let config = RepoConfig::load(dir.path()).unwrap();
         let selection = config
             .select(&["dev".to_owned()], &["app".to_owned()])
@@ -548,7 +547,9 @@ mod tests {
             .generated_values_report(dir.path(), &selection, None, None, &global(), None)
             .unwrap();
         assert!(
-            report.cases[0].yaml.contains("  version: \"1.0\"\nx: 1\n"),
+            report.cases[0]
+                .yaml
+                .contains("    version: \"1.0\"\nx: 1\n"),
             "{}",
             report.cases[0].yaml
         );
@@ -559,12 +560,12 @@ mod tests {
         let error = version(&plain(&[]), "prod").unwrap_err().to_string();
         assert_eq!(
             error,
-            "no version for unit `app` on target `prod`: set `version` in its target or unit, or `obelisk.version` in a config file or generator (e.g. from `.Values.obelisk.git`)"
+            "no version for unit `app` on target `prod`: set `release.version` in its target or unit, or `obelisk.release.version` in a config file or generator (e.g. from `.Values.obelisk.git`)"
         );
         let dir = plain(&[
-            ("units/app/unit.yaml", "unit:\n  version: v1\n"),
-            ("values.yaml", "obelisk:\n  version: v1\n"),
-            ("prod.yaml", "obelisk:\n  version: v2\n"),
+            ("units/app/unit.yaml", "unit:\n  release: { version: v1 }\n"),
+            ("values.yaml", "obelisk:\n  release: { version: v1 }\n"),
+            ("prod.yaml", "obelisk:\n  release: { version: v2 }\n"),
         ]);
         assert_eq!(
             version(&dir, "prod").unwrap_err().to_string(),
@@ -590,7 +591,7 @@ mod tests {
             ),
             (
                 "gen.gotmpl",
-                "obelisk:\n  version: {{ printf \"0.0.0-%s\" .Values.obelisk.ephemeral | quote }}\nseen: {{ .Values.from | quote }}\n",
+                "obelisk:\n  release: { version: {{ printf \"0.0.0-%s\" .Values.obelisk.ephemeral | quote }} }\nseen: {{ .Values.from | quote }}\n",
             ),
         ]);
         let config = RepoConfig::load(dir.path()).unwrap();
@@ -607,7 +608,10 @@ mod tests {
                 None,
             )
             .unwrap();
-        assert_eq!(report.cases[0].values[OBELISK_KEY]["version"], "0.0.0-pr-7");
+        assert_eq!(
+            report.cases[0].values[OBELISK_KEY]["release"]["version"],
+            "0.0.0-pr-7"
+        );
         assert_eq!(report.cases[0].values["seen"], "cli");
     }
 
@@ -616,13 +620,13 @@ mod tests {
         use crate::config::ephemeral::{Ephemeral, EphemeralValues};
         let dir = plain(&[(
             "targets/prod/target.yaml",
-            "target:\n  cluster: c\n  ephemeral: true\n  version: v1\n  release: { name: \"${{obelisk:unit}}\", namespace: \"${{obelisk:target}}\" }\n",
+            "target:\n  cluster: c\n  ephemeral: true\n  release: { name: \"${{obelisk:unit}}\", namespace: \"${{obelisk:target}}\", version: v1 }\n",
         )]);
         let config = RepoConfig::load(dir.path()).unwrap();
         let selection = config.select(&["prod".to_owned()], &[]).unwrap();
         let ephemeral = Ephemeral::new(
             "pr-7".into(),
-            EphemeralValues::Inline("obelisk: { version: v2 }".into()),
+            EphemeralValues::Inline("obelisk: { release: { version: v2 } }".into()),
         )
         .unwrap();
         assert_eq!(
@@ -653,7 +657,7 @@ mod tests {
 
     #[test]
     fn agrees_on_one_release() {
-        let version = ("units/app/unit.yaml", "unit:\n  version: v1\n");
+        let version = ("units/app/unit.yaml", "unit:\n  release: { version: v1 }\n");
         // From the target (interpolated), and a config file saying the same.
         let dir = plain(&[
             version,
@@ -661,7 +665,7 @@ mod tests {
         ]);
         assert_eq!(
             release(&dir, "prod").unwrap(),
-            serde_json::json!({ "name": "app", "namespace": "prod" })
+            serde_json::json!({ "name": "app", "namespace": "prod", "version": "v1" })
         );
         // Each is required.
         let dir = plain(&[
@@ -708,12 +712,12 @@ mod tests {
             ),
             (
                 "units/app/unit.yaml",
-                "unit:\n  version: v1\n  release: { name: \"${{obelisk:unit}}-${{obelisk:target}}\" }\n",
+                "unit:\n  release: { name: \"${{obelisk:unit}}-${{obelisk:target}}\", version: v1 }\n",
             ),
         ]);
         assert_eq!(
             release(&dir, "prod").unwrap(),
-            serde_json::json!({ "name": "app-prod", "namespace": "n" })
+            serde_json::json!({ "name": "app-prod", "namespace": "n", "version": "v1" })
         );
     }
 
@@ -722,7 +726,7 @@ mod tests {
         let dir = plain(&[
             (
                 "units/app/unit.yaml",
-                "unit:\n  version: v1\n  release: { namespace: a }\n",
+                "unit:\n  release: { namespace: a, version: v1 }\n",
             ),
             ("values.yaml", "obelisk:\n  release: { namespace: b }\n"),
         ]);
@@ -734,7 +738,7 @@ mod tests {
 
     #[test]
     fn the_release_must_be_valid_for_helm_and_kubernetes() {
-        let version = ("units/app/unit.yaml", "unit:\n  version: v1\n");
+        let version = ("units/app/unit.yaml", "unit:\n  release: { version: v1 }\n");
         let target = |release: &str| format!("target:\n  cluster: c\n  release: {release}\n");
         let bad_namespace = target("{ name: app, namespace: Not_Valid }");
         let dir = plain(&[version, ("targets/prod/target.yaml", &bad_namespace)]);
@@ -775,7 +779,7 @@ mod tests {
             ),
             (
                 "gen.gotmpl",
-                "obelisk:\n  version: {{ printf \"0.0.0-%s\" (.Values.obelisk.git | default \"nogit\") | quote }}\n",
+                "obelisk:\n  release:\n    version: {{ printf \"0.0.0-%s\" (.Values.obelisk.git | default \"nogit\") | quote }}\n",
             ),
         ]);
         // A temp dir isn't a git repo: `obelisk.git` is null.
@@ -794,7 +798,7 @@ mod tests {
             ),
             (
                 "gen.gotmpl",
-                "obelisk:\n  version: {{ printf \"0.0.0-%s\" .Values.obelisk.git.sha.short | quote }}\n",
+                "obelisk:\n  release:\n    version: {{ printf \"0.0.0-%s\" .Values.obelisk.git.sha.short | quote }}\n",
             ),
         ]);
         let git = |args: &[&str]| {
@@ -831,8 +835,14 @@ mod tests {
                 "repo.yaml",
                 "repo:\n  name: r\n  generators: [{ type: gotmpl, path: ./gen.gotmpl }]\n",
             ),
-            ("units/app/unit.yaml", "unit:\n  version: 1.2.3\n"),
-            ("gen.gotmpl", "obelisk:\n  version: \"0.0.0-dev\"\n"),
+            (
+                "units/app/unit.yaml",
+                "unit:\n  release: { version: 1.2.3 }\n",
+            ),
+            (
+                "gen.gotmpl",
+                "obelisk:\n  release: { version: \"0.0.0-dev\" }\n",
+            ),
         ]);
         let e = version(&dir, "prod").unwrap_err().to_string();
         assert!(

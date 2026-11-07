@@ -6,11 +6,11 @@
 {{- if and .dirty .dirty.any }}{{ $version = printf "%s-dirty" $version }}{{ end }}
 {{- end }}
 obelisk:
-  version: {{ $version | quote }}
   {{- /* Each unit is its own release, in a namespace per repo: per copy on an ephemeral target. */}}
   release:
     name: {{ .Values.obelisk.unit }}
     namespace: {{ .Values.obelisk.repo }}{{ with .Values.obelisk.ephemeral }}-{{ . }}{{ end }}
+    version: {{ $version | quote }}
 
 stuff:
   ab: {{ add .Values.stuff.a .Values.stuff.b }}
