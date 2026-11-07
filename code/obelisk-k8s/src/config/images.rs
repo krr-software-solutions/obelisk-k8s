@@ -21,8 +21,8 @@
 //!
 //! Paths are written as in the build plan (absolute, or `./…` from `.obelisk-k8s/`), and kept and
 //! printed absolute and normalized; only messages show them relative to the repo root. The Dockerfile, a `preBuild` script, its `cwd` and the `contextPath` must exist. A
-//! built image's ref isn't added to the values: templates make it from the same `name` and
-//! `version`. A unit with no images sources declares none, and its values phases don't run.
+//! phase's manifests see the images of earlier phases as
+//! `obelisk.images.<name>.{ref, repository, tag}` (see `config::manifests`). A unit with no images sources declares none, and its values phases don't run.
 //!
 //! `images build` builds each tag (`<name>:<version>`) once, however many cases declare it: its
 //! `preBuild`, then `docker build`. One tag declared two ways is an error. Without `--no-push`, it
@@ -39,10 +39,11 @@ use crate::config::build::{BuildPlan, RepoPaths, Source, Warnings};
 use crate::config::ephemeral::Ephemeral;
 use crate::config::global::GlobalConfig;
 use crate::config::paths::{Selection, write_yaml_cases};
+use crate::config::push::Destination;
 use crate::config::render;
 use crate::config::repo::{RepoConfig, Target, Unit};
 use crate::config::run::RunInputs;
-use crate::config::values::{values_yaml, with_release};
+use crate::config::values::{Agreed, values_yaml, with_release};
 use crate::config::{NAME_RULE, is_valid_name};
 use crate::{ObeliskK8sError, yaml};
 
@@ -172,52 +173,21 @@ impl RepoConfig {
         plan: &BuildPlan,
         obelisk: Map<String, Value>,
     ) -> Result<ImagesCase<'a>, ObeliskK8sError> {
-        let mut images: Vec<DeclaredImage> = Vec::new();
+        let mut images = Vec::new();
         // Nothing to render: skip the values phases too (each source may be a `helm` run).
         if plan.has_images() {
             let evaluated =
                 Self::run_values(repo_root, shown_root, target, unit, inputs, plan, obelisk)?;
-            let agreed = evaluated.agreed;
-            let paths = RepoPaths::new(repo_root);
-            // Phase k renders against the values before it, V₍ₖ₋₁₎: kept for each phase with images.
-            for (phase, before) in plan.phases.iter().zip(evaluated.before) {
-                // Kept for a phase with manifests too: only ones with images render here.
-                let Some(before) = before.filter(|_| phase.has_images()) else {
-                    continue;
-                };
-                let values = with_release(before, &agreed);
-                let values_yaml = values_yaml(&values, target, unit)?;
-                let render_inputs = render::Inputs {
-                    repo_root,
-                    values: &values,
-                    values_yaml: &values_yaml,
-                    release: &agreed.release_name,
-                    namespace: &agreed.namespace,
-                    chart_version: None,
-                    capabilities: None,
-                };
-                for source in phase.images.iter().filter(|s| s.present()) {
-                    let shown = source.shown(repo_root, shown_root);
-                    for image in source_images(source, &shown, &render_inputs, &paths)? {
-                        if let Some(first) = images.iter().find(|i| i.image.name == image.name) {
-                            return Err(ObeliskK8sError::Config {
-                                file: shown,
-                                at: None,
-                                message: format!(
-                                    "image `{}` is already declared, by {} (names are unique in a unit)",
-                                    image.name,
-                                    first.source.display()
-                                ),
-                            });
-                        }
-                        images.push(DeclaredImage {
-                            image,
-                            phase: phase.name.clone(),
-                            source: shown.clone(),
-                        });
-                    }
-                }
-            }
+            images = render_images(
+                repo_root,
+                shown_root,
+                target,
+                unit,
+                plan,
+                plan.phases.len(),
+                &evaluated.before,
+                &evaluated.agreed,
+            )?;
         }
         Ok(ImagesCase {
             target: &target.name,
@@ -225,6 +195,90 @@ impl RepoConfig {
             images,
         })
     }
+}
+
+/// The images `plan`'s phases before phase `until` declare, each phase's images sources rendered
+/// against `before` (its V₍ₖ₋₁₎, kept by [`RepoConfig::run_values`]) with the `agreed` release; in
+/// phase order, then source order.
+///
+/// # Errors
+///
+/// [`ObeliskK8sError::Helm`] if a source doesn't render; [`ObeliskK8sError::Config`] if its output
+/// isn't image specs, or a name is declared twice.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_images(
+    repo_root: &Path,
+    shown_root: Option<&Path>,
+    target: &Target,
+    unit: &Unit,
+    plan: &BuildPlan,
+    until: usize,
+    before: &[Option<Map<String, Value>>],
+    agreed: &Agreed,
+) -> Result<Vec<DeclaredImage>, ObeliskK8sError> {
+    let mut images: Vec<DeclaredImage> = Vec::new();
+    let paths = RepoPaths::new(repo_root);
+    // Phase k renders against the values before it, V₍ₖ₋₁₎: kept for each phase with images.
+    for (phase, before) in plan.phases.iter().zip(before).take(until) {
+        // Kept for a phase with manifests too: only ones with images render here.
+        let Some(before) = before.as_ref().filter(|_| phase.has_images()) else {
+            continue;
+        };
+        let values = with_release(before.clone(), agreed);
+        let values_yaml = values_yaml(&values, target, unit)?;
+        let render_inputs = render::Inputs {
+            repo_root,
+            values: &values,
+            values_yaml: &values_yaml,
+            release: &agreed.release_name,
+            namespace: &agreed.namespace,
+            chart_version: None,
+            capabilities: None,
+        };
+        for source in phase.images.iter().filter(|s| s.present()) {
+            let shown = source.shown(repo_root, shown_root);
+            for image in source_images(source, &shown, &render_inputs, &paths)? {
+                if let Some(first) = images.iter().find(|i| i.image.name == image.name) {
+                    return Err(ObeliskK8sError::Config {
+                        file: shown,
+                        at: None,
+                        message: format!(
+                            "image `{}` is already declared, by {} (names are unique in a unit)",
+                            image.name,
+                            first.source.display()
+                        ),
+                    });
+                }
+                images.push(DeclaredImage {
+                    image,
+                    phase: phase.name.clone(),
+                    source: shown.clone(),
+                });
+            }
+        }
+    }
+    Ok(images)
+}
+
+/// `obelisk.images`: for each of `images`, its `ref` as `to` delivers it, and that ref's
+/// `repository` and `tag`.
+pub(crate) fn images_values<'i>(
+    images: impl IntoIterator<Item = &'i Image>,
+    to: &Destination<'_>,
+) -> Map<String, Value> {
+    images
+        .into_iter()
+        .map(|image| {
+            let repository = to.image_ref(&image.name);
+            let image_ref = format!("{repository}:{}", image.version);
+            let value = serde_json::json!({
+                "ref": image_ref,
+                "repository": repository,
+                "tag": image.version,
+            });
+            (image.name.clone(), value)
+        })
+        .collect()
 }
 
 /// The image specs one images source (shown as `shown`) outputs.
@@ -990,6 +1044,45 @@ mod tests {
         assert_eq!(
             distinct(&two, &[]).unwrap_err().to_string(),
             "image `a:1` is declared differently by unit `web` on target `dev` and unit `app` on target `prod`: one tag must be one image"
+        );
+    }
+
+    #[test]
+    fn images_values_name_each_image_as_it_is_delivered() {
+        let image = |name: &str, version: &str| Image {
+            name: name.to_owned(),
+            version: version.to_owned(),
+            pre_build: None,
+            dockerfile: Dockerfile::File {
+                path: "/r/Dockerfile".into(),
+            },
+            context_path: "/r".into(),
+        };
+        let images = [image("web", "1.2.3"), image("worker", "v2")];
+        assert_eq!(
+            Value::Object(images_values(&images, &Destination::K3d { cluster: "c" })),
+            serde_json::json!({
+                "web": { "ref": "web:1.2.3", "repository": "web", "tag": "1.2.3" },
+                "worker": { "ref": "worker:v2", "repository": "worker", "tag": "v2" },
+            })
+        );
+        let push = crate::config::global::docker::Push {
+            prefix: "reg.example.com/krrss".to_owned(),
+            credentials: None,
+        };
+        let to = Destination::Registry {
+            cluster: "c",
+            push: &push,
+        };
+        assert_eq!(
+            Value::Object(images_values(&images[..1], &to)),
+            serde_json::json!({
+                "web": {
+                    "ref": "reg.example.com/krrss/web:1.2.3",
+                    "repository": "reg.example.com/krrss/web",
+                    "tag": "1.2.3",
+                },
+            })
         );
     }
 }

@@ -163,8 +163,16 @@ ip-allocator.
   contextPath: ./units/my-app       # optional: the build context, default the repo root
   ```
 
-  The Dockerfile, a `preBuild` script, its `cwd` and the `contextPath` must exist. An image's ref
-  isn't added to the values (yet): templates make it from the same name and version.
+  The Dockerfile, a `preBuild` script, its `cwd` and the `contextPath` must exist. A phase's
+  manifests see the images declared in earlier phases (never their own) as
+  `obelisk.images.<name>.{ref, repository, tag}`: `ref` is `<push.prefix>/<name>:<version>` on a
+  cluster with a `docker.yaml`, `<name>:<version>` on a local k3d cluster without one (`k3d image
+  import`ed); any other cluster is an error, as for `images build`. So
+  `image: {{ .Values.obelisk.images.web.ref }}` (a name with a `-`:
+  `{{ (index .Values.obelisk.images "my-app").ref }}`). Values sources don't see them: images render
+  with the agreed release, which is only known after every values phase. So `template manifests`,
+  `apply` and `diff` render (and check) the images sources of the phases before the last manifests
+  phase.
 - `obelisk-k8s images build [-t …]… [-u …]… [-i <image>]… [--no-push]`: builds those images, each tag
   (`<name>:<version>`) once however many cases declare it: its `preBuild` (in its `cwd`), then
   `docker build --file <dockerfile> --tag <name>:<version> <contextPath>`. Then (unless
@@ -379,8 +387,8 @@ Nothing below is decided. Don't silently pick an answer in code; raise it.
   above), any number per source; images sources are `gotmpl`, `file`, `command` or `inline`.
 - ~~Building and pushing images.~~ Decided: `images build` (plain `docker build`, tagged
   `<name>:<version>`, context `contextPath`), pushing per the cluster's `docker.yaml` or
-  `k3d image import`, unless `--no-push`. Next: the ref under `obelisk.images` in values, and the
-  pull Secret from `pull.auths`. Still open: whether `apply` builds.
+  `k3d image import`, unless `--no-push`; manifests get the refs under `obelisk.images`. Next:
+  the pull Secret from `pull.auths`. Still open: whether `apply` builds.
 - ~~Do raw/URL YAML units still get SSM resolution (obelisk-local's `doTemplate`)?~~ Decided: `file`
   and `url` manifests sources always do (**SSM**, above).
 - CRD upgrades, given Helm never upgrades `crds/`.

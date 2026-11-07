@@ -10,6 +10,12 @@
 //! on, before any manifests render. `.Release.Name` and `.Release.Namespace` are the agreed release,
 //! and the chart's `version` and `appVersion` its agreed version.
 //!
+//! The images declared in phases before k (see `config::images`) are added too, as
+//! `obelisk.images.<name>.{ref, repository, tag}`: the ref the image is delivered as to the target's
+//! cluster (`<push.prefix>/<name>:<version>` with a `docker.yaml`, `<name>:<version>` on a local k3d
+//! cluster without one; any other cluster is an error). Only the images phases before the last
+//! manifests phase render (their specs checked).
+//!
 //! What Helm prints is kept as is: documents separated by `---`, each under a `# Source:` comment
 //! naming the template file; a `file`, `url` or `command` source's output goes under one `# Source:`
 //! of its own (its later documents keep theirs, if any). A source may print any number of documents,
@@ -24,14 +30,16 @@ use std::path::Path;
 use serde_json::{Map, Value};
 
 use crate::ObeliskK8sError;
-use crate::config::build::{BuildPlan, Source, Warnings};
+use crate::config::build::{BuildPlan, Phase, Source, Warnings};
 use crate::config::ephemeral::Ephemeral;
 use crate::config::global::GlobalConfig;
+use crate::config::images::{images_values, render_images};
 use crate::config::paths::{Selection, write_yaml_cases};
+use crate::config::push::Destination;
 use crate::config::render;
 use crate::config::repo::{RepoConfig, Target, Unit};
 use crate::config::run::RunInputs;
-use crate::config::values::{Agreed, values_yaml, with_release};
+use crate::config::values::{Agreed, OBELISK_KEY, values_yaml, with_release};
 use crate::helm;
 use crate::ssm::{self, Ssm};
 
@@ -119,14 +127,53 @@ impl RepoConfig {
                     unit.name, target.name
                 )));
             }
+            // Each image is in `obelisk.images` for the phases after the one declaring it: only the
+            // images phases before the last manifests phase are seen, so only they render.
+            let last_manifests = plan.phases.iter().rposition(Phase::has_manifests);
+            let images = render_images(
+                repo_root,
+                shown_root,
+                target,
+                unit,
+                plan,
+                last_manifests.unwrap_or(0),
+                &evaluated.before,
+                &agreed,
+            )?;
+            // A ref only means something where the image can be delivered: a cluster with nowhere
+            // to push them is an error, as for `images build`.
+            let to = if images.is_empty() {
+                None
+            } else {
+                let to = Destination::of(inputs.cluster(target)?).map_err(|e| match e {
+                    ObeliskK8sError::Usage(message) => ObeliskK8sError::Usage(format!(
+                        "unit `{}` on target `{}` has images its manifests see (`obelisk.images`), but {message}",
+                        unit.name, target.name
+                    )),
+                    other => other,
+                })?;
+                Some(to)
+            };
             // Phase k renders against the values before it, V₍ₖ₋₁₎: kept for each phase with
             // manifests.
-            for (phase, before) in plan.phases.iter().zip(evaluated.before) {
+            for (k, (phase, before)) in plan.phases.iter().zip(evaluated.before).enumerate() {
                 // Kept for a phase with images too: only ones with manifests render here.
                 let Some(before) = before.filter(|_| phase.has_manifests()) else {
                     continue;
                 };
-                let values = with_release(before, &agreed);
+                let mut values = with_release(before, &agreed);
+                let earlier = images
+                    .iter()
+                    .filter(|declared| plan.phases[..k].iter().any(|p| p.name == declared.phase));
+                let earlier: Vec<_> = earlier.map(|declared| &declared.image).collect();
+                if let (false, Some(to), Some(Value::Object(obelisk))) =
+                    (earlier.is_empty(), &to, values.get_mut(OBELISK_KEY))
+                {
+                    obelisk.insert(
+                        "images".to_owned(),
+                        Value::Object(images_values(earlier, to)),
+                    );
+                }
                 let values_yaml = values_yaml(&values, target, unit)?;
                 let render_inputs = render::Inputs {
                     repo_root,
@@ -226,12 +273,21 @@ mod tests {
         output: &str,
         ssm: Option<&Ssm>,
     ) -> Result<(String, Option<Agreed>), ObeliskK8sError> {
+        case_on(dir, output, ssm, &global())
+    }
+
+    /// [`case`], with `global` as the global config.
+    fn case_on(
+        dir: &tempfile::TempDir,
+        output: &str,
+        ssm: Option<&Ssm>,
+        global: &GlobalConfig,
+    ) -> Result<(String, Option<Agreed>), ObeliskK8sError> {
         let config = RepoConfig::load(dir.path()).unwrap();
         let selection = config
             .select(&["prod".to_owned()], &["app".to_owned()])
             .unwrap();
-        let global = global();
-        let inputs = RunInputs::new(dir.path(), &selection, None, &global, ssm)?;
+        let inputs = RunInputs::new(dir.path(), &selection, None, global, ssm)?;
         let (target, unit) = selection.cases[0];
         let shown = Path::new(".obelisk-k8s/build.gotmpl");
         let plan = parse_plan(output, shown, shown, &config.helm_repos, dir.path())?;
@@ -259,6 +315,87 @@ mod tests {
         format!(
             "{{ type: command, command: [sh, -c, \"printf 'kind: {kind}\\\\nseen: %s\\\\n' $(grep -c '{pattern}' || true)\"] }}"
         )
+    }
+
+    /// An inline images source declaring `name` at version `v1`.
+    fn image(name: &str) -> String {
+        format!(
+            "{{ type: inline, images: [{{ name: {name}, version: v1, dockerfile: {{ type: file, path: ./app/Dockerfile }} }}] }}"
+        )
+    }
+
+    #[test]
+    fn manifests_see_images_from_earlier_phases_not_their_own() {
+        let dir = repo(&[("app/Dockerfile", "FROM scratch\n")]);
+        let output = format!(
+            "build:\n  phases:\n    - name: one\n      images: [{}]\n      manifests: [{}]\n    - name: two\n      images: [{}]\n      manifests: [{}, {}]\n    - name: three\n      manifests: [{}]\n",
+            image("web"),
+            counts("One", "images:"),
+            image("worker"),
+            counts("TwoWeb", "ref: web:v1$"),
+            counts("TwoWorker", "worker"),
+            counts("Three", "ref: [a-z]*:v1$"),
+        );
+        // Cluster `c` is a local k3d one: the image is imported as is.
+        assert_eq!(
+            manifests(&dir, &output).unwrap(),
+            "---\n# Source: sh\nkind: One\nseen: 0\n---\n# Source: sh\nkind: TwoWeb\nseen: 1\n---\n# Source: sh\nkind: TwoWorker\nseen: 0\n---\n# Source: sh\nkind: Three\nseen: 2\n"
+        );
+    }
+
+    #[test]
+    fn images_no_manifests_phase_sees_dont_render() {
+        // In or after the last manifests phase: a failing images source never runs.
+        let dir = repo(&[]);
+        let output = format!(
+            "build:\n  phases:\n    - name: one\n      images: [{{ type: command, command: [\"false\"] }}]\n      manifests: [{}]\n    - name: two\n      images: [{{ type: command, command: [\"false\"] }}]\n",
+            counts("One", "images:")
+        );
+        assert_eq!(
+            manifests(&dir, &output).unwrap(),
+            "---\n# Source: sh\nkind: One\nseen: 0\n"
+        );
+    }
+
+    #[test]
+    fn refs_follow_the_clusters_destination() {
+        use crate::config::global::docker::{Docker, Push};
+        use crate::config::global::{K8s, Location};
+        let dir = repo(&[("app/Dockerfile", "FROM scratch\n")]);
+        let output = format!(
+            "build:\n  phases:\n    - name: one\n      images: [{}]\n    - name: two\n      manifests: [{}]\n",
+            image("web"),
+            counts("Two", "^      ref: reg.internal:5000/krrss/web:v1$")
+        );
+        let mut global = global();
+        global.clusters[0].docker = Some(Docker {
+            file: "clusters/c/docker.yaml".into(),
+            push: Push {
+                prefix: "reg.internal:5000/krrss".to_owned(),
+                credentials: None,
+            },
+            pull_auths: Vec::new(),
+        });
+        let (text, _) = case_on(&dir, &output, None, &global).unwrap();
+        assert_eq!(text, "---\n# Source: sh\nkind: Two\nseen: 1\n");
+
+        // A cluster with nowhere to push: no ref would mean the right image.
+        global.clusters[0].docker = None;
+        (global.clusters[0].k8s, global.clusters[0].location) = (K8s::Talos, Location::Remote);
+        assert_eq!(
+            case_on(&dir, &output, None, &global)
+                .unwrap_err()
+                .to_string(),
+            "unit `app` on target `prod` has images its manifests see (`obelisk.images`), but cluster `c` has nowhere to push images: add clusters/c/docker.yaml"
+        );
+
+        // A unit with no images there renders as before.
+        let plain = format!(
+            "build:\n  phases:\n    - name: one\n      manifests: [{}]\n",
+            counts("One", "images:")
+        );
+        let (text, _) = case_on(&dir, &plain, None, &global).unwrap();
+        assert_eq!(text, "---\n# Source: sh\nkind: One\nseen: 0\n");
     }
 
     #[test]
