@@ -173,6 +173,123 @@ enum GlobalCommand {
         #[command(subcommand)]
         command: ClusterCommand,
     },
+    /// A cluster's `docker.yaml`: where its images push, and the credentials to push and pull them
+    /// with (SSM refs, or plain text: it's mode 0600 when new, owner-only once it holds one)
+    Docker {
+        #[command(subcommand)]
+        command: DockerCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum DockerCommand {
+    /// Print a cluster's `docker.yaml` (passwords masked, unless just one SSM ref)
+    Show {
+        /// The cluster, by its name in the global config
+        #[arg(long, value_name = "NAME")]
+        cluster: String,
+    },
+    /// The push side: where images push, and with what credentials
+    Push {
+        #[command(subcommand)]
+        command: DockerPushCommand,
+    },
+    /// The pull side: per-host credentials, for `images pull-secret`
+    Pull {
+        #[command(subcommand)]
+        command: DockerPullCommand,
+    },
+    /// Delete a cluster's `docker.yaml`
+    Remove {
+        /// The cluster, by its name in the global config
+        #[arg(long, value_name = "NAME")]
+        cluster: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum DockerPushCommand {
+    /// Set the push prefix and/or credentials, creating the `docker.yaml` (which then needs
+    /// `--prefix`)
+    Set {
+        /// The cluster, by its name in the global config
+        #[arg(long, value_name = "NAME")]
+        cluster: String,
+        /// `<registry host>[/<path>]`: images push as `<prefix>/<name>:<version>`
+        #[arg(long)]
+        prefix: Option<String>,
+        /// The push username: an SSM ref (single-quote it: `'${{obelisk:aws-ssm:/…}}'`), or plain
+        /// text
+        #[arg(long)]
+        username: Option<String>,
+        /// The push password: an SSM ref (single-quoted), or plain text
+        #[arg(long, conflicts_with = "password_stdin")]
+        password: Option<String>,
+        /// Read the push password from stdin (keeps a plain-text one out of `ps` and your history)
+        #[arg(long)]
+        password_stdin: bool,
+    },
+    /// Drop the push credentials: pushes then use your own `docker login`
+    UnsetCredentials {
+        /// The cluster, by its name in the global config
+        #[arg(long, value_name = "NAME")]
+        cluster: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum DockerPullCommand {
+    /// Add pull credentials for a registry host
+    Add {
+        /// The cluster, by its name in the global config
+        #[arg(long, value_name = "NAME")]
+        cluster: String,
+        /// The registry host (and port)
+        #[arg(long)]
+        host: String,
+        /// The pull username: an SSM ref (single-quote it: `'${{obelisk:aws-ssm:/…}}'`), or plain
+        /// text
+        #[arg(long)]
+        username: String,
+        /// The pull password: an SSM ref (single-quoted), or plain text
+        #[arg(
+            long,
+            conflicts_with = "password_stdin",
+            required_unless_present = "password_stdin"
+        )]
+        password: Option<String>,
+        /// Read the pull password from stdin (keeps a plain-text one out of `ps` and your history)
+        #[arg(long)]
+        password_stdin: bool,
+    },
+    /// Change a host's pull username and/or password
+    #[command(group = clap::ArgGroup::new("what").args(["username", "password", "password_stdin"]).required(true).multiple(true))]
+    Set {
+        /// The cluster, by its name in the global config
+        #[arg(long, value_name = "NAME")]
+        cluster: String,
+        /// The registry host (and port)
+        #[arg(long)]
+        host: String,
+        /// The new pull username
+        #[arg(long)]
+        username: Option<String>,
+        /// The new pull password
+        #[arg(long, conflicts_with = "password_stdin")]
+        password: Option<String>,
+        /// Read the new pull password from stdin
+        #[arg(long)]
+        password_stdin: bool,
+    },
+    /// Remove a host's pull credentials
+    Remove {
+        /// The cluster, by its name in the global config
+        #[arg(long, value_name = "NAME")]
+        cluster: String,
+        /// The registry host (and port)
+        #[arg(long)]
+        host: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -473,29 +590,8 @@ fn main_impl() -> Result<ExitCode, ObeliskK8sError> {
     let cli = parse(std::env::args_os()).unwrap_or_else(|e| e.exit());
     let done = match cli.command {
         Command::Config {
-            command:
-                ConfigCommand::Global {
-                    command: GlobalCommand::Show,
-                },
-        } => commands::run_config_global_show(cli.global_root),
-        Command::Config {
-            command:
-                ConfigCommand::Global {
-                    command: GlobalCommand::Init,
-                },
-        } => commands::run_config_global_init(cli.global_root),
-        Command::Config {
-            command:
-                ConfigCommand::Global {
-                    command: GlobalCommand::Cluster { command },
-                },
-        } => commands::run_config_global_cluster(cli.global_root, command),
-        Command::Config {
-            command:
-                ConfigCommand::Global {
-                    command: GlobalCommand::Repo { command },
-                },
-        } => commands::run_config_global_repo(cli.global_root, command),
+            command: ConfigCommand::Global { command },
+        } => commands::run_config_global(cli.global_root, command),
         Command::Config {
             command:
                 ConfigCommand::Repo {
@@ -650,6 +746,57 @@ mod tests {
         // Read-only; and helm-diff has no `--force-conflicts`.
         assert!(parse(&["--yes"]).is_err());
         assert!(parse(&["--force-conflicts"]).is_err());
+    }
+
+    #[test]
+    fn docker_edits_take_their_credentials_whole() {
+        let parse = |args: &[&str]| {
+            let args = [BIN, "config", "global", "docker"].iter().chain(args);
+            parse(args.map(std::ffi::OsString::from))
+        };
+        assert!(parse(&["pull", "set", "--cluster", "c", "--host", "h"]).is_err());
+        assert!(
+            parse(&[
+                "pull",
+                "set",
+                "--cluster",
+                "c",
+                "--host",
+                "h",
+                "--password-stdin"
+            ])
+            .is_ok()
+        );
+        assert!(
+            parse(&[
+                "pull",
+                "add",
+                "--cluster",
+                "c",
+                "--host",
+                "h",
+                "--username",
+                "u"
+            ])
+            .is_err()
+        );
+        assert!(
+            parse(&[
+                "pull",
+                "add",
+                "--cluster",
+                "c",
+                "--host",
+                "h",
+                "--username",
+                "u",
+                "--password",
+                "p",
+                "--password-stdin"
+            ])
+            .is_err()
+        );
+        assert!(parse(&["push", "set", "--cluster", "c", "--prefix", "reg.io"]).is_ok());
     }
 
     #[test]

@@ -158,13 +158,6 @@ enum Credentials<'s> {
 /// The mask for a password that isn't just one SSM ref (some of it is in `docker.yaml` itself).
 const MASKED: &str = "<masked>";
 
-/// Whether `text` is exactly one `${{obelisk:…}}` ref, and nothing else.
-fn is_one_ref(text: &str) -> bool {
-    text.strip_prefix("${{obelisk:")
-        .and_then(|rest| rest.strip_suffix("}}"))
-        .is_some_and(|inside| !inside.contains("}}") && !inside.contains("${{"))
-}
-
 /// The Secret and the `default` `ServiceAccount` for `namespace`, as YAML, with `credentials`. The
 /// Secret's `.dockerconfigjson` is base64 in `data`, but shown (`Credentials::Shown`) as plain JSON
 /// in `stringData`, so the reader can see what's in it.
@@ -179,7 +172,7 @@ fn manifest(
         .map(|auth| {
             let password = &auth.credentials.password;
             let password = match credentials {
-                Credentials::Shown if !is_one_ref(password) => MASKED.to_owned(),
+                Credentials::Shown if !ssm::is_one_ref(password) => MASKED.to_owned(),
                 _ => password.clone(),
             };
             let value = serde_json::json!({
@@ -380,7 +373,7 @@ mod tests {
             ("$${{obelisk:lit}}hunter2", false),
             ("${{obelisk:aws-ssm:/a}}${{obelisk:aws-ssm:/b}}", false),
         ] {
-            assert_eq!(is_one_ref(password), as_is, "{password}");
+            assert_eq!(ssm::is_one_ref(password), as_is, "{password}");
         }
         let shown = manifest(&docker, "app-prod", Credentials::Shown).unwrap();
         assert!(

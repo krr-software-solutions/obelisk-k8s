@@ -15,8 +15,9 @@ use obelisk_k8s::ssm::Ssm;
 use obelisk_k8s::{ObeliskK8sError, cluster};
 
 use crate::{
-    ClusterCommand, EphemeralArgs, GlobalRepoCommand, ImagesCommand, ManagedClusterCommand,
-    TemplateArgs, TemplateCommand,
+    ClusterCommand, DockerCommand, DockerPullCommand, DockerPushCommand, EphemeralArgs,
+    GlobalCommand, GlobalRepoCommand, ImagesCommand, ManagedClusterCommand, TemplateArgs,
+    TemplateCommand,
 };
 
 fn cwd() -> Result<PathBuf, ObeliskK8sError> {
@@ -107,7 +108,137 @@ fn warn_one(warning: &str) {
     eprintln!("WARN - {warning}");
 }
 
-pub fn run_config_global_show(root: Option<PathBuf>) -> Result<(), ObeliskK8sError> {
+/// `config global …`.
+pub fn run_config_global(
+    root: Option<PathBuf>,
+    command: GlobalCommand,
+) -> Result<(), ObeliskK8sError> {
+    match command {
+        GlobalCommand::Show => run_config_global_show(root),
+        GlobalCommand::Init => run_config_global_init(root),
+        GlobalCommand::Repo { command } => run_config_global_repo(root, command),
+        GlobalCommand::Cluster { command } => run_config_global_cluster(root, command),
+        GlobalCommand::Docker { command } => run_config_global_docker(root, command),
+    }
+}
+
+/// `config global docker …`: a cluster's `docker.yaml`.
+fn run_config_global_docker(
+    root: Option<PathBuf>,
+    command: DockerCommand,
+) -> Result<(), ObeliskK8sError> {
+    use obelisk_k8s::config::global::edit::docker::{
+        self as docker_edit, AuthChange, NewCredentials, PushChange,
+    };
+    let (root, home) = global_root(root)?;
+    let home = home.as_deref();
+    let change = match command {
+        DockerCommand::Show { cluster } => {
+            let shown = docker_edit::show(&root, home, &cluster)?;
+            warn(&shown.warnings);
+            print!("{shown}");
+            return Ok(());
+        }
+        DockerCommand::Remove { cluster } => docker_edit::remove(&root, home, &cluster)?,
+        DockerCommand::Push {
+            command:
+                DockerPushCommand::Set {
+                    cluster,
+                    prefix,
+                    username,
+                    password,
+                    password_stdin,
+                },
+        } => {
+            let password = password_from(password, password_stdin)?;
+            let credentials = match (username, password) {
+                (Some(username), Some(password)) => Some(NewCredentials { username, password }),
+                (None, None) => None,
+                _ => {
+                    return Err(ObeliskK8sError::Usage(
+                        "give both `--username` and a password (`--password` or `--password-stdin`), or neither".to_owned(),
+                    ));
+                }
+            };
+            docker_edit::push_set(
+                &root,
+                home,
+                &cluster,
+                PushChange {
+                    prefix,
+                    credentials,
+                },
+            )?
+        }
+        DockerCommand::Push {
+            command: DockerPushCommand::UnsetCredentials { cluster },
+        } => docker_edit::push_unset_credentials(&root, home, &cluster)?,
+        DockerCommand::Pull {
+            command:
+                DockerPullCommand::Add {
+                    cluster,
+                    host,
+                    username,
+                    password,
+                    password_stdin,
+                },
+        } => {
+            let password = password_from(password, password_stdin)?.unwrap_or_default();
+            let credentials = NewCredentials { username, password };
+            docker_edit::pull_add(&root, home, &cluster, &host, credentials)?
+        }
+        DockerCommand::Pull {
+            command:
+                DockerPullCommand::Set {
+                    cluster,
+                    host,
+                    username,
+                    password,
+                    password_stdin,
+                },
+        } => {
+            let password = password_from(password, password_stdin)?;
+            let change = AuthChange { username, password };
+            docker_edit::pull_set(&root, home, &cluster, &host, change)?
+        }
+        DockerCommand::Pull {
+            command: DockerPullCommand::Remove { cluster, host },
+        } => docker_edit::pull_remove(&root, home, &cluster, &host)?,
+    };
+    print_change(&change);
+    Ok(())
+}
+
+/// `--password`, or (`--password-stdin`) stdin's first line.
+fn password_from(
+    password: Option<String>,
+    from_stdin: bool,
+) -> Result<Option<String>, ObeliskK8sError> {
+    if !from_stdin {
+        return Ok(password);
+    }
+    if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        return Err(ObeliskK8sError::Usage(
+            "`--password-stdin` reads the password from stdin: pipe it in".to_owned(),
+        ));
+    }
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .map_err(|source| ObeliskK8sError::Io {
+            path: "stdin".into(),
+            source,
+        })?;
+    let password = line.trim_end_matches(['\n', '\r']);
+    if password.is_empty() {
+        return Err(ObeliskK8sError::Usage(
+            "`--password-stdin`: no password on stdin".to_owned(),
+        ));
+    }
+    Ok(Some(password.to_owned()))
+}
+
+fn run_config_global_show(root: Option<PathBuf>) -> Result<(), ObeliskK8sError> {
     let (root, home) = global_root(root)?;
     let config = GlobalConfig::load(&root, home.as_deref())?;
     warn(&config.warnings);
@@ -120,13 +251,13 @@ fn print_change(change: &Change) {
     println!("{}", change.message);
 }
 
-pub fn run_config_global_init(root: Option<PathBuf>) -> Result<(), ObeliskK8sError> {
+fn run_config_global_init(root: Option<PathBuf>) -> Result<(), ObeliskK8sError> {
     let (root, home) = global_root(root)?;
     print_change(&global_edit::init(&root, home.as_deref())?);
     Ok(())
 }
 
-pub fn run_config_global_repo(
+fn run_config_global_repo(
     root: Option<PathBuf>,
     command: GlobalRepoCommand,
 ) -> Result<(), ObeliskK8sError> {
@@ -141,7 +272,7 @@ pub fn run_config_global_repo(
     Ok(())
 }
 
-pub fn run_config_global_cluster(
+fn run_config_global_cluster(
     root: Option<PathBuf>,
     command: ClusterCommand,
 ) -> Result<(), ObeliskK8sError> {

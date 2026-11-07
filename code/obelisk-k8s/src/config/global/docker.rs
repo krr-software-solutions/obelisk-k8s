@@ -153,6 +153,13 @@ fn credentials(
         (None, None) => Ok(None),
         (Some(username), Some(password)) => {
             for (key, value) in [("username", &username), ("password", &password)] {
+                if value.value.is_empty() {
+                    return Err(config_error(
+                        file,
+                        Some(value.at),
+                        format!("`{at}.{key}` is empty"),
+                    ));
+                }
                 ssm::check(
                     &Value::String(value.value.clone()),
                     &format!("{}, at `{at}.{key}`", file.display()),
@@ -174,7 +181,7 @@ fn credentials(
 /// A push prefix: `<host>[/<path>]`, no scheme, no tag. The host must look like a registry, as
 /// docker tells them: with a `.` or a `:`, or `localhost` (else docker would push to Docker Hub
 /// under that name).
-fn check_prefix(prefix: &str) -> Result<(), String> {
+pub(crate) fn check_prefix(prefix: &str) -> Result<(), String> {
     if prefix.contains("://") {
         return Err(format!(
             "`{prefix}` has a scheme: write just `<host>[/<path>]`"
@@ -222,7 +229,7 @@ fn is_path_segment(segment: &str) -> bool {
 }
 
 /// A registry host: `<name>[:<port>]`, no scheme or path; the port a number.
-fn check_host(host: &str) -> Result<(), String> {
+pub(crate) fn check_host(host: &str) -> Result<(), String> {
     if host.is_empty() {
         return Err("is empty".to_owned());
     }
@@ -355,6 +362,10 @@ mod tests {
             (
                 "docker:\n  push: { prefix: \"reg.io/a--\" }\n",
                 "path segment `a--` isn't a docker repository one",
+            ),
+            (
+                "docker:\n  push: { prefix: reg.io, username: u, password: \"\" }\n",
+                "`docker.push.password` is empty",
             ),
             (
                 "docker:\n  push: { prefix: docker.io/me }\n",

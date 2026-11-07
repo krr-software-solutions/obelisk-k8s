@@ -3,7 +3,10 @@
 //!
 //! The cluster commands only create or delete files. The repo commands edit `repos.yaml` in place,
 //! keeping its comments and formatting (creating it if it's missing). Every change is checked by
-//! loading the global config again, and undone if that fails.
+//! loading the global config again, and undone if that fails. A cluster's `docker.yaml`: see
+//! `docker`.
+
+pub mod docker;
 
 use std::path::{Path, PathBuf};
 
@@ -158,9 +161,14 @@ pub fn remove_cluster(
     if !others.is_empty() {
         others.sort();
         return Err(usage(format!(
-            "{} holds more than its cluster.yaml ({}): remove those first",
+            "{} holds more than its cluster.yaml ({}): remove those first{}",
             shown.display(),
-            others.join(", ")
+            others.join(", "),
+            if others.iter().any(|o| o == "docker.yaml") {
+                format!(" (`config global docker remove --cluster {name}` for its docker.yaml)")
+            } else {
+                String::new()
+            }
         )));
     }
     std::fs::remove_dir_all(&cluster.dir).map_err(io_error)?;

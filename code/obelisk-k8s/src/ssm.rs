@@ -268,6 +268,13 @@ pub(crate) fn in_manifests(
     Ok(out)
 }
 
+/// Whether `text` is exactly one `${{obelisk:…}}` ref, and nothing else: safe to show as written.
+pub(crate) fn is_one_ref(text: &str) -> bool {
+    text.strip_prefix(OPEN)
+        .and_then(|rest| rest.strip_suffix(CLOSE))
+        .is_some_and(|inside| !inside.contains(CLOSE) && !inside.contains("${{"))
+}
+
 /// Whether `text` may hold refs (or obelisk-local's, to refuse): worth parsing for them.
 pub(crate) fn has_refs(text: &str) -> bool {
     text.contains(OPEN) || text.contains(LEGACY)

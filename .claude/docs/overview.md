@@ -50,6 +50,15 @@ ip-allocator.
   ```
 
   A local k3d cluster without one gets its images with `k3d image import`.
+- `obelisk-k8s config global docker … --cluster <name>` edits it: `show` (passwords masked unless
+  just one SSM ref), `push set [--prefix …] [--username … --password …]` (creating the file, which
+  then needs `--prefix`), `push unset-credentials`, `pull add|set|remove --host …`, and `remove`.
+  Credentials are taken as given (SSM refs, or plain text; single-quote a ref in the shell;
+  `--password-stdin` keeps a plain-text one out of `ps` and history). Each change rewrites the file
+  whole (comments in it are lost; a command that changes nothing doesn't write; through a symlink,
+  the file it points to; mode 0600 when new, else kept, but tightened to the owner's when it holds a
+  plain-text password), then loads the global config again, and puts the old file back if that
+  fails. A `docker.yaml` that won't load can still be `remove`d.
 - `obelisk-k8s images pull-secret --cluster <name> --namespace <ns> [--yes] [--force-conflicts] [--dry-run]`:
   obelisk-local's `docker add-pull-config`. In namespace `<ns>` on cluster `<name>` (from the global
   config, through its kubectl context) it server-side applies (field manager `obelisk-k8s`, outside

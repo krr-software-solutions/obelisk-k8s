@@ -47,7 +47,8 @@ defines the CLI (the clap types, `--help` headings, completions) and dispatches 
   ServiceAccount, server-side applied in a namespace on a cluster.
 - `config/push.rs`: `images build`'s delivery: each image to each target's cluster (registry push
   or k3d import).
-- `config/global/docker.rs`: a cluster's `docker.yaml`.
+- `config/global/docker.rs`: a cluster's `docker.yaml`; `config/global/edit/docker.rs`: editing it
+  (`config global docker …`).
 - `config/apply.rs`: `apply`: rendered manifests installed as Helm releases on each target's cluster.
 - `config/diff.rs`: `diff`: what `apply` would change (planned as `apply` plans), with helm-diff.
 - `config/ephemeral.rs`: an ephemeral target's copy (`--ephemeral-name` and its values), and checking
