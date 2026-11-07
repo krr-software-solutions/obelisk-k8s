@@ -7,6 +7,7 @@ use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 use obelisk_k8s::ObeliskK8sError;
 use obelisk_k8s::config::apply::Takeover;
+use obelisk_k8s::config::diff::DiffOptions;
 use obelisk_k8s::config::global::edit::NewCluster;
 use obelisk_k8s::config::global::{GLOBAL_ROOT_ENV, K8s, Location, Obeliskd};
 
@@ -74,6 +75,26 @@ enum Command {
         /// keeps); a one-off: it fights what the cluster manages, like an HPA's replicas
         #[arg(long)]
         force_conflicts: bool,
+    },
+    /// Show what `apply` would change, per unit on each target, against what's live on its
+    /// cluster (with the helm-diff plugin); changes nothing
+    Diff {
+        /// The repo, by its name in the global `repos.yaml` [default: the one in the current directory]
+        #[arg(long, help_heading = SPECIAL, value_name = "NAME")]
+        repo: Option<String>,
+        #[command(flatten)]
+        args: TemplateArgs,
+        /// Diff as `apply --take-ownership` would install: resources already in the cluster that
+        /// aren't the release's show as adopted
+        #[arg(long)]
+        take_ownership: bool,
+        /// Print resolved SSM values, and Secrets' data, in plaintext, not masked (errors too). Mind
+        /// where the output goes (CI logs, scrollback)
+        #[arg(long)]
+        reveal: bool,
+        /// Exit with 2 if anything would change (0 if nothing would; errors exit with 1)
+        #[arg(long)]
+        exit_code: bool,
     },
     /// Bring managed clusters up, down, and away (local k3d only, so far)
     Cluster {
@@ -395,9 +416,9 @@ where
     Ok(cli)
 }
 
-fn main_impl() -> Result<(), ObeliskK8sError> {
+fn main_impl() -> Result<ExitCode, ObeliskK8sError> {
     let cli = parse(std::env::args_os()).unwrap_or_else(|e| e.exit());
-    match cli.command {
+    let done = match cli.command {
         Command::Config {
             command:
                 ConfigCommand::Global {
@@ -469,17 +490,37 @@ fn main_impl() -> Result<(), ObeliskK8sError> {
                 force_conflicts,
             },
         ),
+        // The one command whose exit code says more than whether it failed.
+        Command::Diff {
+            repo,
+            args,
+            take_ownership,
+            reveal,
+            exit_code,
+        } => {
+            return commands::run_diff(
+                repo.as_deref(),
+                cli.global_root,
+                &args,
+                DiffOptions {
+                    take_ownership,
+                    show_secrets: reveal,
+                },
+                exit_code,
+            );
+        }
         Command::Cluster { command } => commands::run_cluster(cli.global_root, &command),
         Command::Completions { shell } => {
             run_completions(shell);
             Ok(())
         }
-    }
+    };
+    done.map(|()| ExitCode::SUCCESS)
 }
 
 fn main() -> ExitCode {
     match main_impl() {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => code,
         Err(error) => {
             eprintln!("ERROR - {error}");
             ExitCode::FAILURE
@@ -531,6 +572,30 @@ mod tests {
         // Its values are `values` now: they're after every phase.
         assert!(parse("generated-values").is_err());
         assert!(super::parse([BIN, "template", "--resolve", "build"]).is_ok());
+    }
+
+    #[test]
+    fn diff_takes_applys_selection_but_never_needs_yes() {
+        let parse = |args: &[&str]| super::parse([BIN, "diff"].iter().chain(args)).map(|_| ());
+        assert!(parse(&[]).is_ok());
+        assert!(
+            parse(&[
+                "-t",
+                "prod",
+                "-u",
+                "app",
+                "--take-ownership",
+                "--reveal",
+                "--exit-code",
+                "--repo",
+                "r",
+            ])
+            .is_ok()
+        );
+        assert!(parse(&["--ephemeral-name", "a", "--ephemeral-values", "{}"]).is_ok());
+        // Read-only; and helm-diff has no `--force-conflicts`.
+        assert!(parse(&["--yes"]).is_err());
+        assert!(parse(&["--force-conflicts"]).is_err());
     }
 
     #[test]

@@ -113,7 +113,7 @@ ip-allocator.
   them) and again over every phase's values (so they always win), under the same rules as a values
   source (so they can set `obelisk.release.version` too, and it shows up as `--ephemeral-values` or
   the path). The build file doesn't see them (its `.Values` is just the `obelisk:` block).
-  diff/apply will take the same flags.
+  `apply` and `diff` take the same flags.
 - `obelisk.release.version`: after every phase's values, exactly one distinct version is required for
   each unit on each target, from any of: `release.version` in its target or unit (interpolated), or
   `obelisk.release.version` in a values source (or the ephemeral values). A top-level `version` in a
@@ -149,6 +149,25 @@ ip-allocator.
   `--force-conflicts` forces server-side apply (which the release then keeps) and takes fields
   another field manager owns (left on, it fights what the cluster manages). A refusal either would
   get past (without it already on) says which.
+- `obelisk-k8s diff [-t …]… [-u …]… [--ephemeral-*] [--take-ownership] [--reveal] [--exit-code]`:
+  what `apply` would change, without changing anything. Planned exactly as `apply` plans (the same
+  checks and errors, charts rendered for the cluster's capabilities), remote clusters included
+  without `--yes` (it only reads). Each case with manifests goes into the same throwaway chart, and
+  the [helm-diff](https://github.com/databus23/helm-diff) plugin diffs it against what's live on its
+  context (`helm diff upgrade --allow-unreleased --three-way-merge --normalize-manifests`; a release
+  not installed yet shows as all new). Needs the plugin (`helm plugin install
+  https://github.com/databus23/helm-diff`); without it, it fails before rendering anything, saying
+  so. Prints each case under a magenta `[ target=…, unit=…, release=…, namespace=…, context=… ]`
+  header, then helm-diff's output (colored on a terminal), or `no changes` (`no manifests: nothing
+  to diff` for a unit without manifests sources). `--take-ownership` diffs as `apply
+  --take-ownership` would install (without it, a resource that isn't the release's is the same
+  refusal `apply` gets, with the same hint); there's no `--force-conflicts` (helm-diff has none,
+  and a forced server-side dry run without it fails on the very conflicts it would take).
+  `--exit-code` exits 2 if anything would change (helm-diff printed a diff), as helm-diff and
+  terraform do: an error is `ERROR - …` and exit 1, so CI can tell drift from failure. SSM refs always resolve, and resolved values print masked
+  (errors too), with helm-diff masking Secrets' data, unless `--reveal` (both in plaintext, with a
+  warning on stderr). Masking covers the values resolved this run: an older value still in the
+  cluster can show in plaintext where it isn't in a Secret.
 - **Release:** `obelisk.release.{name, namespace}` exists only to be `.Release.{Name, Namespace}` (and
   the Helm release `apply` will install), with `obelisk.release.version` (above) as its version. Like
   the version, each must have exactly one distinct value per unit on a target, from
@@ -239,11 +258,11 @@ build file ─▶ build plan ─▶ phase 1 … phase n ─▶ values (+ agreed 
   with refs needs its `sha256`); never in the build file's output, nor in what `gotmpl`, `helm` or
   `command` manifests sources print. A `file` / `url` manifests source with refs is re-written from its parsed form, so its
   comments go and its plain scalars are re-spelled as in values (`08` → `8.0`): quote them. `apply`
-  always resolves; `template` only with `--resolve` (else refs are only checked), and then prints
-  every resolved value masked as `<aws-ssm:KEY>` (in errors too; every occurrence, so a short value
-  like `5432` masks unrelated text too), unless `--reveal` (which needs `--resolve`) asks for
-  plaintext: the one deliberate exception to never printing a resolved value, with a warning on
-  stderr. Credentials are read the first time a ref is found:
+  and `diff` always resolve; `template` only with `--resolve` (else refs are only checked), and then
+  prints every resolved value masked as `<aws-ssm:KEY>` (in errors too; every occurrence, so a short
+  value like `5432` masks unrelated text too), as `diff` does, unless `--reveal` (which needs
+  `--resolve`) asks for plaintext: the one deliberate exception to never printing a resolved value
+  (with `diff --reveal`), with a warning on stderr. Credentials are read the first time a ref is found:
   `AWS_SSM_ACCESS_KEY`, `AWS_SSM_SECRET_KEY` and `AWS_SSM_REGION` if all are set (the GitLab CI
   variables), else the named profile `AWS_SSM_PROFILE` (`~/.aws`; SSO, assume-role and
   `credential_process` work; its region unless `AWS_SSM_REGION` is set), else it's an error. A
@@ -262,6 +281,12 @@ build file ─▶ build plan ─▶ phase 1 … phase n ─▶ values (+ agreed 
 | v1.3 | a whole-cluster spec across repos/apps |
 
 Design the layout format on paper against v1.3, but build only the current phase.
+
+Wanted, deferred for now:
+- [ ] SSM refs written as-is in `.gotmpl` files: today Helm reads the `{{` in `${{obelisk:aws-ssm:…}}`
+  as an action, so a ref there must be escaped (`{{ "${{obelisk:aws-ssm:/x}}" | quote }}`), or kept in
+  a plain `type: file` values file. The idea: rewrite each `${{obelisk:…}}` into that escaped form
+  before Helm renders any build file or gotmpl source (`$${{` stays a literal).
 
 ## Rules
 

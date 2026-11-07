@@ -9,6 +9,7 @@ use crate::yaml::Spanned;
 
 pub mod apply;
 pub mod build;
+pub mod diff;
 pub mod ephemeral;
 pub mod global;
 pub mod manifests;

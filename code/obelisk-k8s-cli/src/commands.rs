@@ -2,8 +2,10 @@
 //! dispatches here.
 
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 
 use obelisk_k8s::config::apply::Takeover;
+use obelisk_k8s::config::diff::DiffOptions;
 use obelisk_k8s::config::ephemeral::{Ephemeral, EphemeralValues};
 use obelisk_k8s::config::global::edit::{self as global_edit, Change};
 use obelisk_k8s::config::global::{GLOBAL_ROOT_ENV, GlobalConfig, default_global_root, tilde};
@@ -257,6 +259,61 @@ fn run_apply_with(
     )?;
     print!("{}", ssm.redact(&report.to_string()));
     Ok(())
+}
+
+/// `options.show_secrets` is `--reveal`: SSM values print in plaintext too. With `exit_code`
+/// (`--exit-code`), exits with 1 if anything would change.
+pub fn run_diff(
+    repo: Option<&str>,
+    global_root_arg: Option<PathBuf>,
+    args: &TemplateArgs,
+    options: DiffOptions,
+    exit_code: bool,
+) -> Result<ExitCode, ObeliskK8sError> {
+    let ssm = Ssm::from_env();
+    let reveal = options.show_secrets;
+    if reveal {
+        eprintln!(
+            "WARN - --reveal: resolved SSM values and Secrets' data are printed in plaintext"
+        );
+    }
+    let (text, changed) = run_diff_with(repo, global_root_arg, args, options, &ssm)
+        .map_err(|e| if reveal { e } else { ssm.redact_error(e) })?;
+    let text = if reveal { text } else { ssm.redact(&text) };
+    // anstream drops the colors when stdout isn't a terminal, or with NO_COLOR set.
+    anstream::print!("{text}");
+    Ok(if exit_code && changed {
+        // Not 1: an error exits with that, and CI must tell drift from failure.
+        ExitCode::from(2)
+    } else {
+        ExitCode::SUCCESS
+    })
+}
+
+/// The diff report, as text, and whether anything would change.
+fn run_diff_with(
+    repo: Option<&str>,
+    global_root_arg: Option<PathBuf>,
+    args: &TemplateArgs,
+    options: DiffOptions,
+    ssm: &Ssm,
+) -> Result<(String, bool), ObeliskK8sError> {
+    let (global, repo_root, shown_root) = global_and_repo(repo, global_root_arg)?;
+    let config = load_repo_config(&repo_root)?;
+    let selection = config.select(&args.targets, &args.units)?;
+    let ephemeral = ephemeral(&args.ephemeral)?;
+    let report = config.diff(
+        &repo_root,
+        &selection,
+        shown_root.as_deref(),
+        ephemeral.as_ref(),
+        &global,
+        options,
+        ssm,
+        warn_one,
+        |step| eprintln!("{step}"),
+    )?;
+    Ok((report.to_string(), report.changed()))
 }
 
 pub fn run_template(

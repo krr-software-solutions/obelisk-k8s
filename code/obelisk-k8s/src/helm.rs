@@ -432,11 +432,7 @@ pub(crate) fn install_manifests(
     context: &str,
     takeover: Takeover,
 ) -> Result<(), ObeliskK8sError> {
-    let chart = tempfile::tempdir().map_err(|source| ObeliskK8sError::Io {
-        path: format!("<chart for {release}>").into(),
-        source,
-    })?;
-    write_manifests_chart(chart.path(), release, version, manifests)?;
+    let chart = manifests_chart(release, version, manifests)?;
     upgrade_install(&Install {
         release,
         chart: Chart::Dir(chart.path()),
@@ -445,6 +441,24 @@ pub(crate) fn install_manifests(
         context,
         takeover,
     })
+}
+
+/// A throwaway chart ([`write_manifests_chart`]) in a temporary directory, deleted when it's dropped.
+///
+/// # Errors
+///
+/// As [`write_manifests_chart`]; [`ObeliskK8sError::Io`] if the directory can't be made.
+pub(crate) fn manifests_chart(
+    name: &str,
+    version: &str,
+    manifests: &str,
+) -> Result<tempfile::TempDir, ObeliskK8sError> {
+    let chart = tempfile::tempdir().map_err(|source| ObeliskK8sError::Io {
+        path: format!("<chart for {name}>").into(),
+        source,
+    })?;
+    write_manifests_chart(chart.path(), name, version, manifests)?;
+    Ok(chart)
 }
 
 /// Writes a chart that installs `manifests` (plain YAML) as-is, into `dir`: shipped as a file and
@@ -476,19 +490,144 @@ pub(crate) fn write_manifests_chart(
 
 const MANIFESTS_TEMPLATE: &str = "{{ .Files.Get \"manifests.yaml\" }}\n";
 
+/// What `diff` says to do without the helm-diff plugin.
+pub(crate) const DIFF_PLUGIN_MISSING: &str = "`obelisk-k8s diff` needs the helm-diff plugin: `helm plugin install https://github.com/databus23/helm-diff`";
+
+/// A release to diff against what's installed, with the helm-diff plugin (`helm diff upgrade`).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Diff<'a> {
+    pub(crate) release: &'a str,
+    /// A chart directory on disk (e.g. [`write_manifests_chart`]'s).
+    pub(crate) chart: &'a Path,
+    pub(crate) namespace: &'a str,
+    /// The kubectl context the release is on (never the current one by default).
+    pub(crate) context: &'a str,
+    pub(crate) options: DiffOptions,
+}
+
+/// How to diff, beyond what `apply` would install.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DiffOptions {
+    /// As `apply --take-ownership` would: resources already in the cluster that aren't the
+    /// release's diff as adopted, not refused.
+    pub take_ownership: bool,
+    /// Print Secrets' data as it is (helm-diff masks it otherwise).
+    pub show_secrets: bool,
+}
+
+/// Checks the helm-diff plugin is installed (`helm diff version`).
+///
+/// # Errors
+///
+/// [`ObeliskK8sError::Helm`] if `helm` can't be run, the plugin isn't there (saying how to install
+/// it), or it fails otherwise (saying what it said).
+pub(crate) fn check_diff_plugin() -> Result<(), ObeliskK8sError> {
+    let output = run(&["diff", "version"])?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Err(ObeliskK8sError::Helm(if diff_plugin_missing(&stderr) {
+        DIFF_PLUGIN_MISSING.to_owned()
+    } else {
+        format!(
+            "the helm-diff plugin doesn't run (`helm diff version`): {}",
+            helm_message(&stderr)
+        )
+    }))
+}
+
+/// `helm diff upgrade`s `diff`: what `helm upgrade --install` of it would change, computed against
+/// what's live in the cluster (a three-way merge), without changing anything. Returns the diff as
+/// helm-diff printed it: empty when nothing would change.
+///
+/// # Errors
+///
+/// [`ObeliskK8sError::Helm`] if `helm` can't be run, the plugin isn't there, or it fails.
+pub(crate) fn diff_upgrade(diff: &Diff<'_>) -> Result<String, ObeliskK8sError> {
+    let output = Command::new("helm")
+        .args(diff_args(diff))
+        // Captured, so helm-diff wouldn't color it; the CLI drops colors where they don't belong.
+        // (Not `--color`: Helm 4 takes that as its own, with a value.)
+        .env("HELM_DIFF_COLOR", "true")
+        .output()
+        .map_err(|error| {
+            ObeliskK8sError::Helm(format!("can't run `helm` (is it installed?): {error}"))
+        })?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if diff_plugin_missing(&stderr) {
+        return Err(ObeliskK8sError::Helm(DIFF_PLUGIN_MISSING.to_owned()));
+    }
+    let text = String::from_utf8(output.stdout).map_err(|_| {
+        ObeliskK8sError::Helm(format!(
+            "diffing `{}` on `{}`: helm printed something that isn't UTF-8",
+            diff.release, diff.context
+        ))
+    })?;
+    // Not `--detailed-exitcode`: whether it printed a diff says as much, and its 2 for changes is
+    // also what a Go panic exits with.
+    if !output.status.success() {
+        return Err(ObeliskK8sError::Helm(format!(
+            "diffing `{}` on `{}` failed: {}",
+            diff.release,
+            diff.context,
+            helm_message(&stderr)
+        )));
+    }
+    Ok(text)
+}
+
+/// Server-side apply isn't forced, unlike `apply --force-conflicts`: helm-diff has no
+/// `--force-conflicts`, and a forced server-side dry run without it would fail on the very conflicts
+/// `apply` would take.
+fn diff_args(diff: &Diff<'_>) -> Vec<String> {
+    let chart = diff.chart.display().to_string();
+    let mut args = vec![
+        "diff",
+        "upgrade",
+        diff.release,
+        &chart,
+        "--namespace",
+        diff.namespace,
+        "--kube-context",
+        diff.context,
+        "--allow-unreleased",
+        "--three-way-merge",
+        "--normalize-manifests",
+    ];
+    let options = diff.options;
+    if options.take_ownership {
+        args.push("--take-ownership");
+    }
+    if options.show_secrets {
+        args.push("--show-secrets");
+    }
+    args.into_iter().map(str::to_owned).collect()
+}
+
+/// Whether Helm's `stderr` says it has no `diff` command (the helm-diff plugin isn't installed).
+fn diff_plugin_missing(stderr: &str) -> bool {
+    stderr.contains("unknown command \"diff\"")
+}
+
 fn run(args: &[&str]) -> Result<std::process::Output, ObeliskK8sError> {
     Command::new("helm").args(args).output().map_err(|error| {
         ObeliskK8sError::Helm(format!("can't run `helm` (is it installed?): {error}"))
     })
 }
 
-/// What Helm said, without its own framing: an `Error: ` prefix, and a hint about `--debug`.
+/// What Helm said, without its own framing: an `Error: ` prefix, a hint about `--debug`, and the
+/// line it adds when a plugin (helm-diff) fails.
 fn helm_message(stderr: &str) -> String {
     stderr
         .trim()
         .trim_start_matches("Error: ")
         .lines()
-        .filter(|l| !l.starts_with("Use --debug flag"))
+        .filter(|l| {
+            let plugin_failed =
+                l.starts_with("Error: plugin \"") && l.ends_with("\" exited with error");
+            !l.starts_with("Use --debug flag") && !plugin_failed
+        })
         .collect::<Vec<_>>()
         .join("\n")
         .trim()
@@ -607,6 +746,51 @@ mod tests {
     }
 
     #[test]
+    fn diffs_against_the_live_cluster_on_the_given_context() {
+        let diff = |options| {
+            diff_args(&Diff {
+                release: "r",
+                chart: Path::new("/tmp/chart"),
+                namespace: "ns",
+                context: "admin@c",
+                options,
+            })
+            .join(" ")
+        };
+        let base = "diff upgrade r /tmp/chart --namespace ns --kube-context admin@c \
+                    --allow-unreleased --three-way-merge --normalize-manifests";
+        assert_eq!(diff(DiffOptions::default()), base);
+        let tail = |options| diff(options).strip_prefix(base).unwrap().to_owned();
+        let options = |take_ownership, show_secrets| DiffOptions {
+            take_ownership,
+            show_secrets,
+        };
+        assert_eq!(tail(options(true, false)), " --take-ownership");
+        assert_eq!(tail(options(false, true)), " --show-secrets");
+        assert_eq!(
+            tail(options(true, true)),
+            " --take-ownership --show-secrets"
+        );
+    }
+
+    #[test]
+    fn knows_when_the_diff_plugin_is_missing() {
+        assert!(diff_plugin_missing(
+            "Error: unknown command \"diff\" for \"helm\"\nRun 'helm --help' for usage.\n"
+        ));
+        assert!(!diff_plugin_missing(
+            "Error: identified at least one change, exiting with non-zero exit code\n"
+        ));
+        assert!(!diff_plugin_missing(
+            "Error: unknown command \"nope\" for \"helm\"\n"
+        ));
+        assert!(
+            DIFF_PLUGIN_MISSING
+                .ends_with("`helm plugin install https://github.com/databus23/helm-diff`")
+        );
+    }
+
+    #[test]
     fn templates_a_chart_for_the_clusters_capabilities() {
         let chart = crate::config::build::HelmChart {
             chart: "metallb".to_owned(),
@@ -645,6 +829,10 @@ mod tests {
     fn strips_helms_framing() {
         assert_eq!(
             helm_message("Error: boom\nUse --debug flag to render out invalid YAML\n"),
+            "boom"
+        );
+        assert_eq!(
+            helm_message("Error: boom\n\nError: plugin \"diff\" exited with error\n"),
             "boom"
         );
     }

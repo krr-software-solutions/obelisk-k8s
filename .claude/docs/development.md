@@ -17,6 +17,8 @@ cargo test --workspace --locked
 The tests that render Go templates run `helm` (so does rendering any build file), so they need it on
 the `PATH`; without it they fail unless `OBELISK_TEST_SKIP_HELM=1` is set. Most phase and manifests
 tests skip the build file (they parse a plan from its output) so they still run without `helm`.
+No test needs a cluster or the helm-diff plugin (`diff` does: `helm plugin install
+https://github.com/databus23/helm-diff`).
 
 `--locked` matches what CI will run: if `Cargo.lock` needs to change, commit the change.
 

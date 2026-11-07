@@ -16,8 +16,9 @@
 # ~/.local/share/zsh/site-functions (which zsh only reads if it's on your fpath: see the note).
 #
 # Linux (x86_64, aarch64; static, so any distro) and macOS (x86_64, arm64). It runs `helm`,
-# `kubectl` and (for local clusters) `k3d` and `docker`, which it doesn't install. To uninstall,
-# delete the binary and the three completion files.
+# `kubectl`, the helm-diff plugin (for `diff`: `helm plugin install
+# https://github.com/databus23/helm-diff`) and (for local clusters) `k3d` and `docker`, which it
+# doesn't install. To uninstall, delete the binary and the three completion files.
 #
 # Everything is inside main(), called on the last line, so a partial download runs nothing.
 set -eu

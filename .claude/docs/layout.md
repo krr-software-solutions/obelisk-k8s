@@ -42,6 +42,7 @@ defines the CLI (the clap types, `--help` headings, completions) and dispatches 
 - `config/manifests.rs`: the rendered resources (`template manifests`): each phase's manifests
   sources, rendered with the values before it.
 - `config/apply.rs`: `apply`: rendered manifests installed as Helm releases on each target's cluster.
+- `config/diff.rs`: `diff`: what `apply` would change (planned as `apply` plans), with helm-diff.
 - `config/ephemeral.rs`: an ephemeral target's copy (`--ephemeral-name` and its values), and checking
   a selection needs one exactly when it has an ephemeral target.
 - `config/run.rs`: `RunInputs`, what every case in a run shares: the git facts, the ephemeral copy,
@@ -52,8 +53,9 @@ defines the CLI (the clap types, `--help` headings, completions) and dispatches 
 - `obeliskd.rs`: asking `obeliskd` for the docker subnet a cluster runs on, and claiming /
   releasing the base's ips and hostnames.
 - `git.rs`: the `obelisk.git` facts (sha, tag, dirt), read with `git`.
-- `helm.rs`: running Helm: `helm template` on a throwaway chart (for Go templates), and
-  `helm upgrade --install` (of charts, and of rendered manifests through a throwaway chart).
+- `helm.rs`: running Helm: `helm template` on a throwaway chart (for Go templates),
+  `helm upgrade --install` (of charts, and of rendered manifests through a throwaway chart), and
+  helm-diff's `helm diff upgrade` (of that same throwaway chart).
 - `config/paths.rs`: which (target, unit) cases a command covers, and the build file each renders.
   Behind `config repo paths`.
 

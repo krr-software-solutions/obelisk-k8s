@@ -70,11 +70,11 @@ impl fmt::Display for ApplyReport<'_> {
     }
 }
 
-/// One case, ready to install.
+/// One case, ready to install (or diff).
 #[derive(Debug)]
-struct Planned<'a> {
-    case: ManifestsCase<'a>,
-    context: String,
+pub(crate) struct Planned<'a> {
+    pub(crate) case: ManifestsCase<'a>,
+    pub(crate) context: String,
 }
 
 impl RepoConfig {
@@ -133,10 +133,11 @@ impl RepoConfig {
         Ok(ApplyReport { applied })
     }
 
-    /// Every case in `selection`, rendered and checked, with the context to install it on. `warn`
-    /// hears each build plan's warnings, once each.
+    /// Every case in `selection`, rendered and checked, with the context to install it on (shared
+    /// with `diff`, which shows what installing it would change). `warn` hears each build plan's
+    /// warnings, once each.
     #[allow(clippy::too_many_arguments)]
-    fn plan<'a>(
+    pub(crate) fn plan<'a>(
         &'a self,
         repo_root: &Path,
         selection: &Selection<'a>,
@@ -259,7 +260,7 @@ fn check_unique(
 }
 
 /// Points a refusal `apply`'s [`Takeover`] flags would get past at the flag, unless it's already on.
-fn takeover_hint(takeover: Takeover, error: ObeliskK8sError) -> ObeliskK8sError {
+pub(crate) fn takeover_hint(takeover: Takeover, error: ObeliskK8sError) -> ObeliskK8sError {
     match error {
         ObeliskK8sError::Helm(message) => {
             let hint = if !takeover.take_ownership && message.contains("invalid ownership metadata")

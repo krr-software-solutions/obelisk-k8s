@@ -2,7 +2,7 @@
 
 Deploy tooling for Kubernetes, for real prod/dev clusters and local [k3d](https://k3d.io) ones alike.
 
-> **Status:** early. `template`, `apply` and local k3d `cluster up` work; see `.claude/docs/overview.md`.
+> **Status:** early. `template`, `apply`, `diff` and local k3d `cluster up` work; see `.claude/docs/overview.md`.
 
 ## Installing
 
@@ -17,7 +17,9 @@ completions for each of bash, zsh and fish you have (zsh needs `~/.local/share/z
 on its `fpath`; the installer says so). Set
 `OBELISK_K8S_VERSION` for another version, `OBELISK_K8S_INSTALL_DIR` for another place. Or take an
 archive from the [releases](https://github.com/krr-software-solutions/obelisk-k8s/releases). It runs
-`helm`, `kubectl`, and for local clusters `k3d` and `docker`, which it doesn't install.
+`helm`, `kubectl`, and for local clusters `k3d` and `docker`, which it doesn't install. `diff` also
+needs Helm's [helm-diff](https://github.com/databus23/helm-diff) plugin:
+`helm plugin install https://github.com/databus23/helm-diff`.
 
 ## The idea
 
@@ -36,21 +38,22 @@ build file → build plan → phases (values, then manifests) → k8s resources 
   commands. Every unit is installed as one Helm release (`helm upgrade --install`).
 - **obelisk-k8s:** orders the units (CRDs before the resources that use them, across namespaces),
   waits for readiness, and resolves SSM refs before values reach Helm. It never prints resolved secrets
-  (unless asked to, with `template --resolve --reveal`).
+  (unless asked to, with `template --resolve --reveal` or `diff --reveal`).
 
 IP allocation and DNS for local clusters come from
 [obeliskd](https://github.com/krr-software-solutions/obeliskd).
 
 ## Roadmap
 
-- **Done:** `template` (build plan, values, manifests), `apply`, ephemeral targets, and local
+- **Done:** `template` (build plan, values, manifests), `apply`, `diff` (what `apply` would
+  change, via helm-diff), ephemeral targets, and local
   k3d clusters on obeliskd (`cluster up/down/destroy/status`, with MetalLB and a gateway).
 - **Also done:** build files and phases, with values and manifests sources of every type: inline
   values, Go templates, raw files, URLs, upstream Helm charts, and commands.
 - **Also done:** adopting existing resources (`apply --take-ownership`), and SSM refs
   (`${{obelisk:aws-ssm:<key>}}`, credentials from `AWS_SSM_ACCESS_KEY` / `AWS_SSM_SECRET_KEY` /
   `AWS_SSM_REGION`, or a profile named by `AWS_SSM_PROFILE`).
-- **Next:** `diff`, images built in a phase, then up/down hooks (setup,
+- **Next:** images built in a phase, then up/down hooks (setup,
   database/topic creation, seeding test data) and blueprints: a spec that pulls apps from several
   repos onto a managed cluster.
 
