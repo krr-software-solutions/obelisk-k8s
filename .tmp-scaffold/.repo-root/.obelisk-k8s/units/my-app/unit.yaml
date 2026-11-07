@@ -1,5 +1,4 @@
 
 unit:
-  name: "code-app" # missing/null defaults from file name
-  configPaths: [] # missing defaults to `[]`, appends to other `configPaths`
   targets: null # missing/null defaults to all targets, otherwise a `String[]` filtering to only those targets
+  build: "${{obelisk:path:unit}}/build.yaml.gotmpl"

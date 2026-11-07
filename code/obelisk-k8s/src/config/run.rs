@@ -7,7 +7,7 @@ use serde_json::Value;
 use crate::config::ephemeral::{Ephemeral, check_selection};
 use crate::config::global::{Cluster, GlobalConfig, normalize};
 use crate::config::paths::Selection;
-use crate::config::repo::Target;
+use crate::config::repo::{REPO_CONFIG_DIR, Target};
 use crate::ssm::Ssm;
 use crate::{ObeliskK8sError, git};
 
@@ -16,7 +16,8 @@ use crate::{ObeliskK8sError, git};
 #[derive(Debug)]
 pub(crate) struct RunInputs<'a> {
     pub(crate) git: Value,
-    /// `obelisk.paths`: the global root and the repo root, absolute.
+    /// `obelisk.paths`: `{ repo: { root, obelisk }, global: { obelisk } }`, the repo root, its
+    /// `.obelisk-k8s/`, and the global config's directory; absolute and normalized.
     pub(crate) paths: Value,
     pub(crate) ephemeral: Option<&'a Ephemeral>,
     /// `None`: refs are only checked, and left as written.
@@ -46,11 +47,15 @@ impl<'a> RunInputs<'a> {
                 path: repo_root.to_owned(),
                 source,
             })?;
+        let repo_root_absolute = normalize(&repo_root_absolute);
         let inputs = Self {
             git: git::facts(repo_root),
             paths: serde_json::json!({
-                "globalRoot": utf8(&global.dir)?,
-                "repoRoot": utf8(&normalize(&repo_root_absolute))?,
+                "repo": {
+                    "root": utf8(&repo_root_absolute)?,
+                    "obelisk": utf8(&repo_root_absolute.join(REPO_CONFIG_DIR))?,
+                },
+                "global": { "obelisk": utf8(&global.dir)? },
             }),
             ephemeral,
             ssm,
@@ -120,12 +125,15 @@ mod tests {
             None,
         )
         .unwrap();
-        let cwd = std::env::current_dir().unwrap();
+        let repo = std::env::current_dir().unwrap().join("some/repo");
         assert_eq!(
             inputs.paths,
             serde_json::json!({
-                "globalRoot": "/home/me/.obelisk-k8s",
-                "repoRoot": cwd.join("some/repo").to_str().unwrap(),
+                "repo": {
+                    "root": repo.to_str().unwrap(),
+                    "obelisk": repo.join(".obelisk-k8s").to_str().unwrap(),
+                },
+                "global": { "obelisk": "/home/me/.obelisk-k8s" },
             })
         );
     }

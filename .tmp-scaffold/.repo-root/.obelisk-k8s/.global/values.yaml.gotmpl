@@ -1,5 +1,5 @@
-{{- /* The version every unit's release gets: the exact tag if HEAD has one, else 0.0.0-<short sha>, plus -dirty
-       (or 0.0.0-nogit outside a git repo, where `obelisk.git` is null). */ -}}
+{{- /* Every unit, every target. The version every unit's release gets: the exact tag if HEAD has one, else
+       0.0.0-<short sha>, plus -dirty (or 0.0.0-nogit outside a git repo, where `obelisk.git` is null). */ -}}
 {{- $version := "0.0.0-nogit" }}
 {{- with .Values.obelisk.git }}
 {{- $version = .tag.exact | default (printf "0.0.0-%s" .sha.short) }}
@@ -13,16 +13,9 @@ obelisk:
     version: {{ $version | quote }}
 
 stuff:
-  ab: {{ add .Values.stuff.a .Values.stuff.b }}
+  a: 1
+  b: 1
+  {{- /* Seen from the phase before this one (`values-1`, inline). */}}
+  inner: {{ .Values.outer.inner | quote }}
 
 long-name: {{ printf "%s-%s-%s" .Values.obelisk.repo .Values.obelisk.unit .Values.obelisk.target }}
-
-{{- if eq .Values.obelisk.target "prod" }}
-prod:
-  replicas: 3
-  region: us-east-2
-  features: [billing, audit]
-  limits:
-    cpu: "2"
-    memory: 1Gi
-{{- end }}

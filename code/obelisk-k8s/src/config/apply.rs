@@ -4,14 +4,15 @@
 //! namespace created if it's missing), at its agreed version (`obelisk.release.version`), through a
 //! throwaway chart that ships them as-is (no second templating), with `helm upgrade --install` on its
 //! target's cluster's kubectl context: k3d's own for a local k3d cluster, else the cluster's `kubectlContext`. A release that
-//! doesn't come up is rolled back (unless it takes ownership; see below). A unit with no templates
-//! has nothing to apply, and is skipped.
+//! doesn't come up is rolled back (unless it takes ownership; see below). A unit with no manifests
+//! sources has nothing to apply, and is skipped.
 //!
 //! Everything is planned first (clusters resolved, every case rendered and checked), so a mistake in
 //! one case doesn't leave the others half-applied: two cases that would install the same release on
 //! the same context (the second would replace the first, deleting what it had), and a case whose
-//! templates render nothing (an upgrade to it would delete everything), are errors. Applying to a
-//! remote cluster needs `yes`. If an install fails, the ones before it stay applied.
+//! manifests render nothing (an upgrade to it would delete everything), are errors. Applying to a
+//! remote cluster needs `yes`. The build plans' warnings are handed on as they're planned, so before
+//! anything installs. If an install fails, the ones before it stay applied.
 //!
 //! What's already in the cluster but not a release's (e.g. applied by obelisk-local) is only adopted
 //! with [`Takeover::take_ownership`], and fields another field manager owns are only taken with
@@ -21,11 +22,11 @@ use std::fmt;
 use std::path::Path;
 
 use crate::ObeliskK8sError;
+use crate::config::build::{Source, Warnings};
 use crate::config::ephemeral::Ephemeral;
 use crate::config::global::{Cluster, GlobalConfig, Location};
 use crate::config::manifests::ManifestsCase;
 use crate::config::paths::Selection;
-use crate::config::paths::Source;
 use crate::config::repo::{RepoConfig, Target};
 use crate::config::run::RunInputs;
 use crate::config::values::Agreed;
@@ -38,18 +39,20 @@ use crate::ssm::Ssm;
 pub struct Applied<'a> {
     pub target: &'a str,
     pub unit: &'a str,
-    /// Where it went; `None` if the unit has no templates (nothing to apply).
+    /// Where it went; `None` if the unit has no manifests sources (nothing to apply).
     pub release: Option<Agreed>,
     pub context: String,
 }
 
 /// What `apply` did, case by case.
 #[derive(Debug)]
-pub struct ApplyReport<'a>(pub Vec<Applied<'a>>);
+pub struct ApplyReport<'a> {
+    pub applied: Vec<Applied<'a>>,
+}
 
 impl fmt::Display for ApplyReport<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for applied in &self.0 {
+        for applied in &self.applied {
             let (target, unit) = (applied.target, applied.unit);
             match &applied.release {
                 Some(release) => writeln!(
@@ -59,7 +62,7 @@ impl fmt::Display for ApplyReport<'_> {
                 )?,
                 None => writeln!(
                     f,
-                    "skipped unit `{unit}` on target `{target}`: it has no templates"
+                    "skipped unit `{unit}` on target `{target}`: it has no manifests"
                 )?,
             }
         }
@@ -77,7 +80,8 @@ struct Planned<'a> {
 impl RepoConfig {
     /// Applies every case in `selection` to the clusters in `global` (remote ones only with
     /// `remote_ok`), taking over what `takeover` allows: plans them all, then installs each.
-    /// `progress` hears about each install as it starts.
+    /// `warn` hears each build plan's warnings as it's planned (once each, and before anything
+    /// installs); `progress` hears about each install as it starts.
     ///
     /// # Errors
     ///
@@ -96,10 +100,11 @@ impl RepoConfig {
         remote_ok: bool,
         takeover: Takeover,
         ssm: &Ssm,
+        warn: impl FnMut(&str),
         mut progress: impl FnMut(&str),
     ) -> Result<ApplyReport<'a>, ObeliskK8sError> {
         let plan = self.plan(
-            repo_root, selection, shown_root, ephemeral, global, remote_ok, ssm,
+            repo_root, selection, shown_root, ephemeral, global, remote_ok, ssm, warn,
         )?;
         let mut applied = Vec::new();
         for Planned { case, context } in plan {
@@ -125,10 +130,11 @@ impl RepoConfig {
                 context,
             });
         }
-        Ok(ApplyReport(applied))
+        Ok(ApplyReport { applied })
     }
 
-    /// Every case in `selection`, rendered and checked, with the context to install it on.
+    /// Every case in `selection`, rendered and checked, with the context to install it on. `warn`
+    /// hears each build plan's warnings, once each.
     #[allow(clippy::too_many_arguments)]
     fn plan<'a>(
         &'a self,
@@ -139,6 +145,7 @@ impl RepoConfig {
         global: &GlobalConfig,
         remote_ok: bool,
         ssm: &Ssm,
+        warn: impl FnMut(&str),
     ) -> Result<Vec<Planned<'a>>, ObeliskK8sError> {
         let inputs = RunInputs::new(repo_root, selection, ephemeral, global, Some(ssm))?;
         let mut contexts = Vec::new();
@@ -149,13 +156,18 @@ impl RepoConfig {
             contexts.push(context);
         }
         let mut plan: Vec<Planned<'a>> = Vec::new();
+        let mut warnings = Warnings::new(warn);
         let mut capabilities: Vec<(String, helm::Capabilities)> = Vec::new();
         for ((target, unit), context) in selection.cases.iter().zip(contexts) {
+            let obelisk = self.obelisk_values(target, unit, &inputs)?;
+            let build = self.build_plan(repo_root, shown_root, target, unit, &obelisk)?;
+            warnings.add(&build.warnings);
             // A chart renders for the cluster it goes to: ask each such cluster once.
-            let has_chart = self
-                .resolve_templates(repo_root, target, unit)?
+            let has_chart = build
+                .phases
                 .iter()
-                .any(|t| matches!(t.source, Source::Helm(_)));
+                .flat_map(|p| &p.manifests)
+                .any(|s| matches!(s, Source::Helm(_)));
             if has_chart && !capabilities.iter().any(|(c, _)| *c == context) {
                 capabilities.push((context.clone(), helm::capabilities(&context)?));
             }
@@ -163,7 +175,9 @@ impl RepoConfig {
                 .iter()
                 .find(|(c, _)| has_chart && *c == context)
                 .map(|(_, caps)| caps);
-            let case = self.manifests_for(repo_root, shown_root, target, unit, &inputs, found)?;
+            let case = Self::manifests_for(
+                repo_root, shown_root, target, unit, &inputs, &build, obelisk, found,
+            )?;
             if let Some(release) = &case.release {
                 check_renders_something(&case, release)?;
                 check_unique(&plan, &case, release, &context)?;
@@ -201,7 +215,7 @@ fn check_remote(
     Ok(())
 }
 
-/// Templates that render nothing would install an empty release, and an upgrade to one deletes
+/// Manifests sources that render nothing would install an empty release, and an upgrade to one deletes
 /// everything the release had.
 fn check_renders_something(
     case: &ManifestsCase<'_>,
@@ -299,20 +313,22 @@ mod tests {
         "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: {{ .Release.Name }}\n";
 
     /// Targets `dev` (on local k3d `k`), `prod` (remote `r`), `lost` (cluster not in the global
-    /// config) and `blind` (no context); unit `app` with template `app.gotmpl`; `extra` on top.
+    /// config) and `blind` (no context); unit `app`, whose build file (the repo's) has one phase
+    /// with manifests source `app.gotmpl`; `extra` on top.
     fn repo(extra: &[(&str, &str)]) -> (tempfile::TempDir, RepoConfig) {
         let target = |cluster: &str| format!("target:\n  cluster: {cluster}\n{RELEASE}");
         let (dev, prod, lost, blind) = (target("k"), target("r"), target("nope"), target("b"));
         let mut files = vec![
-            ("repo.yaml", "repo:\n  name: r\n"),
+            ("repo.yaml", "repo:\n  name: r\n  build: ./build.gotmpl\n"),
+            (
+                "build.gotmpl",
+                "build:\n  phases:\n    - name: out\n      manifests: [{ type: gotmpl, path: ./app.gotmpl }]\n",
+            ),
             ("targets/dev/target.yaml", dev.as_str()),
             ("targets/prod/target.yaml", prod.as_str()),
             ("targets/lost/target.yaml", lost.as_str()),
             ("targets/blind/target.yaml", blind.as_str()),
-            (
-                "units/app/unit.yaml",
-                "unit:\n  release: { version: v1 }\n  templates: [{ type: gotmpl, path: ./app.gotmpl }]\n",
-            ),
+            ("units/app/unit.yaml", "unit:\n  release: { version: v1 }\n"),
             ("app.gotmpl", CONFIG_MAP),
         ];
         files.retain(|(p, _)| !extra.iter().any(|(q, _)| q == p));
@@ -332,7 +348,16 @@ mod tests {
         let targets: Vec<String> = targets.iter().map(|t| (*t).to_owned()).collect();
         let selection = config.select(&targets, &[]).unwrap();
         let ssm = Ssm::with_fetch(Box::new(|_| panic!("no refs here")));
-        config.plan(dir.path(), &selection, None, None, global, remote_ok, &ssm)
+        config.plan(
+            dir.path(),
+            &selection,
+            None,
+            None,
+            global,
+            remote_ok,
+            &ssm,
+            |_| {},
+        )
     }
 
     #[test]
@@ -422,7 +447,7 @@ mod tests {
             ),
             (
                 "units/other/unit.yaml",
-                "unit:\n  release: { version: v1 }\n  templates: [{ type: gotmpl, path: ./app.gotmpl }]\n",
+                "unit:\n  release: { version: v1 }\n",
             ),
         ]);
         assert_eq!(
@@ -450,9 +475,15 @@ mod tests {
     }
 
     #[test]
-    fn a_unit_without_templates_is_skipped() {
+    fn a_unit_without_manifests_is_skipped() {
+        if !helm_installed() {
+            return;
+        }
         let (_g, global) = global(&CLUSTERS);
-        let (dir, config) = repo(&[("units/app/unit.yaml", "unit:\n  release: { version: v1 }\n")]);
+        let (dir, config) = repo(&[(
+            "build.gotmpl",
+            "build:\n  phases:\n    - { name: only-values, values: [{ type: inline, values: { a: 1 } }] }\n    - { name: missing, manifests: [{ type: gotmpl, path: ./nope.gotmpl }] }\n",
+        )]);
         let selection = config.select(&["dev".to_owned()], &[]).unwrap();
         let report = config
             .apply(
@@ -465,11 +496,12 @@ mod tests {
                 Takeover::default(),
                 &Ssm::with_fetch(Box::new(|_| panic!("no refs here"))),
                 |_| {},
+                |_| {},
             )
             .unwrap();
         assert_eq!(
             report.to_string(),
-            "skipped unit `app` on target `dev`: it has no templates\n"
+            "skipped unit `app` on target `dev`: it has no manifests\n"
         );
     }
 

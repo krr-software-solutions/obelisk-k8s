@@ -38,6 +38,8 @@ serde = { version = "1", features = ["derive"] }
 serde-saphyr = "~2.0"
 # The generic tree for values files (merging, the `obelisk:` block); YAML stays in serde-saphyr.
 serde_json = { version = "1", features = ["preserve_order"] }
+# Where in a build plan decoding it failed (`build.phases[0].values[1]`).
+serde_path_to_error = "0.1"
 # Checking a `type: url` render's download against its `sha256`.
 sha2 = "0.11"
 tempfile = "3"

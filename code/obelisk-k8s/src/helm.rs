@@ -15,20 +15,6 @@ pub(crate) fn fits_release_name(name: &str) -> bool {
     name.len() <= RELEASE_NAME_MAX
 }
 
-/// `unit`'s generators render as a Helm release named after it, so its name must fit one.
-///
-/// # Errors
-///
-/// [`ObeliskK8sError::Usage`] if it's too long.
-pub(crate) fn check_generator_release(unit: &str) -> Result<(), ObeliskK8sError> {
-    if !fits_release_name(unit) {
-        return Err(ObeliskK8sError::Usage(format!(
-            "unit `{unit}` has generators, which render as a Helm release named after it, but Helm release names are at most {RELEASE_NAME_MAX} characters"
-        )));
-    }
-    Ok(())
-}
-
 /// Whether `version` is a chart version Helm takes: `SemVer`, loosely (an optional `v`, one to three
 /// numeric parts without leading zeros, then optional `-prerelease` and `+build` parts, where a
 /// numeric prerelease part can't have a leading zero either).
@@ -201,7 +187,7 @@ pub(crate) fn capabilities(context: &str) -> Result<Capabilities, ObeliskK8sErro
 /// [`ObeliskK8sError::Helm`] if `helm` can't be run or fails; [`ObeliskK8sError::Io`] if the values
 /// can't be written.
 pub(crate) fn template_chart(
-    chart: &crate::config::repo::HelmChart,
+    chart: &crate::config::build::HelmChart,
     release: &str,
     namespace: &str,
     values: Option<&str>,
@@ -243,7 +229,7 @@ pub(crate) fn template_chart(
 }
 
 fn template_args(
-    chart: &crate::config::repo::HelmChart,
+    chart: &crate::config::build::HelmChart,
     release: &str,
     namespace: &str,
     values: Option<&Path>,
@@ -622,7 +608,7 @@ mod tests {
 
     #[test]
     fn templates_a_chart_for_the_clusters_capabilities() {
-        let chart = crate::config::repo::HelmChart {
+        let chart = crate::config::build::HelmChart {
             chart: "metallb".to_owned(),
             repo: Some("https://example.org/charts".to_owned()),
             version: "0.16.1".to_owned(),
@@ -644,7 +630,7 @@ mod tests {
             "template r metallb --repo https://example.org/charts --version 0.16.1 --namespace ns --include-crds \
              --values /v.yaml --kube-version v1.35.5+k3s1 --api-versions v1 --api-versions monitoring.coreos.com/v1"
         );
-        let oci = crate::config::repo::HelmChart {
+        let oci = crate::config::build::HelmChart {
             chart: "oci://docker.io/x/y".to_owned(),
             repo: None,
             ..chart

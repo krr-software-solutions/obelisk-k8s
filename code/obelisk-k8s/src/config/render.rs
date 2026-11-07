@@ -1,5 +1,6 @@
-//! Running a generator or template ([`Render`]) for one case: each type turns the values it's given
-//! into text. A generator's text is read as one values mapping; a template's is k8s resources.
+//! Rendering one source of a phase ([`Source`]) for a case: each type turns the values it's given
+//! into text. A values source's text is read as one values mapping; a manifests source's is k8s
+//! resources. (An `inline` source isn't rendered: its values are used as they are.)
 //!
 //! - `gotmpl`: rendered by Helm through a throwaway chart, with the values as `.Values`.
 //! - `file`: the file, as it is.
@@ -17,8 +18,7 @@ use serde_json::{Map, Value};
 use sha2::{Digest as _, Sha256};
 
 use crate::ObeliskK8sError;
-use crate::config::paths::{ResolvedRender, Source};
-use crate::config::repo::HelmChart;
+use crate::config::build::{HelmChart, Source};
 use crate::helm;
 
 /// What a render gets: the values (as a tree, and as the YAML it's given), the release it renders
@@ -35,7 +35,8 @@ pub(crate) struct Inputs<'a> {
     pub(crate) capabilities: Option<&'a helm::Capabilities>,
 }
 
-/// The text `render` makes from `inputs`. `shown` is how the user should see it.
+/// The text `source` (anything but `inline`) makes from `inputs`. `shown` is how the user should see
+/// it.
 ///
 /// # Errors
 ///
@@ -44,11 +45,12 @@ pub(crate) struct Inputs<'a> {
 /// [`ObeliskK8sError::Io`] if a file can't be read; [`ObeliskK8sError::Usage`] if a chart's `values`
 /// key isn't a mapping in the values.
 pub(crate) fn text(
-    render: &ResolvedRender<'_>,
+    source: &Source,
     shown: &Path,
     inputs: &Inputs<'_>,
 ) -> Result<String, ObeliskK8sError> {
-    match &render.source {
+    match source {
+        Source::Inline { .. } => unreachable!("an inline source's values aren't rendered"),
         Source::Gotmpl { path, .. } => helm::render(
             &inputs.repo_root.join(path),
             shown,
@@ -65,7 +67,7 @@ pub(crate) fn text(
                 }
             })
         }
-        Source::Url { url, sha256 } => fetch(url, *sha256),
+        Source::Url { url, sha256 } => fetch(url, sha256.as_deref()),
         Source::Helm(chart) => {
             let values = chart_values(chart, inputs.values)?;
             helm::template_chart(
@@ -100,7 +102,7 @@ fn chart_values(
     }
     let Some(subtree) = at else {
         return Err(ObeliskK8sError::Usage(format!(
-            "chart `{}` takes its values from `{key}`, which isn't in the generated values",
+            "chart `{}` takes its values from `{key}`, which isn't in the values",
             chart.chart
         )));
     };
@@ -201,8 +203,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::config::paths::Scope;
-    use crate::config::test_support::helm_installed;
+    use crate::config::test_support::{helm_installed, write_script};
 
     fn values() -> Map<String, Value> {
         let Value::Object(map) = serde_json::json!({
@@ -226,13 +227,6 @@ mod tests {
         }
     }
 
-    fn resolved(source: Source<'_>) -> ResolvedRender<'_> {
-        ResolvedRender {
-            scope: Scope::Repo,
-            source,
-        }
-    }
-
     #[test]
     fn a_file_is_used_as_it_is() {
         let dir = tempfile::tempdir().unwrap();
@@ -242,12 +236,7 @@ mod tests {
             found: true,
         };
         let values = values();
-        let text = text(
-            &resolved(source),
-            Path::new("x.yaml"),
-            &inputs(dir.path(), &values),
-        )
-        .unwrap();
+        let text = text(&source, Path::new("x.yaml"), &inputs(dir.path(), &values)).unwrap();
         assert_eq!(text, "a: {{ not templated }}\n");
     }
 
@@ -278,23 +267,14 @@ mod tests {
     #[test]
     fn runs_a_command_with_the_values_on_stdin() {
         let dir = tempfile::tempdir().unwrap();
-        let script = dir.path().join(".obelisk-k8s/gen.sh");
-        std::fs::create_dir_all(script.parent().unwrap()).unwrap();
-        std::fs::write(
-            &script,
+        write_script(
+            &dir.path().join(".obelisk-k8s/gen.sh"),
             "#!/bin/sh\nprintf 'seen: %s\\narg: %s\\n' \"$(grep -c 'unit: app')\" \"$1\"\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-            .unwrap();
+        );
         let words = vec![".obelisk-k8s/gen.sh".to_owned(), "prod".to_owned()];
         let values = values();
-        let text = text(
-            &resolved(Source::Command(words)),
-            Path::new("-"),
-            &inputs(dir.path(), &values),
-        )
-        .unwrap();
+        let source = Source::Command(words);
+        let text = text(&source, Path::new("-"), &inputs(dir.path(), &values)).unwrap();
         assert_eq!(text, "seen: 1\narg: prod\n");
 
         let error = run(
@@ -342,10 +322,7 @@ mod tests {
             let error = chart_values(&chart(Some(missing)), &values)
                 .unwrap_err()
                 .to_string();
-            assert!(
-                error.contains("isn't in the generated values"),
-                "{missing}: {error}"
-            );
+            assert!(error.contains("isn't in the values"), "{missing}: {error}");
         }
     }
 
@@ -382,7 +359,7 @@ mod tests {
         };
         let values = values();
         let text = text(
-            &resolved(Source::Helm(&chart)),
+            &Source::Helm(chart),
             Path::new("-"),
             &inputs(dir.path(), &values),
         )

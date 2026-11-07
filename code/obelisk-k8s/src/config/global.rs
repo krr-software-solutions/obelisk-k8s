@@ -558,7 +558,7 @@ mod tests {
         fn repo(self, dir: &str, name: &str) -> Self {
             self.file(
                 &format!("{dir}/.obelisk-k8s/repo.yaml"),
-                &format!("repo:\n  name: {name}\n"),
+                &format!("repo:\n  name: {name}\n  build: ./build.yaml.gotmpl\n"),
             )
             .file(
                 &format!("{dir}/.obelisk-k8s/targets/t1/target.yaml"),

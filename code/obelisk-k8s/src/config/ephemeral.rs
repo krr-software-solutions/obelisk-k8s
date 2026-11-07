@@ -2,8 +2,9 @@
 //! each copy named on the command line and given its own values there.
 //!
 //! Rendering a case on an ephemeral target needs an [`Ephemeral`]: its name is `obelisk.ephemeral`
-//! (`null` on every other target), and its values are the last config layer, merged over the target's
-//! and unit's config files under the same rules as a config file.
+//! (`null` on every other target), and its values are the top layer: merged over the `obelisk:`
+//! block, and again over every phase's values, under the same rules as a values source's output
+//! (see `config::phases`).
 
 use std::path::{Path, PathBuf};
 
@@ -18,7 +19,7 @@ use crate::{ObeliskK8sError, yaml};
 pub struct Ephemeral {
     /// A valid name, like a target's or unit's (a DNS label).
     pub name: String,
-    /// A mapping or nothing, like a config file; checked when it's merged.
+    /// A mapping or nothing, like a values source's output; checked when it's merged.
     values: Value,
     /// Where the values came from, as the user should see it: the path as given, or
     /// `--ephemeral-values` for inline YAML. It stands in for a file's path in errors and in

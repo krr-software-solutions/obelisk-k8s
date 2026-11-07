@@ -238,21 +238,22 @@ impl From<ClusterAdd> for NewCluster {
 
 #[derive(Debug, Subcommand)]
 enum TemplateCommand {
-    /// The merged values each unit gets on each target: its config files, deep-merged in merge order,
-    /// with the `obelisk:` block on top (SSM refs as written, unless `--resolve`)
+    /// The build plan each unit renders on each target: its build file (a Go template, rendered by
+    /// `helm` with the `obelisk:` block as `.Values`), as the phases it lists
+    Build(TemplateArgs),
+    /// The values each unit ends up with on each target: every phase's values sources deep-merged in
+    /// order over the `obelisk:` block, with the agreed release (SSM refs as written, unless
+    /// `--resolve`)
     Values(TemplateArgs),
-    /// The values after each unit's generators: its merged values, with every generator's output
-    /// deep-merged on top (generators are Go templates, rendered by `helm`)
-    GeneratedValues(TemplateArgs),
-    /// The k8s resources each unit renders on each target: its templates, rendered with its generated
-    /// values and joined in merge order (templates are Go templates, rendered by `helm`)
+    /// The k8s resources each unit renders on each target: every phase's manifests sources, each
+    /// rendered with the values of the phases before it, joined in order
     Manifests(TemplateArgs),
 }
 
 impl TemplateCommand {
     fn args(&self) -> &TemplateArgs {
         match self {
-            Self::Values(args) | Self::GeneratedValues(args) | Self::Manifests(args) => args,
+            Self::Build(args) | Self::Values(args) | Self::Manifests(args) => args,
         }
     }
 }
@@ -280,7 +281,7 @@ struct EphemeralArgs {
         requires = "ephemeral_values_from"
     )]
     name: Option<String>,
-    /// The copy's values, as YAML: merged over every config file
+    /// The copy's values, as YAML: merged over the values of every phase
     #[arg(
         id = "ephemeral_values",
         long = "ephemeral-values",
@@ -289,8 +290,8 @@ struct EphemeralArgs {
         requires = "ephemeral_name"
     )]
     values: Option<String>,
-    /// The copy's values, from a YAML file (relative to the current directory): merged over every
-    /// config file
+    /// The copy's values, from a YAML file (relative to the current directory): merged over the
+    /// values of every phase
     #[arg(
         id = "ephemeral_values_path",
         long = "ephemeral-values-path",
@@ -305,7 +306,7 @@ struct EphemeralArgs {
 enum RepoCommand {
     /// Load and check the repo's config, then print its targets and units
     Show,
-    /// Print the config files each unit gets on each target, in merge order (lowest priority first)
+    /// Print the build file each unit renders on each target
     Paths {
         /// Only these targets (repeatable; default: all)
         #[arg(short, long = "target", value_name = "TARGET")]
@@ -313,7 +314,7 @@ enum RepoCommand {
         /// Only these units (repeatable; default: all)
         #[arg(short, long = "unit", value_name = "UNIT")]
         units: Vec<String>,
-        /// List every config path, including skipped ones (no such file), as a table
+        /// Show each as a table: as written, where it's set, as evaluated, and whether it's there
         #[arg(long, help_heading = EXTRA)]
         explain: bool,
     },
@@ -519,6 +520,17 @@ mod tests {
         ] {
             assert!(parse(bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn template_renders_the_build_plan_the_values_and_the_manifests() {
+        let parse = |sub: &str| super::parse([BIN, "template", sub]).map(|_| ());
+        for sub in ["build", "values", "manifests"] {
+            assert!(parse(sub).is_ok(), "{sub}");
+        }
+        // Its values are `values` now: they're after every phase.
+        assert!(parse("generated-values").is_err());
+        assert!(super::parse([BIN, "template", "--resolve", "build"]).is_ok());
     }
 
     #[test]

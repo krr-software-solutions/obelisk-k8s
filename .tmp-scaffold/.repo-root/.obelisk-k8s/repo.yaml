@@ -3,26 +3,3 @@ repo:
   name: "repo-1"
   helmRepos:
     ex1: https://abc.com/helm
-  configPaths:
-    - "./configs/.global/values.yaml"
-    - "./configs/.global/${{obelisk:target}}.values.yaml"
-    - "./configs/${{obelisk:unit}}/values.yaml"
-    - "./configs/${{obelisk:unit}}/${{obelisk:target}}.values.yaml"
-  generators:
-    - type: "gotmpl"
-      path: "./generators/.global/generate-values.yaml.gotmpl"
-    - type: "gotmpl"
-      path: "./generators/.global/${{obelisk:target}}.generate-values.yaml.gotmpl"
-    - type: "gotmpl"
-      path: "./generators/${{obelisk:unit}}/generate-values.yaml.gotmpl"
-    - type: "gotmpl"
-      path: "./generators/${{obelisk:unit}}/${{obelisk:target}}.generate-values.yaml.gotmpl"
-  templates:
-    - type: "gotmpl"
-      path: "./templates/.global/template.yaml.gotmpl"
-    - type: "gotmpl"
-      path: "./templates/.global/${{obelisk:target}}.template.yaml.gotmpl"
-    - type: "gotmpl"
-      path: "./templates/${{obelisk:unit}}/template.yaml.gotmpl"
-    - type: "gotmpl"
-      path: "./templates/${{obelisk:unit}}/${{obelisk:target}}.template.yaml.gotmpl"

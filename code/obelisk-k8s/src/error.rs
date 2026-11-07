@@ -12,7 +12,7 @@ pub enum ObeliskK8sError {
     #[error("{0}")]
     K3d(String),
 
-    /// A generator or template couldn't run: a URL that can't be fetched or doesn't match its
+    /// A values or manifests source couldn't run: a URL that can't be fetched or doesn't match its
     /// `sha256`, or a command that can't run or fails.
     #[error("{0}")]
     Render(String),

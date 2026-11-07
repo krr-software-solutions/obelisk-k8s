@@ -1,6 +1,23 @@
-{{- /* code-app on every target: a Deployment and a Service, two documents from one template. */ -}}
+{{- /* Every unit, every target: a ConfigMap of what obelisk-k8s knows, plus the values the phases before made;
+       and a Deployment and a Service. */ -}}
 {{- $replicas := 1 }}
 {{- with .Values.prod }}{{ $replicas = .replicas }}{{ end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.obelisk.unit }}-obelisk
+  labels:
+    app.kubernetes.io/name: {{ .Values.obelisk.unit }}
+    app.kubernetes.io/part-of: {{ .Values.obelisk.repo }}
+    obelisk/target: {{ .Values.obelisk.target }}
+data:
+  long-name: {{ index .Values "long-name" | quote }}
+  version: {{ .Values.obelisk.release.version | quote }}
+  chart-version: {{ .Chart.Version | quote }}
+  git-sha: {{ with .Values.obelisk.git }}{{ .sha.short | quote }}{{ else }}"none"{{ end }}
+  stuff.yaml: |
+    {{- toYaml .Values.stuff | nindent 4 }}
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -19,7 +36,7 @@ spec:
     spec:
       containers:
         - name: app
-          image: "registry.example.com/{{ .Values.obelisk.repo }}/{{ .Values.obelisk.unit }}:{{ .Values.stuff.b }}"
+          image: "registry.example.com/{{ .Values.obelisk.repo }}/{{ .Values.obelisk.unit }}:{{ .Values.obelisk.release.version }}"
           env:
             - name: LONG_NAME
               value: {{ index .Values "long-name" | quote }}

@@ -1,0 +1,10 @@
+{{- /* This unit only, every target: rendered with the values of the phases before `out`. */ -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.obelisk.unit }}-app
+  labels:
+    app.kubernetes.io/name: {{ .Values.obelisk.unit }}
+data:
+  port: {{ .Values.app.port | quote }}
+  greeting: {{ .Values.app.greeting | quote }}

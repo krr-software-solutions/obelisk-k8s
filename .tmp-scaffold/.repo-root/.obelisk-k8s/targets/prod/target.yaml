@@ -1,5 +1,3 @@
 
 target:
-  name: null # null/missing defaults from file name
   cluster: "homelab-1"
-  configPaths: [] # missing defaults to `[]`, appends to other `configPaths`

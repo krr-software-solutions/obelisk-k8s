@@ -24,14 +24,16 @@ archive from the [releases](https://github.com/krr-software-solutions/obelisk-k8
 A deployment goes through a few layers:
 
 ```text
-config files → values → generators → generated values → templates → k8s resources → Helm release
+build file → build plan → phases (values, then manifests) → k8s resources → Helm release
 ```
 
-- **Config files:** a repo's values per target and unit, deep-merged in a fixed order.
-- **Generators:** compute more values from those: Go templates (rendered by Helm), files, URLs, or
-  any command (values in on stdin, values out). This keeps logic out of the templates.
-- **Templates:** render the resources: Go templates, raw YAML files or URLs, upstream Helm charts,
-  or commands. Every unit is installed as one Helm release (`helm upgrade --install`).
+- **Build file:** each unit's (or the repo's) Go template, rendered by Helm per target into a
+  **build plan**: an ordered list of phases. The logic of what a unit is made of lives here.
+- **Phases:** each lists values sources and manifests sources, and renders them against the values
+  the phases before it made. Values sources (inline YAML, Go templates, files, URLs, or any command:
+  values in on stdin, values out) deep-merge, in order, into the values the next phases see.
+- **Manifests:** the resources: Go templates, raw YAML files or URLs, upstream Helm charts, or
+  commands. Every unit is installed as one Helm release (`helm upgrade --install`).
 - **obelisk-k8s:** orders the units (CRDs before the resources that use them, across namespaces),
   waits for readiness, and resolves SSM refs before values reach Helm. It never prints resolved secrets
   (unless asked to, with `template --resolve --reveal`).
@@ -41,14 +43,14 @@ IP allocation and DNS for local clusters come from
 
 ## Roadmap
 
-- **Done:** `template` (values, generated values, manifests), `apply`, ephemeral targets, and local
+- **Done:** `template` (build plan, values, manifests), `apply`, ephemeral targets, and local
   k3d clusters on obeliskd (`cluster up/down/destroy/status`, with MetalLB and a gateway).
-- **Also done:** generators and templates of every type: Go templates, raw files, URLs, upstream
-  Helm charts, and commands.
+- **Also done:** build files and phases, with values and manifests sources of every type: inline
+  values, Go templates, raw files, URLs, upstream Helm charts, and commands.
 - **Also done:** adopting existing resources (`apply --take-ownership`), and SSM refs
   (`${{obelisk:aws-ssm:<key>}}`, credentials from `AWS_SSM_ACCESS_KEY` / `AWS_SSM_SECRET_KEY` /
   `AWS_SSM_REGION`, or a profile named by `AWS_SSM_PROFILE`).
-- **Next:** `diff`, then up/down hooks (setup,
+- **Next:** `diff`, images built in a phase, then up/down hooks (setup,
   database/topic creation, seeding test data) and blueprints: a spec that pulls apps from several
   repos onto a managed cluster.
 

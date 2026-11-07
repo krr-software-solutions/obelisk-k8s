@@ -44,7 +44,7 @@ pub fn read_file<T: DeserializeOwned>(path: &Path, display: &Path) -> Result<T, 
 
 /// Reads a values file (`path`, shown as `display`) into a generic tree.
 ///
-/// Its consumers (generators, Helm) read YAML 1.1, so plain numbers with a leading `0` are octal
+/// Its consumers (Go templates, Helm) read YAML 1.1, so plain numbers with a leading `0` are octal
 /// here too (`0755` is 493), not YAML 1.2 decimals; without that, serde-saphyr reads `0755` as the
 /// float `755.0`. Other plain scalars still go through the generic tree's types: see
 /// `config::values` for what that changes.

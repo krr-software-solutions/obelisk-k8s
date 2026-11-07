@@ -5,7 +5,9 @@
 //! "./config/${{obelisk:unit}}/values.yaml" → [Text("./config/"), Var(Unit), Text("/values.yaml")]
 //! ```
 //!
-//! `$${{` writes a literal `${{`.
+//! `${{obelisk:target}}` and `${{obelisk:unit}}` are the case's names; `${{obelisk:path:unit}}` is the
+//! unit's directory, as a path from `.obelisk-k8s/` (`./units/my-app`), and only has a value in
+//! `build`. `$${{` writes a literal `${{`.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -17,10 +19,12 @@ use serde::{Deserialize, Deserializer};
 pub enum Var {
     Target,
     Unit,
+    /// The unit's directory, from `.obelisk-k8s/`: `./units/<dir>`.
+    PathUnit,
 }
 
 impl Var {
-    const ALL: [Self; 2] = [Self::Target, Self::Unit];
+    const ALL: [Self; 3] = [Self::Target, Self::Unit, Self::PathUnit];
 
     /// The name after `obelisk:`, e.g. `target`.
     #[must_use]
@@ -28,6 +32,7 @@ impl Var {
         match self {
             Self::Target => "target",
             Self::Unit => "unit",
+            Self::PathUnit => "path:unit",
         }
     }
 }
@@ -50,6 +55,8 @@ pub struct InterpString {
 pub struct InterpolationParams<'a> {
     pub target: Option<&'a str>,
     pub unit: Option<&'a str>,
+    /// The unit's directory, from `.obelisk-k8s/` (`./units/my-app`).
+    pub path_unit: Option<&'a str>,
 }
 
 impl InterpolationParams<'_> {
@@ -57,6 +64,7 @@ impl InterpolationParams<'_> {
         match var {
             Var::Target => self.target,
             Var::Unit => self.unit,
+            Var::PathUnit => self.path_unit,
         }
     }
 }
@@ -224,7 +232,7 @@ mod tests {
         );
         assert_eq!(
             InterpString::parse("${{obelisk:untis}}").unwrap_err(),
-            "unknown var `obelisk:untis` (known: target, unit)"
+            "unknown var `obelisk:untis` (known: target, unit, path:unit)"
         );
         assert_eq!(
             InterpString::parse("${{env:HOME}}").unwrap_err(),
@@ -249,12 +257,31 @@ mod tests {
         let params = InterpolationParams {
             target: Some("prod"),
             unit: Some("app"),
+            path_unit: None,
         };
         assert_eq!(s.interpolate(&params).unwrap(), "./config/app/prod.yaml");
         let no_unit = InterpolationParams {
             target: Some("prod"),
-            unit: None,
+            ..InterpolationParams::default()
         };
         assert_eq!(s.interpolate(&no_unit), Err(Var::Unit));
+    }
+
+    #[test]
+    fn the_units_path() {
+        let s = InterpolationParams {
+            path_unit: Some("./units/my-app"),
+            ..InterpolationParams::default()
+        };
+        let build = InterpString::parse("${{obelisk:path:unit}}/build.yaml.gotmpl").unwrap();
+        assert_eq!(build.parts()[0], StringPart::Var(Var::PathUnit));
+        assert_eq!(
+            build.interpolate(&s).unwrap(),
+            "./units/my-app/build.yaml.gotmpl"
+        );
+        assert_eq!(
+            build.interpolate(&InterpolationParams::default()),
+            Err(Var::PathUnit)
+        );
     }
 }

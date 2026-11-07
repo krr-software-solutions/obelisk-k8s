@@ -18,26 +18,29 @@ defines the CLI (the clap types, `--help` headings, completions) and dispatches 
 - `yaml.rs`: all YAML, including `Spanned` (a value plus its line and column), and in-place list
   edits that keep comments and formatting. Nothing else names the YAML crates (serde-saphyr to read
   and write, yaml-edit to edit), so they can be swapped here.
-- `interp.rs`: `${{obelisk:...}}` interpolation (`InterpString`: the raw string plus its parts). Only for
-  obelisk-k8s's own config files; values files take only `aws-ssm` refs (`ssm.rs`).
+- `interp.rs`: `${{obelisk:...}}` interpolation (`InterpString`: the raw string plus its parts):
+  `target`, `unit`, and `path:unit` (build paths only). Only for obelisk-k8s's own config files; values
+  take only `aws-ssm` refs (`ssm.rs`).
 - `ssm.rs`: `${{obelisk:aws-ssm:<key>}}` refs: checking, resolving (the AWS SDK, with credentials
   from the `AWS_SSM_*` variables, or `AWS_SSM_PROFILE`'s profile), and masking what was resolved (`Ssm::redact`).
-- `config/mod.rs`: what the config files share: scanning `<kind>/<dir>/<file>`, names (DNS labels,
-  defaulting to the directory), duplicate checks.
+- `config/mod.rs`: what the config files share: scanning `<kind>/<dir>/<file>`, names (DNS labels: a
+  target's or unit's is its directory's; a cluster's defaults to it), duplicate checks.
 - `config/global.rs`: `GlobalConfig`, the machine-wide `~/.obelisk-k8s/` (repos, clusters). Behind
   `config global show`.
 - `config/global/edit.rs`: changing the global config (`init`, `cluster add` / `remove`, `repo add` /
   `remove`). A child of `global.rs`, so it uses its private helpers.
-- `config/repo.rs`: `RepoConfig`, a repo's `.obelisk-k8s/` (repo, targets, units), loaded and checked.
-  Behind `config repo show`.
-- `config/values.rs`: the merged values for a unit on a target (`template values`), as a
-  `serde_json::Value` tree (`preserve_order`); YAML in and out still goes through `yaml.rs`.
-- `config/generate.rs`: the generated values (`template generated-values`): generators rendered and
-  merged over the config values.
-- `config/render.rs`: running one generator or template, by type (`gotmpl`, `file`, `url`, `helm`,
+- `config/repo.rs`: `RepoConfig`, a repo's `.obelisk-k8s/` (repo, targets, units, build paths), loaded
+  and checked. Behind `config repo show`.
+- `config/build.rs`: a case's build plan (`template build`): its build file rendered, and its output
+  checked into phases of values and manifests sources.
+- `config/phases.rs`: running a plan's values phases, and agreeing on the release (`template values`).
+- `config/values.rs`: the `obelisk:` block, merging values (as a `serde_json::Value` tree,
+  `preserve_order`; YAML in and out still goes through `yaml.rs`), and what values sources may set
+  under `obelisk:`.
+- `config/render.rs`: rendering one source, by type (`inline`, `gotmpl`, `file`, `url`, `helm`,
   `command`).
-- `config/manifests.rs`: the rendered resources (`template manifests`): templates rendered with the
-  generated values.
+- `config/manifests.rs`: the rendered resources (`template manifests`): each phase's manifests
+  sources, rendered with the values before it.
 - `config/apply.rs`: `apply`: rendered manifests installed as Helm releases on each target's cluster.
 - `config/ephemeral.rs`: an ephemeral target's copy (`--ephemeral-name` and its values), and checking
   a selection needs one exactly when it has an ephemeral target.
@@ -51,8 +54,8 @@ defines the CLI (the clap types, `--help` headings, completions) and dispatches 
 - `git.rs`: the `obelisk.git` facts (sha, tag, dirt), read with `git`.
 - `helm.rs`: running Helm: `helm template` on a throwaway chart (for Go templates), and
   `helm upgrade --install` (of charts, and of rendered manifests through a throwaway chart).
-- `config/paths.rs`: which config files a unit gets on a target, and their merge order. Behind
-  `config repo paths`.
+- `config/paths.rs`: which (target, unit) cases a command covers, and the build file each renders.
+  Behind `config repo paths`.
 
 ## Adding a crate
 

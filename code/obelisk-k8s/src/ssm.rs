@@ -1,5 +1,5 @@
-//! `${{obelisk:aws-ssm:<key>}}`: AWS SSM parameters, in the merged values and in `file` / `url`
-//! templates' documents (see `config::values` and `config::manifests`).
+//! `${{obelisk:aws-ssm:<key>}}`: AWS SSM parameters, in each values source's output and in `file` /
+//! `url` manifests sources' documents (see `config::phases` and `config::manifests`).
 //!
 //! ```text
 //! password: "${{obelisk:aws-ssm:/app/x/db/password}}"  →  password: "<the parameter's value>"
@@ -239,7 +239,7 @@ pub(crate) fn check(value: &Value, what: &str) -> Result<(), ObeliskK8sError> {
     keys_in(value, &mut BTreeSet::new()).map_err(|message| bad_ref(what, &message))
 }
 
-/// `text` (a `file` or `url` template's documents, named `shown`) with its refs resolved, or only
+/// `text` (a `file` or `url` manifests source's documents, named `shown`) with its refs resolved, or only
 /// checked without `ssm`. Text with refs (or `$${{obelisk:`) is re-written, every document, from
 /// its parsed form (comments and formatting go); other text is kept as it is.
 ///

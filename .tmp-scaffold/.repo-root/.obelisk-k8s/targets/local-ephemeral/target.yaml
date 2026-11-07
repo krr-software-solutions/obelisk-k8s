@@ -1,6 +1,4 @@
 
 target:
-  name: null # null/missing defaults from file name
   cluster: "my-cluster-1"
-  configPaths: [] # missing defaults to `[]`, appends to other `configPaths`
   ephemeral: true

@@ -1,0 +1,4 @@
+{{- /* This unit only, every target: its own values, merged over `.global/values.yaml.gotmpl`'s (same phase). */ -}}
+app:
+  port: 8080
+  greeting: {{ printf "hello from %s on %s" .Values.obelisk.unit .Values.obelisk.target | quote }}

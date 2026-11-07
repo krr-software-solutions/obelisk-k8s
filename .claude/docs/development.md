@@ -5,13 +5,18 @@
 ```sh
 cargo run -q -p obelisk-k8s-cli -- --help             # run the CLI
 (cd .tmp-scaffold/.repo-root && cargo run -q -p obelisk-k8s-cli -- config repo show)
+# template build|values|manifests on the scaffold, with its own global config (it has no `homelab-1`,
+# the `prod` target's cluster, so only `local-ephemeral`):
+(cd .tmp-scaffold/.repo-root && cargo run -q -p obelisk-k8s-cli -- --global-root ../.user-home/.obelisk-k8s \
+  template manifests -t local-ephemeral --ephemeral-name pr-1 --ephemeral-values '{}')
 cargo fmt --all                                        # format
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 ```
 
-The tests that render Go templates run `helm`, so they need it on the `PATH`; without it they fail
-unless `OBELISK_TEST_SKIP_HELM=1` is set.
+The tests that render Go templates run `helm` (so does rendering any build file), so they need it on
+the `PATH`; without it they fail unless `OBELISK_TEST_SKIP_HELM=1` is set. Most phase and manifests
+tests skip the build file (they parse a plan from its output) so they still run without `helm`.
 
 `--locked` matches what CI will run: if `Cargo.lock` needs to change, commit the change.
 

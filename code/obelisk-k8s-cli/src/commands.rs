@@ -95,8 +95,13 @@ fn global_root(
 
 fn warn(warnings: &[String]) {
     for warning in warnings {
-        eprintln!("WARN - {warning}");
+        warn_one(warning);
     }
+}
+
+/// A warning, as it comes (e.g. a build plan's, before anything renders from it).
+fn warn_one(warning: &str) {
+    eprintln!("WARN - {warning}");
 }
 
 pub fn run_config_global_show(root: Option<PathBuf>) -> Result<(), ObeliskK8sError> {
@@ -247,6 +252,7 @@ fn run_apply_with(
         yes,
         takeover,
         ssm,
+        warn_one,
         |step| eprintln!("{step}"),
     )?;
     print!("{}", ssm.redact(&report.to_string()));
@@ -288,18 +294,26 @@ fn template_report(
     let selection = config.select(&args.targets, &args.units)?;
     let ephemeral = ephemeral(&args.ephemeral)?;
     let (shown_root, ephemeral) = (shown_root.as_deref(), ephemeral.as_ref());
-    let report = match command {
-        TemplateCommand::Values(_) => config
-            .values_report(&repo_root, &selection, shown_root, ephemeral, &global, ssm)?
+    // Warnings are printed as each build plan is built: before the report, and even if a later
+    // step fails.
+    Ok(match command {
+        // Nothing in a build plan is resolved: `--resolve` has nothing to do there.
+        TemplateCommand::Build(_) => config
+            .build_report(
+                &repo_root, &selection, shown_root, ephemeral, &global, warn_one,
+            )?
             .to_string(),
-        TemplateCommand::GeneratedValues(_) => config
-            .generated_values_report(&repo_root, &selection, shown_root, ephemeral, &global, ssm)?
+        TemplateCommand::Values(_) => config
+            .values_report(
+                &repo_root, &selection, shown_root, ephemeral, &global, ssm, warn_one,
+            )?
             .to_string(),
         TemplateCommand::Manifests(_) => config
-            .manifests_report(&repo_root, &selection, shown_root, ephemeral, &global, ssm)?
+            .manifests_report(
+                &repo_root, &selection, shown_root, ephemeral, &global, ssm, warn_one,
+            )?
             .to_string(),
-    };
-    Ok(report)
+    })
 }
 
 /// The ephemeral copy the flags name, if any.

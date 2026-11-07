@@ -8,11 +8,12 @@ use crate::error::LineCol;
 use crate::yaml::Spanned;
 
 pub mod apply;
+pub mod build;
 pub mod ephemeral;
-pub mod generate;
 pub mod global;
 pub mod manifests;
 pub mod paths;
+pub mod phases;
 mod render;
 pub mod repo;
 mod run;
@@ -87,6 +88,7 @@ pub(crate) fn read_entries(
     Ok(entries)
 }
 
+/// `entry`'s name: `name` if it's given, else its directory's.
 pub(crate) fn name_or_dir(
     entry: &Entry,
     name: Option<Spanned<String>>,
@@ -95,20 +97,23 @@ pub(crate) fn name_or_dir(
         check_name(&entry.file, &name)?;
         return Ok(name.value);
     }
+    dir_name(entry, "rename it or set `name`")
+}
+
+/// `entry`'s directory's name, which must be a valid name; `fix` says what to do if it isn't.
+pub(crate) fn dir_name(entry: &Entry, fix: &str) -> Result<String, ObeliskK8sError> {
     let Some(dir_name) = &entry.dir_name else {
         return Err(config_error(
             &entry.file,
             None,
-            "the directory name isn't UTF-8: rename it or set `name`",
+            format!("the directory name isn't UTF-8: {fix}"),
         ));
     };
     if !is_valid_name(dir_name) {
         return Err(config_error(
             &entry.file,
             None,
-            format!(
-                "the directory name `{dir_name}` isn't a valid name ({NAME_RULE}): rename it or set `name`"
-            ),
+            format!("the directory name `{dir_name}` isn't a valid name ({NAME_RULE}): {fix}"),
         ));
     }
     Ok(dir_name.clone())
@@ -186,6 +191,33 @@ pub(crate) mod test_support {
             std::fs::write(path, text).unwrap();
         }
         dir
+    }
+
+    /// Writes an executable script at `path` (making its directory), from a child process: a file
+    /// this process wrote can't run (`ETXTBSY`, "Text file busy") while a child another test is
+    /// forking still holds the write descriptor it inherited, until that child execs. Closing it
+    /// first, or renaming it into place, doesn't help (the child's copy is of the same file); a file
+    /// only ever open for writing in a process that has exited can't be held that way.
+    pub(crate) fn write_script(path: &std::path::Path, text: &str) {
+        use std::io::Write as _;
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"])
+            .arg(path)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(text.as_bytes())
+            .unwrap();
+        assert!(
+            child.wait().unwrap().success(),
+            "writing {}",
+            path.display()
+        );
     }
 
     /// A target on cluster `c` whose units' release is the unit's name, in a namespace named after

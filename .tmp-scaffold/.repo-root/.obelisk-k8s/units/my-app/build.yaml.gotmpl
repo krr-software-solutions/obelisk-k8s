@@ -1,0 +1,35 @@
+
+{{- $baseDir := .Values.obelisk.paths.repo.obelisk }}
+{{- $unit := .Values.obelisk.unit }}
+{{- $target := .Values.obelisk.target }}
+
+build:
+  phases:
+    - name: values-1
+      values:
+        - type: "inline"
+          values:
+            outer:
+              inner: value
+    - name: values-2
+      values:
+        - type: "gotmpl"
+          path: "{{ $baseDir }}/.global/values.yaml.gotmpl"
+        - type: "gotmpl"
+          path: "{{ $baseDir }}/.global/{{ $target }}.values.yaml.gotmpl"
+        - type: "gotmpl"
+          path: "{{ $baseDir }}/units/{{ $unit }}/values.yaml.gotmpl"
+        - type: "gotmpl"
+          path: "{{ $baseDir }}/units/{{ $unit }}/{{ $target }}.values.yaml.gotmpl"
+      manifests: [] # Manifests here would only see `values-1`
+    - name: out
+      manifests:
+        - type: "gotmpl"
+          path: "{{ $baseDir }}/.global/manifests.yaml.gotmpl"
+        - type: "gotmpl"
+          path: "{{ $baseDir }}/.global/{{ $target }}.manifests.yaml.gotmpl"
+        - type: "gotmpl"
+          path: "{{ $baseDir }}/units/{{ $unit }}/manifests.yaml.gotmpl"
+        - type: "gotmpl"
+          path: "{{ $baseDir }}/units/{{ $unit }}/{{ $target }}.manifests.yaml.gotmpl"
+      images: [] # TODO : add this after the `build.yaml.gotmpl` is all working and merged

@@ -1,0 +1,12 @@
+{{- /* Only found on prod (the build file names it after the target). Merged over `.global/values.yaml.gotmpl`,
+       which renders in the same phase, so neither sees the other. */ -}}
+stuff:
+  b: 2
+
+prod:
+  replicas: 3
+  region: us-east-2
+  features: [billing, audit]
+  limits:
+    cpu: "2"
+    memory: 1Gi

@@ -9,16 +9,25 @@ ip-allocator.
 
 ## Current state
 
-- `obelisk-k8s config repo show`, run from a repo root: loads and checks `.obelisk-k8s/` (`repo.yaml`,
-  `targets/<dir>/target.yaml`, `units/<dir>/unit.yaml`), then prints the targets and units. Names must be
-  DNS labels; stray entries in `targets/` and `units/` are skipped with a `WARN`.
-- `obelisk-k8s config repo paths [-t <target>]... [-u <unit>]... [--explain]`: the config files each
-  selected unit gets on each selected target (default: all of them), in merge order. One case prints as
-  is; several print one after another, each under a magenta `[ target=…, unit=… ]` header, skipping the
-  pairs where the unit doesn't deploy to the target. Config paths can use `${{obelisk:target}}` and `${{obelisk:unit}}`; they
-  merge by scope (repo < target < unit < target + unit), then by declaring file (repo < target < unit),
-  then in the order written. Missing files are skipped; `--explain` prints a table of every path (as written, as
-  evaluated, found or skipped), colored on a terminal.
+- `obelisk-k8s config repo show`, run from a repo root: loads and checks `.obelisk-k8s/` (`repo.yaml`:
+  `repo: { name, helmRepos, build }`; `targets/<name>/target.yaml`: `target: { cluster, release,
+  ephemeral }`; `units/<name>/unit.yaml`: `unit: { targets, release, build }`), then prints the
+  targets and units (each unit's build path, and whether it's the repo's). A target or unit is named
+  by its directory; names must be DNS labels; stray entries in `targets/` and `units/` are skipped
+  with a `WARN`. `configPaths`, `generators` and `templates` are gone: each is a load error (at its
+  line and column) saying to use a build file's phases instead; so is a target's or unit's `name`
+  (saying it's the directory).
+- **Build files:** every unit has one: its own `build`, else the repo's (a unit with neither is a load
+  error). It's an interpolated path (`${{obelisk:target}}`, `${{obelisk:unit}}`, and
+  `${{obelisk:path:unit}}`, the unit's directory as `./units/<name>`; valid in a repo-level `build` too,
+  where it's each unit's) that starts with `./` (from `.obelisk-k8s/`), `/`, or
+  `${{obelisk:path:unit}}`. See **The design** below for what it renders.
+- `obelisk-k8s config repo paths [-t <target>]... [-u <unit>]... [--explain]`: the build file each
+  selected unit renders on each selected target (default: all of them). One case prints as is;
+  several print one after another, each under a magenta `[ target=…, unit=… ]` header, skipping the
+  pairs where the unit doesn't deploy to the target. `--explain` prints a table (as written, the file
+  that sets it, as evaluated, found or missing), colored on a terminal. A missing build file is
+  shown; rendering one is the error.
 - `obelisk-k8s config global show`: loads and checks the machine-wide config (`~/.obelisk-k8s/`, or
   `--global-root` / `OBELISK_K8S_GLOBAL_ROOT`): `repos.yaml` (repo paths: relative to the global root, `~/`, or
   absolute; a trailing `/*` for every repo in a directory; names come from each repo's `repo.yaml`) and
@@ -64,20 +73,27 @@ ip-allocator.
   A block entry takes the comment lines directly above it (same indent, no blank line between) with
   it. Both edit the file in place with yaml-edit, keeping its comments and formatting, and put it
   back if the result won't load.
-- `obelisk-k8s template values [-t <target>]... [-u <unit>]...`: the merged values each selected unit
-  gets on each selected target: its found config files deep-merged in merge order (maps key by key;
-  lists, scalars and `null` replace), with the tool's `obelisk: { repo, target, unit, cluster, ephemeral, git, paths }` block on top.
-  `obelisk:` is reserved: a config file may only set `obelisk.release.{name, namespace, version}`, as
-  strings (kept per file and left out of this output; they're agreed on after the generators: see
-  **Release** below), and anything else under it is an error (`obelisk.version`, the version's old
-  place, says to move it to `obelisk.release.version`). SSM refs (`${{obelisk:aws-ssm:<key>}}`, below) show as written unless `--resolve`.
-  Quoted strings stay as written; plain scalars come out parsed, the YAML 1.1 way where it matters
-  (`0755` is `493`), with known limits listed in `config/values.rs`. Same selection as
+- `obelisk-k8s template build [-t <target>]... [-u <unit>]...`: each selected unit's build plan on each
+  selected target: its build file rendered (`helm`), checked, and printed as YAML. Same selection as
   `config repo paths`; several cases print as a YAML stream, each under a `# [ target=…, unit=… ]`
-  comment. Takes `--repo` too.
-- `obelisk.paths: { globalRoot, repoRoot }`: where the global config and the repo are on this machine,
-  absolute and normalized (`.` and `..` resolved; symlinks kept); an error if either isn't UTF-8.
-  Machine-specific, so rendered output differs between machines.
+  comment. Takes `--repo` too (as does every `template` command); `--resolve` has nothing to resolve
+  here.
+- `obelisk-k8s template values [-t <target>]... [-u <unit>]...`: the values each selected unit ends up
+  with on each selected target: the tool's `obelisk: { repo, target, unit, cluster, ephemeral, git,
+  paths }` block, with every phase's values sources deep-merged over it in order (maps key by key;
+  lists, scalars and `null` replace), and the agreed `obelisk.release` (see **Release** below).
+  `obelisk:` is reserved: a values source may only set `obelisk.release.{name, namespace, version}`,
+  as strings (kept per source and left out of the merge; they're agreed on after every phase), and
+  anything else under it is an error (`obelisk.version`, the version's old place, says to move it to
+  `obelisk.release.version`). SSM refs (`${{obelisk:aws-ssm:<key>}}`, below) show as written unless
+  `--resolve`. Quoted strings stay as written; plain scalars come out parsed, the YAML 1.1 way where
+  it matters (`0755` is `493`), with known limits listed in `config/values.rs`. Replaces the old
+  `values` (config files only) and `generated-values`.
+- `obelisk.paths: { repo: { root, obelisk }, global: { obelisk } }`: the repo root, the repo's
+  `.obelisk-k8s/`, and the global config's directory on this machine, absolute and normalized (`.` and
+  `..` resolved; symlinks kept); an error if any isn't UTF-8. Machine-specific, so rendered output
+  that uses it differs between machines (a source path under the repo root is shown relative to it,
+  though: see **The design**).
 - `obelisk.cluster: { name, supernet, subnet }` is the target's cluster, from the global config:
   its name, and the obeliskd supernet and subnet it runs on (`null` without `obeliskd`). So every
   `template` command (and `apply`) loads the global config, and a selected target whose cluster
@@ -93,24 +109,27 @@ ip-allocator.
   error to leave out even when the target is only selected by default (no `-t`), and giving them when
   none of the targets being rendered is ephemeral is an error too (a target counts if a selected
   unit renders on it). `obelisk.ephemeral` is the name (`null` on other
-  targets), and the values are the last config layer, merged over every config file under the same
-  rules (so they can set `obelisk.release.version` too, and it shows up as `--ephemeral-values` or the path).
+  targets), and the values are the top layer: merged over the `obelisk:` block (so every phase sees
+  them) and again over every phase's values (so they always win), under the same rules as a values
+  source (so they can set `obelisk.release.version` too, and it shows up as `--ephemeral-values` or
+  the path). The build file doesn't see them (its `.Values` is just the `obelisk:` block).
   diff/apply will take the same flags.
-- `obelisk.release.version`: after the generators, exactly one distinct version is required for each
-  unit on each target, from any of: `release.version` in its target or unit (interpolated), or
-  `obelisk.release.version` in a config file or generator. A top-level `version` in a target or unit
-  (its old place) is a load error saying to move it under `release`. It's added to the generated
-  values (at `obelisk.release.version`), and templates' charts get it as
+- `obelisk.release.version`: after every phase's values, exactly one distinct version is required for
+  each unit on each target, from any of: `release.version` in its target or unit (interpolated), or
+  `obelisk.release.version` in a values source (or the ephemeral values). A top-level `version` in a
+  target or unit (its old place) is a load error saying to move it under `release`. It's added to the
+  values (at `obelisk.release.version`), and manifests' charts get it as
   `version` and `appVersion`, so it must be `SemVer`-ish for `template manifests` (e.g. `0.0.0-<sha>`,
   or a tag like `v1.2.3`). Note that `git describe` output like `v1.2.3-4-gabc1234` is SemVer for a
   *prerelease of* 1.2.3, so it sorts before `v1.2.3`.
-- `obelisk-k8s template manifests [-t …]… [-u …]…`: the k8s resources each unit renders: its
-  `templates:` (listed like `generators:`, see the types below), each rendered on its own, e.g. through a
-  throwaway Helm chart with the generated values as `.Values`, joined in merge order as Helm prints
-  them (each document under a `# Source:` comment naming the template; Helm orders the documents
-  *within* one template by kind). A template may print any number of documents. No shared `define`s
-  across files for now (tentative). `.Release.{Name, Namespace}` is the case's agreed release (see
-  below). Takes `--repo` too.
+- `obelisk-k8s template manifests [-t …]… [-u …]…`: the k8s resources each unit renders: every phase's
+  manifests sources (see the types below), each rendered on its own against the values of the phases
+  before its own (plus the agreed `obelisk.release`), e.g. through a throwaway Helm chart with them as
+  `.Values`, joined in phase order then source order as Helm prints them (each document under a
+  `# Source:` comment naming the source; Helm orders the documents *within* one template by kind). A
+  source may print any number of documents. No shared `define`s across files for now (tentative).
+  `.Release.{Name, Namespace}` is the case's agreed release (see below). A unit with no manifests
+  sources (or only missing files) renders nothing, and its values phases don't run.
 - `obelisk-k8s apply [-t …]… [-u …]… [--ephemeral-*] [--yes] [--take-ownership] [--force-conflicts]`: installs what `template manifests`
   renders, one Helm release per unit on a target: its agreed release name, into its agreed namespace
   (created if missing), at its agreed version, via a throwaway chart that ships the rendered
@@ -118,9 +137,9 @@ ip-allocator.
   --rollback-on-failure` on the target's cluster's context (`k3d-<name>` for a local k3d cluster,
   else its `kubectlContext`; none is an error). Everything is planned before anything installs:
   clusters resolved, every case rendered, and two cases that would be the same release on the same
-  context (the second would replace the first), or a case whose templates render nothing (an upgrade
-  would empty the release), are errors. A remote cluster needs `--yes`. A unit with no templates is
-  skipped. Each install waits up to 5m and rolls back if it doesn't come up; if one fails, the ones
+  context (the second would replace the first), or a case whose manifests render nothing (an upgrade
+  would empty the release), are errors. A remote cluster needs `--yes`. A unit with no manifests
+  sources is skipped. Each install waits up to 5m and rolls back if it doesn't come up; if one fails, the ones
   before it stay applied. Takes `--repo` too; the clusters come from the global config. Two
   one-offs, named as Helm's, for moving resources over from obelisk-local: `--take-ownership` adopts
   resources already in the cluster that aren't the release's, another release's included (without
@@ -130,21 +149,14 @@ ip-allocator.
   `--force-conflicts` forces server-side apply (which the release then keeps) and takes fields
   another field manager owns (left on, it fights what the cluster manages). A refusal either would
   get past (without it already on) says which.
-- `obelisk-k8s template generated-values [-t …]… [-u …]…`: the merged values with each of the unit's
-  generators deep-merged on top, in merge order. `generators:` (in `repo.yaml`, `target.yaml`,
-  `unit.yaml`) lists `{ type, … }` entries like config paths (see the types below); all see the same
-  input, the merged config values. A `gotmpl` one renders through a throwaway Helm chart (`helm` must be
-  installed) with them as `.Values` (`.Release` is the unit / `default`: use `.Values.obelisk`). An
-  output must be one mapping or nothing, and may set `obelisk.release.{name, namespace, version}` like
-  a config file. Takes `--repo` too. Each `gotmpl` generator is its own `helm`
-  run; a unit with any needs a name Helm accepts as a release name (≤ 53 chars).
 - **Release:** `obelisk.release.{name, namespace}` exists only to be `.Release.{Name, Namespace}` (and
   the Helm release `apply` will install), with `obelisk.release.version` (above) as its version. Like
   the version, each must have exactly one distinct value per unit on a target, from
   `release: { name, namespace, version }` in its target or unit (interpolated) or `obelisk.release.*`
-  in a config file or generator; none is an error, as is a conflict. Name and namespace must be valid
-  names; a release name at most 53 characters. Generators still render
-  with `.Release` as the unit / `default` (the release isn't agreed until after them).
+  in any phase's values sources (or the ephemeral values); none is an error, as is a conflict. Name and
+  namespace must be valid names; a release name at most 53 characters. The build file and Go template
+  values sources render with `.Release` as `obelisk-build` / `default`, whatever the unit (the release
+  isn't agreed until after every phase's values): use `.Values.obelisk` there.
 - `config repo …` works on the repo in the current directory, or with `--repo <name>`, on the one with
   that name in the global `repos.yaml` (paths are then shown under it, so they work from anywhere).
 - `--help` groups options under Core, Extra and Special headings (as obeliskd does).
@@ -155,48 +167,77 @@ ip-allocator.
 A unit on a target goes through a few stages, each one inspectable with `template …`:
 
 ```text
-config files ─▶ values ─▶ generators ─▶ generated values ─▶ templates ─▶ k8s resources ─▶ (apply)
-               (merge +    (gotmpl,                         (gotmpl,
-                obelisk:)   rendered by Helm)                 rendered by Helm)
+build file ─▶ build plan ─▶ phase 1 … phase n ─▶ values (+ agreed release) ─▶ manifests ─▶ (apply)
+(Go template,  (`template    (values sources,      (`template values`)          (`template
+ rendered by    build`)       merged in order)                                   manifests`)
+ Helm)
 ```
 
-- **Config files** (`configPaths`) deep-merge into the values, with the tool's `obelisk:` block on top.
-- **Generators** (`generators:`) are Go templates that compute more values from those. Logic lives
-  here, in the repo's own `.gotmpl` files.
-- **Templates** (`templates:`) render k8s resources from the generated values.
-- Both are lists of `{ type, … }` (in `repo.yaml`, `target.yaml`, `unit.yaml`, merged like config
-  paths), and each entry renders on its own:
+- **The build file** (a unit's `build`, else the repo's) is a Go template, rendered through a throwaway
+  Helm chart with just the `obelisk:` block as `.Values`. It's where the logic of what a unit is made
+  of lives (per target, per unit, …). It must print one mapping, the **build plan**:
+
+  ```yaml
+  build:
+    phases:
+      - name: base                  # a valid name, unique in the plan
+        values:
+          - { type: inline, values: { replicas: 1 } }
+          - { type: gotmpl, path: "{{ .Values.obelisk.paths.repo.obelisk }}/{{ .Values.obelisk.target }}.values.yaml.gotmpl" }
+      - name: out
+        manifests:
+          - { type: gotmpl, path: ./app.yaml.gotmpl }
+        images: []                  # reserved: only empty (or missing), for now
+  ```
+
+- **Phases** run in order. V₀ is the `obelisk:` block (with the ephemeral values over it). Everything in
+  phase k, its values sources and its manifests sources, renders against V₍ₖ₋₁₎, the values after the
+  phases before it; its own sources don't see each other. Phase k's values outputs then deep-merge over
+  V₍ₖ₋₁₎, in source order, into Vₖ (and the ephemeral values over that again). A phase may have values
+  sources, manifests sources, both, or neither, in any number and order. After every phase's values, the
+  release is agreed on (**Release**, above); then each phase's manifests render against its V₍ₖ₋₁₎ with
+  the agreed `obelisk.release.{name, namespace, version}` added, and `template values` is Vₙ with it.
+- **Sources** are `{ type, … }`, and each renders on its own:
+  - `{ type: inline, values }`: a values mapping, as it is. Values only.
   - `{ type: gotmpl, path }`: a Go template, rendered through a throwaway Helm chart (all of Helm's
     functions; `.Values` is the values).
   - `{ type: file, path }`: used as it is (raw YAML; nothing in it is templated).
   - `{ type: url, url, sha256? }`: fetched with `curl` every run (https only, redirects too; 2m
-    timeout), checked against `sha256` when given (without one, loading warns), used as it is.
+    timeout), checked against `sha256` when given (without one, a `WARN`, printed as soon as the plan
+    is built: before anything renders from it or installs), used as it is.
   - `{ type: helm, chart, repo?, version, values? }`: an upstream chart, `helm template`d as the
     case's release, CRDs included. `repo` is a URL or a name in `repo.yaml`'s `helmRepos`; an
-    `oci://` chart takes none. Its values are the generated values' mapping at `values` (a
-    dot-separated key; keys with a `.` can't be reached), or none. Templates only. `apply` renders it
-    for the target cluster's capabilities (its Kubernetes and API versions, from `kubectl` on its
-    context, so charts that check `.Capabilities` render what that cluster can take); `template`
-    renders offline, with Helm's defaults.
+    `oci://` chart takes none. Its values are the values' mapping at `values` (a dot-separated key;
+    keys with a `.` can't be reached), or none. Manifests only. `apply` renders it for the target
+    cluster's capabilities (its Kubernetes and API versions, from `kubectl` on its context, so charts
+    that check `.Capabilities` render what that cluster can take); `template` renders offline, with
+    Helm's defaults.
   - `{ type: command, command: [program, args…] }`: run from the repo root with the values (YAML) on
     stdin; its stdout is the output. `./…` resolves from `.obelisk-k8s/`, an absolute path is used as
-    it is, a bare name is looked up on `PATH` (anything else is a load error). No timeout. Its
+    it is, a bare name is looked up on `PATH` (anything else is an error). No timeout. Its
     `# Source:` names only the program (arguments may hold secrets).
-  A `path` starts with `./` and is skipped if missing; `path`, `url` and the `command` words are
-  interpolated. A generator's output must be one values mapping (or nothing); a template's is
-  resources, each from a `file`, `url` or `command` put under its own `# Source:` comment.
+  A `path` is absolute or starts with `./` (from `.obelisk-k8s/`), and is skipped if it's missing; an
+  absolute one under the repo root is shown relative to it (`.obelisk-k8s/…`), so `# Source:`
+  comments and errors are the same on every machine. Nothing in a plan is `${{obelisk:…}}`
+  interpolated (it's a Go template's output: use `.Values.obelisk`), and its strings are read like a
+  values file's (a plain `1` is a number: quote `version: "1"`). A values source's output must be one
+  mapping (or nothing); a manifests source's is resources, each from a `file`, `url` or `command`
+  put under its own `# Source:` comment.
 - **Helm** renders, and applies (`helm upgrade --install`): every unit is a Helm release, whatever
-  its templates' types. An upstream chart's resources are installed as part of the unit's release
-  (not as that chart's own release), hooks and CRDs included as rendered; a CRD and resources of its
-  kind in one unit may fail on a first install (put them in separate units). Helm 4 upgrades with
-  server-side apply: a field something else in the cluster owns (an HPA's `spec.replicas`) is a
-  conflict, so don't set what the cluster manages.
+  its manifests sources' types. An upstream chart's resources are installed as part of the unit's
+  release (not as that chart's own release), hooks and CRDs included as rendered; a CRD and resources
+  of its kind in one unit may fail on a first install (put them in separate units). Helm 4 upgrades
+  with server-side apply: a field something else in the cluster owns (an HPA's `spec.replicas`) is a
+  conflict, so don't set what the cluster manages. Each build file and Go template source is its own
+  `helm` run.
 - **SSM** (`ssm.rs`): `${{obelisk:aws-ssm:<key>}}` in a string (anywhere in it; never a key) is the
   SSM parameter `<key>` (a `:version` / `:label` selector works), decrypted; `$${{obelisk:` writes a
   literal `${{obelisk:` (a `${{` that isn't `obelisk:` is left alone), any other `${{obelisk:…}}` in values is an error, and so is obelisk-local's
-  `ref+awsssm://…`. Refs are resolved in the merged values (before the generators, so generators,
-  Go templates and charts all see plaintext) and in `file` / `url` templates and generators (a `url`
-  with refs needs its `sha256`); never in the output of other generators or commands. A `file` / `url` template with refs is re-written from its parsed form, so its
+  `ref+awsssm://…`. Refs are resolved in each values source's output (an `inline` one's too, and the
+  ephemeral values) before it merges, so every later phase, Go template and chart sees plaintext (a
+  `url` values source with refs needs its `sha256`); and in `file` / `url` manifests sources (a `url`
+  with refs needs its `sha256`); never in the build file's output, nor in what `gotmpl`, `helm` or
+  `command` manifests sources print. A `file` / `url` manifests source with refs is re-written from its parsed form, so its
   comments go and its plain scalars are re-spelled as in values (`08` → `8.0`): quote them. `apply`
   always resolves; `template` only with `--resolve` (else refs are only checked), and then prints
   every resolved value masked as `<aws-ssm:KEY>` (in errors too; every occurrence, so a short value
@@ -206,10 +247,10 @@ config files ─▶ values ─▶ generators ─▶ generated values ─▶ temp
   `AWS_SSM_ACCESS_KEY`, `AWS_SSM_SECRET_KEY` and `AWS_SSM_REGION` if all are set (the GitLab CI
   variables), else the named profile `AWS_SSM_PROFILE` (`~/.aws`; SSO, assume-role and
   `credential_process` work; its region unless `AWS_SSM_REGION` is set), else it's an error. A
-  case's keys are fetched together (Rust AWS SDK, `GetParameters` in tens) and kept for the run;
+  source's keys are fetched together (Rust AWS SDK, `GetParameters` in tens) and kept for the run;
   missing ones fail naming them all.
 - **obelisk-k8s** will order units (CRDs before what uses them, across namespaces), and wait for
-  readiness.
+  readiness. A phase's `images` (reserved, empty for now) is where image builds will go.
 
 ## Roadmap
 
@@ -228,7 +269,7 @@ Design the layout format on paper against v1.3, but build only the current phase
 - **No Obelisk-level Secret vs ConfigMap split.** Each app decides what goes where.
 - **Global vs per-instance** deployments are a pattern users build, not a tool feature.
 - **Config comes from files, not env vars.** Prefer a YAML config file over threading env vars
-  through a generator.
+  through a values source.
 
 ## k3d dials (TODO)
 
@@ -256,10 +297,13 @@ Every k3d cluster is created the same way for now. The dials it will need, none 
 
 Nothing below is decided. Don't silently pick an answer in code; raise it.
 
-- The generator contract: inputs, output location and format.
-- Do our own apps need Helm charts, or can a generator emit plain YAML?
+- ~~The generator contract: inputs, output location and format.~~ Decided: build files and phases
+  (**The design**, above): a values source gets the values before its phase (YAML on stdin, or
+  `.Values`) and outputs one mapping.
+- Do our own apps need Helm charts, or can a Go template / command emit plain YAML?
+- Images in a phase (`images:`): what they declare, and when they build.
 - ~~Do raw/URL YAML units still get SSM resolution (obelisk-local's `doTemplate`)?~~ Decided: `file`
-  and `url` templates always do (**SSM**, above).
+  and `url` manifests sources always do (**SSM**, above).
 - CRD upgrades, given Helm never upgrades `crds/`.
 - ~~Is apply part of v1, or only `template`?~~ Decided: it is (`obelisk-k8s apply`, above).
 - Does the tool own instance identity for clean up/down (v1.1)? Hook shape (v1.2)?

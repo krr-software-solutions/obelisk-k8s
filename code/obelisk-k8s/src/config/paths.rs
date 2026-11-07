@@ -1,89 +1,51 @@
-//! Which config files a unit gets on a target, and in what order they merge.
+//! Which (target, unit) cases a command covers, and which build file each case renders (`config repo
+//! paths`).
 //!
-//! Every config path has a scope: the vars it uses, plus the one implied by the file that declares it
-//! (anything in a `target.yaml` is target-specific, anything in a `unit.yaml` unit-specific). Paths merge
-//! by scope, lowest priority first:
-//!
-//! | scope         | e.g.                                                               |
-//! |---------------|--------------------------------------------------------------------|
-//! | repo          | `repo.yaml`, no vars                                               |
-//! | target        | `repo.yaml` with `target`; `target.yaml` with no vars              |
-//! | unit          | `repo.yaml` with `unit`; `unit.yaml` with no vars                  |
-//! | target + unit | `repo.yaml` with both; `target.yaml` with `unit`; `unit.yaml` with `target` |
-//!
-//! Within a scope, `repo.yaml` comes before `target.yaml` before `unit.yaml`; within a file, the order
-//! written. A path that doesn't exist is skipped.
+//! A unit's build file is its own `build` (in its `unit.yaml`), else the repo's (in `repo.yaml`),
+//! interpolated for the case: `${{obelisk:target}}`, `${{obelisk:unit}}`, and `${{obelisk:path:unit}}`
+//! (the unit's directory, `./units/<dir>`). A path that starts with `./` resolves from `.obelisk-k8s/`;
+//! an absolute one is used as it is.
 
 use std::fmt::{self, Write as _};
 use std::path::{Path, PathBuf};
 
 use crate::ObeliskK8sError;
-use crate::config::repo::{
-    HelmChart, REPO_CONFIG_DIR, REPO_FILE, Render, RepoConfig, Target, Unit,
-};
+use crate::config::repo::{REPO_CONFIG_DIR, RepoConfig, Target, Unit};
 use anstyle::{AnsiColor, Style};
 
 use crate::interp::{InterpString, InterpolationParams, StringPart, Var};
 
-/// Which file declared a config path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Level {
-    Repo,
-    Target,
-    Unit,
-}
-
-/// How specific a config path is. Later scopes win.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Scope {
-    Repo,
-    Target,
-    Unit,
-    TargetUnit,
-}
-
-impl fmt::Display for Scope {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Repo => "repo",
-            Self::Target => "target",
-            Self::Unit => "unit",
-            Self::TargetUnit => "target + unit",
-        })
-    }
-}
-
-/// One config path, resolved for a target and unit.
+/// A case's build file.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResolvedPath<'a> {
+pub struct BuildPath<'a> {
     /// As written.
     pub written: &'a InterpString,
-    /// The file that declares it, relative to the repo root.
+    /// The file that declares it (the unit's `unit.yaml`, or `repo.yaml`), relative to the repo root.
     pub declared_in: &'a Path,
-    pub scope: Scope,
-    /// Relative to the repo root, e.g. `.obelisk-k8s/config/app/values.yaml`.
+    /// Relative to the repo root (`.obelisk-k8s/units/app/build.yaml.gotmpl`), or absolute.
     pub path: PathBuf,
-    /// Whether it's an existing file (if not, it's skipped).
+    /// Whether it's an existing file.
     pub found: bool,
+    /// What `${{obelisk:path:unit}}` was (`./units/app`; `None` if the directory isn't UTF-8).
+    pub path_unit: Option<String>,
 }
 
 impl RepoConfig {
-    /// Every config path for `unit` on `target`, in merge order (lowest priority first), including the
-    /// ones that don't exist.
+    /// The build file of `unit` on `target`.
     ///
     /// # Errors
     ///
     /// [`ObeliskK8sError::Usage`] if there's no such target or unit, or the unit doesn't deploy to the
-    /// target; [`ObeliskK8sError::Config`] if a path uses a var with no value here.
-    pub fn config_paths_for<'a>(
+    /// target; [`ObeliskK8sError::Config`] if its path uses a var with no value here.
+    pub fn build_path_for<'a>(
         &'a self,
         repo_root: &Path,
         target: &str,
         unit: &str,
-    ) -> Result<Vec<ResolvedPath<'a>>, ObeliskK8sError> {
+    ) -> Result<BuildPath<'a>, ObeliskK8sError> {
         let selection = self.select(&[target.to_owned()], &[unit.to_owned()])?;
         let (target, unit) = selection.cases[0];
-        self.resolve(repo_root, target, unit)
+        self.build_path(repo_root, target, unit)
     }
 
     /// The (target, unit) cases a `config repo paths` selection covers. No names means all of them.
@@ -129,7 +91,7 @@ impl RepoConfig {
         Ok(Selection { cases, single })
     }
 
-    /// `config repo paths`: the config paths of every case in `selection`.
+    /// `config repo paths`: the build file of every case in `selection`.
     ///
     /// # Errors
     ///
@@ -147,7 +109,7 @@ impl RepoConfig {
                 Ok(Case {
                     target: &target.name,
                     unit: &unit.name,
-                    paths: self.resolve(repo_root, target, unit)?,
+                    build: self.build_path(repo_root, target, unit)?,
                 })
             })
             .collect::<Result<_, ObeliskK8sError>>()?;
@@ -163,53 +125,39 @@ impl RepoConfig {
         self.unit_target_names(unit).contains(&target.name.as_str())
     }
 
-    /// `unit`'s config paths on `target`, in merge order.
-    pub(crate) fn resolve<'a>(
+    /// `unit`'s build file on `target`.
+    pub(crate) fn build_path<'a>(
         &'a self,
         repo_root: &Path,
-        target: &'a Target,
+        target: &Target,
         unit: &'a Unit,
-    ) -> Result<Vec<ResolvedPath<'a>>, ObeliskK8sError> {
-        let declared = [
-            (
-                Level::Repo,
-                Path::new(REPO_FILE),
-                self.config_paths.iter().collect(),
-            ),
-            (
-                Level::Target,
-                target.file.as_path(),
-                target.config_paths.iter().collect(),
-            ),
-            (
-                Level::Unit,
-                unit.file.as_path(),
-                unit.config_paths.iter().collect(),
-            ),
-        ];
-        resolve_declared(repo_root, target, unit, declared)
-    }
-
-    /// `unit`'s generators on `target`, in the same order (and with the same rules) as config paths.
-    pub(crate) fn resolve_generators<'a>(
-        &'a self,
-        repo_root: &Path,
-        target: &'a Target,
-        unit: &'a Unit,
-    ) -> Result<Vec<ResolvedRender<'a>>, ObeliskK8sError> {
-        let lists = [&self.generators, &target.generators, &unit.generators];
-        resolve_renders(repo_root, target, unit, lists)
-    }
-
-    /// `unit`'s templates on `target`, in the same order (and with the same rules) as config paths.
-    pub(crate) fn resolve_templates<'a>(
-        &'a self,
-        repo_root: &Path,
-        target: &'a Target,
-        unit: &'a Unit,
-    ) -> Result<Vec<ResolvedRender<'a>>, ObeliskK8sError> {
-        let lists = [&self.templates, &target.templates, &unit.templates];
-        resolve_renders(repo_root, target, unit, lists)
+    ) -> Result<BuildPath<'a>, ObeliskK8sError> {
+        let (written, declared_in) = self.build_of(unit);
+        let path_unit = unit.path();
+        let params = InterpolationParams {
+            target: Some(&target.name),
+            unit: Some(&unit.name),
+            path_unit: path_unit.as_deref(),
+        };
+        let evaluated = written
+            .interpolate(&params)
+            .map_err(|var| ObeliskK8sError::Config {
+                file: declared_in.to_owned(),
+                at: None,
+                message: format!(
+                    "`{written}`: `${{{{obelisk:{}}}}}` has no value here",
+                    var.name()
+                ),
+            })?;
+        // Checked at load: `./…` (`${{obelisk:path:unit}}` is one), or absolute.
+        let path = from_repo_config(&evaluated);
+        Ok(BuildPath {
+            found: repo_root.join(&path).is_file(),
+            written,
+            declared_in,
+            path,
+            path_unit,
+        })
     }
 
     fn target(&self, name: &str) -> Result<&Target, ObeliskK8sError> {
@@ -233,199 +181,12 @@ impl RepoConfig {
     }
 }
 
-/// A generator or template for one case: where it goes in the merge order, and what to run.
-#[derive(Debug)]
-pub(crate) struct ResolvedRender<'a> {
-    pub(crate) scope: Scope,
-    pub(crate) source: Source<'a>,
-}
-
-/// What a [`ResolvedRender`] reads or runs, interpolated.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Source<'a> {
-    /// Relative to the repo root, and whether it exists (if not, it's skipped).
-    Gotmpl {
-        path: PathBuf,
-        found: bool,
-    },
-    /// As [`Source::Gotmpl`].
-    File {
-        path: PathBuf,
-        found: bool,
-    },
-    Url {
-        url: String,
-        sha256: Option<&'a str>,
-    },
-    Helm(&'a HelmChart),
-    /// The program (`./…` made relative to the repo root), then its arguments.
-    Command(Vec<String>),
-}
-
-impl ResolvedRender<'_> {
-    /// Whether it runs: everything but a missing file does.
-    pub(crate) fn present(&self) -> bool {
-        !matches!(
-            self.source,
-            Source::Gotmpl { found: false, .. } | Source::File { found: false, .. }
-        )
-    }
-
-    /// What it is, for messages, `# Source:` comments and what a generator set under `obelisk:`: its
-    /// path (relative to the repo root), URL, chart, or (not its arguments, which may hold secrets) a
-    /// command's program.
-    pub(crate) fn describe(&self) -> PathBuf {
-        match &self.source {
-            Source::Gotmpl { path, .. } | Source::File { path, .. } => path.clone(),
-            Source::Url { url, .. } => url.into(),
-            Source::Helm(chart) => format!("{}@{}", chart.chart, chart.version).into(),
-            Source::Command(words) => words[0].clone().into(),
-        }
-    }
-
-    /// [`ResolvedRender::describe`], as the user should see it: a path under `shown_root`.
-    pub(crate) fn shown(&self, shown_root: Option<&Path>) -> PathBuf {
-        match &self.source {
-            Source::Gotmpl { path, .. } | Source::File { path, .. } => {
-                crate::config::values::shown_under(shown_root, path)
-            }
-            _ => self.describe(),
-        }
-    }
-}
-
-/// Resolves the renders declared at the repo, target and unit levels (`lists`, in that order),
-/// ordered like config paths: by scope, then as declared.
-fn resolve_renders<'a>(
-    repo_root: &Path,
-    target: &'a Target,
-    unit: &'a Unit,
-    [repo, target_renders, unit_renders]: [&'a Vec<Render>; 3],
-) -> Result<Vec<ResolvedRender<'a>>, ObeliskK8sError> {
-    let params = InterpolationParams {
-        target: Some(&target.name),
-        unit: Some(&unit.name),
-    };
-    let declared = [
-        (Level::Repo, Path::new(REPO_FILE), repo),
-        (Level::Target, target.file.as_path(), target_renders),
-        (Level::Unit, unit.file.as_path(), unit_renders),
-    ];
-    let mut resolved = Vec::new();
-    for (level, declared_in, renders) in declared {
-        for render in renders {
-            let interpolate = |s: &InterpString| {
-                s.interpolate(&params)
-                    .map_err(|var| ObeliskK8sError::Config {
-                        file: declared_in.to_owned(),
-                        at: None,
-                        message: format!(
-                            "`{s}`: `${{{{obelisk:{}}}}}` has no value here",
-                            var.name()
-                        ),
-                    })
-            };
-            let from_repo_config = |written: &str| {
-                Path::new(REPO_CONFIG_DIR).join(written.strip_prefix("./").unwrap_or(written))
-            };
-            let (source, interpolated): (Source, Vec<&InterpString>) = match render {
-                Render::Gotmpl { path: written } | Render::File { path: written } => {
-                    let path = from_repo_config(&interpolate(written)?);
-                    let found = repo_root.join(&path).is_file();
-                    let source = if matches!(render, Render::Gotmpl { .. }) {
-                        Source::Gotmpl { path, found }
-                    } else {
-                        Source::File { path, found }
-                    };
-                    (source, vec![written])
-                }
-                Render::Url { url, sha256 } => (
-                    Source::Url {
-                        url: interpolate(url)?,
-                        sha256: sha256.as_deref(),
-                    },
-                    vec![url],
-                ),
-                Render::Helm(chart) => (Source::Helm(chart), Vec::new()),
-                Render::Command { command } => {
-                    let mut words = command
-                        .iter()
-                        .map(&interpolate)
-                        .collect::<Result<Vec<_>, _>>()?;
-                    if words[0].starts_with("./") {
-                        words[0] = from_repo_config(&words[0]).display().to_string();
-                    }
-                    (Source::Command(words), command.iter().collect())
-                }
-            };
-            resolved.push(ResolvedRender {
-                scope: scope_of(level, &interpolated),
-                source,
-            });
-        }
-    }
-    // Stable: `declared` is already in level order, and each in the order written.
-    resolved.sort_by_key(|r| r.scope);
-    Ok(resolved)
-}
-
-/// Interpolates and orders paths declared at each level (repo, target, unit).
-fn resolve_declared<'a>(
-    repo_root: &Path,
-    target: &Target,
-    unit: &Unit,
-    declared: [(Level, &'a Path, Vec<&'a InterpString>); 3],
-) -> Result<Vec<ResolvedPath<'a>>, ObeliskK8sError> {
-    let params = InterpolationParams {
-        target: Some(&target.name),
-        unit: Some(&unit.name),
-    };
-
-    let mut resolved = Vec::new();
-    for (level, declared_in, paths) in declared {
-        for written in paths {
-            let interpolated =
-                written
-                    .interpolate(&params)
-                    .map_err(|var| ObeliskK8sError::Config {
-                        file: declared_in.to_owned(),
-                        at: None,
-                        message: format!(
-                            "`{written}`: `${{{{obelisk:{}}}}}` has no value here",
-                            var.name()
-                        ),
-                    })?;
-            // Every config path starts with `./` (checked at load), relative to `.obelisk-k8s/`.
-            let relative = interpolated.strip_prefix("./").unwrap_or(&interpolated);
-            let path = Path::new(REPO_CONFIG_DIR).join(relative);
-            resolved.push(ResolvedPath {
-                found: repo_root.join(&path).is_file(),
-                written,
-                declared_in,
-                scope: scope(level, written),
-                path,
-            });
-        }
-    }
-    // Stable: `declared` is already in level order, and each file in the order written.
-    resolved.sort_by_key(|r| r.scope);
-    Ok(resolved)
-}
-
-fn scope(level: Level, path: &InterpString) -> Scope {
-    scope_of(level, &[path])
-}
-
-/// A scope from the level something's declared at and the variables it uses.
-fn scope_of(level: Level, written: &[&InterpString]) -> Scope {
-    let vars: std::collections::BTreeSet<Var> = written.iter().flat_map(|w| w.vars()).collect();
-    let target = level == Level::Target || vars.contains(&Var::Target);
-    let unit = level == Level::Unit || vars.contains(&Var::Unit);
-    match (target, unit) {
-        (false, false) => Scope::Repo,
-        (true, false) => Scope::Target,
-        (false, true) => Scope::Unit,
-        (true, true) => Scope::TargetUnit,
+/// A path as written in obelisk-k8s's files: `./…` is relative to `.obelisk-k8s/` (and comes back
+/// relative to the repo root); anything else (an absolute path) is used as it is.
+pub(crate) fn from_repo_config(written: &str) -> PathBuf {
+    match written.strip_prefix("./") {
+        Some(rest) => Path::new(REPO_CONFIG_DIR).join(rest),
+        None => PathBuf::from(written),
     }
 }
 
@@ -456,15 +217,15 @@ pub struct Selection<'a> {
     pub single: bool,
 }
 
-/// One (target, unit) case's config paths.
+/// One (target, unit) case's build file.
 #[derive(Debug)]
 pub struct Case<'a> {
     pub target: &'a str,
     pub unit: &'a str,
-    pub paths: Vec<ResolvedPath<'a>>,
+    pub build: BuildPath<'a>,
 }
 
-/// What `config repo paths` prints. For a single case: just its found paths, or with `explain`, its
+/// What `config repo paths` prints. For a single case: just its build file, or with `explain`, its
 /// table. For several: each under a magenta `[ target=…, unit=… ]` header, a blank line between.
 #[derive(Debug)]
 pub struct PathsReport<'a> {
@@ -510,7 +271,7 @@ impl fmt::Display for PathsReport<'_> {
             let explain = Explain {
                 target: case.target,
                 unit: case.unit,
-                paths: &case.paths,
+                build: &case.build,
                 shown_root: self.shown_root.as_deref(),
             };
             if !self.single {
@@ -523,22 +284,18 @@ impl fmt::Display for PathsReport<'_> {
             match (self.explain, self.single) {
                 (true, true) => write!(f, "{explain}")?,
                 (true, false) => explain.write_table(f)?,
-                (false, _) => {
-                    for path in case.paths.iter().filter(|p| p.found) {
-                        writeln!(
-                            f,
-                            "{}",
-                            shown(self.shown_root.as_deref(), &path.path).display()
-                        )?;
-                    }
-                }
+                (false, _) => writeln!(
+                    f,
+                    "{}",
+                    shown(self.shown_root.as_deref(), &case.build.path).display()
+                )?,
             }
         }
         Ok(())
     }
 }
 
-/// `path` (relative to the repo root) as the user should see it.
+/// `path` (relative to the repo root, or absolute) as the user should see it.
 fn shown(shown_root: Option<&Path>, path: &Path) -> PathBuf {
     crate::config::values::shown_under(shown_root, path)
 }
@@ -551,13 +308,13 @@ fn or_none(names: &[&str]) -> String {
     }
 }
 
-/// `config repo paths --explain`: every config path in merge order, as a table of the path as written,
-/// as evaluated, and whether it was found. Vars and their values are highlighted; print it through
-/// `anstream`, which drops the colors when they aren't wanted.
+/// `config repo paths --explain`: a case's build file, as a table of the path as written, the file
+/// that declares it, the path as evaluated, and whether it's there. Vars and their values are
+/// highlighted; print it through `anstream`, which drops the colors when they aren't wanted.
 pub struct Explain<'a> {
     pub target: &'a str,
     pub unit: &'a str,
-    pub paths: &'a [ResolvedPath<'a>],
+    pub build: &'a BuildPath<'a>,
     /// As [`PathsReport::shown_root`].
     pub shown_root: Option<&'a Path>,
 }
@@ -565,7 +322,7 @@ pub struct Explain<'a> {
 const HEADER: Style = Style::new().bold().underline();
 const VAR: Style = AnsiColor::Cyan.on_default();
 const FOUND: Style = AnsiColor::Green.on_default().bold();
-const SKIPPED: Style = AnsiColor::Yellow.on_default();
+const MISSING: Style = AnsiColor::Yellow.on_default();
 
 /// A cell's text, plain (to measure) and styled (to print).
 struct Cell {
@@ -581,24 +338,32 @@ impl Cell {
         }
     }
 
-    /// `path`'s parts, with each var rendered by `var` and highlighted.
-    fn from_parts(path: &InterpString, var: impl Fn(Var) -> String) -> Self {
-        let mut cell = Self {
-            plain: String::new(),
-            styled: String::new(),
-        };
-        for part in path.parts() {
-            match part {
-                StringPart::Text(text) => {
-                    cell.plain.push_str(text);
-                    cell.styled.push_str(text);
-                }
-                StringPart::Var(v) => {
-                    let value = var(*v);
-                    cell.plain.push_str(&value);
-                    // Writing to a String can't fail.
-                    let _ = write!(cell.styled, "{VAR}{value}{VAR:#}");
-                }
+    fn plain(text: &str) -> Self {
+        Self {
+            plain: text.to_owned(),
+            styled: text.to_owned(),
+        }
+    }
+
+    /// `path`'s parts, with each var rendered by `var` and highlighted, and a leading `./` (in the
+    /// first part) replaced by `dot` (when given).
+    fn from_parts(path: &InterpString, var: impl Fn(Var) -> String, dot: Option<&str>) -> Self {
+        let mut cell = Self::plain("");
+        for (i, part) in path.parts().iter().enumerate() {
+            let (text, is_var) = match part {
+                StringPart::Text(text) => (text.clone(), false),
+                StringPart::Var(v) => (var(*v), true),
+            };
+            let text = match (i, dot, text.strip_prefix("./")) {
+                (0, Some(dot), Some(rest)) => format!("{dot}/{rest}"),
+                _ => text,
+            };
+            cell.plain.push_str(&text);
+            if is_var {
+                // Writing to a String can't fail.
+                let _ = write!(cell.styled, "{VAR}{text}{VAR:#}");
+            } else {
+                cell.styled.push_str(&text);
             }
         }
         cell
@@ -611,87 +376,72 @@ impl Cell {
 }
 
 impl Explain<'_> {
-    fn raw(path: &ResolvedPath<'_>) -> Cell {
-        let cell = Cell::from_parts(path.written, |v| format!("${{{{obelisk:{}}}}}", v.name()));
-        if cell.plain == path.written.raw() {
+    fn raw(&self) -> Cell {
+        let written = self.build.written;
+        let cell = Cell::from_parts(written, |v| format!("${{{{obelisk:{}}}}}", v.name()), None);
+        if cell.plain == written.raw() {
             cell
         } else {
             // An escaped `$${{`: rebuilding from the parts would hide the escape, so show it as written.
-            let raw = path.written.raw().to_owned();
-            Cell {
-                styled: raw.clone(),
-                plain: raw,
-            }
+            Cell::plain(written.raw())
         }
     }
 
-    fn evaluated(&self, path: &ResolvedPath<'_>) -> Cell {
-        let mut cell = Cell::from_parts(path.written, |v| {
-            match v {
-                Var::Target => self.target,
-                Var::Unit => self.unit,
-            }
-            .to_owned()
-        });
-        // Show it as `path` is shown: under the repo, without the `./` (every config path starts with one).
+    fn evaluated(&self) -> Cell {
+        // Shown as `path` is: a `./…` under the repo's `.obelisk-k8s/`.
         let base = shown(self.shown_root, Path::new(REPO_CONFIG_DIR));
-        for text in [&mut cell.plain, &mut cell.styled] {
-            let rest = text.strip_prefix("./").unwrap_or(text);
-            *text = format!("{}/{rest}", base.display());
+        Cell::from_parts(
+            self.build.written,
+            |v| match v {
+                Var::Target => self.target.to_owned(),
+                Var::Unit => self.unit.to_owned(),
+                // Has a value, or the build path wouldn't have resolved.
+                Var::PathUnit => self.build.path_unit.clone().unwrap_or_default(),
+            },
+            Some(&base.display().to_string()),
+        )
+    }
+
+    /// The table alone, without the title line.
+    fn write_table(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let headers = ["RAW", "FROM", "EVALUATED", "STATUS"].map(|h| Cell::styled(HEADER, h));
+        let status = if self.build.found {
+            Cell::styled(FOUND, "found")
+        } else {
+            Cell::styled(MISSING, "missing")
+        };
+        let from = shown(self.shown_root, self.build.declared_in);
+        let row = [
+            self.raw(),
+            Cell::plain(&from.display().to_string()),
+            self.evaluated(),
+            status,
+        ];
+        let widths: Vec<usize> = (0..3)
+            .map(|col| {
+                [&headers, &row]
+                    .iter()
+                    .map(|r| r[col].plain.chars().count())
+                    .max()
+                    .unwrap_or(0)
+            })
+            .collect();
+        for row in [&headers, &row] {
+            for (col, cell) in row.iter().enumerate() {
+                write!(f, "  ")?;
+                cell.write(f, widths.get(col).copied().unwrap_or(0))?;
+            }
+            writeln!(f)?;
         }
-        cell
+        Ok(())
     }
 }
 
 impl fmt::Display for Explain<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let (target, unit) = (self.target, self.unit);
-        writeln!(
-            f,
-            "config paths for unit `{unit}` on target `{target}`, lowest priority first:\n"
-        )?;
+        writeln!(f, "build file for unit `{unit}` on target `{target}`:\n")?;
         self.write_table(f)
-    }
-}
-
-impl Explain<'_> {
-    /// The table alone, without the title line.
-    fn write_table(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let headers = ["RAW", "EVALUATED", "STATUS"].map(|h| Cell::styled(HEADER, h));
-        let rows: Vec<[Cell; 3]> = self
-            .paths
-            .iter()
-            .map(|p| {
-                let status = if p.found {
-                    Cell::styled(FOUND, "found")
-                } else {
-                    Cell::styled(SKIPPED, "skipped")
-                };
-                [Self::raw(p), self.evaluated(p), status]
-            })
-            .collect();
-        let width = |col: usize| {
-            rows.iter()
-                .chain([&headers])
-                .map(|row| row[col].plain.chars().count())
-                .max()
-                .unwrap_or(0)
-        };
-        let widths = [width(0), width(1)];
-
-        for row in [&headers].into_iter().chain(&rows) {
-            write!(f, "  ")?;
-            row[0].write(f, widths[0])?;
-            write!(f, "  ")?;
-            row[1].write(f, widths[1])?;
-            write!(f, "  ")?;
-            row[2].write(f, 0)?;
-            writeln!(f)?;
-        }
-        if rows.is_empty() {
-            writeln!(f, "  (none)")?;
-        }
-        Ok(())
     }
 }
 
@@ -704,116 +454,117 @@ mod tests {
         write_repo(files)
     }
 
-    /// Every combination of declaring file and vars.
-    fn full_repo() -> tempfile::TempDir {
+    /// Repo build `./builds/${{obelisk:target}}.gotmpl`; unit `web` has its own in its directory.
+    fn builds_repo() -> tempfile::TempDir {
         repo(&[
             (
                 "repo.yaml",
-                "repo:\n  name: r\n  configPaths:\n    - ./r/t-u/${{obelisk:target}}-${{obelisk:unit}}.yaml\n    - ./r/u/${{obelisk:unit}}.yaml\n    - ./r/t/${{obelisk:target}}.yaml\n    - ./r/plain.yaml\n",
+                "repo:\n  name: r\n  build: \"./builds/${{obelisk:target}}.gotmpl\"\n",
             ),
+            ("targets/prod/target.yaml", "target:\n  cluster: c\n"),
+            ("units/app/unit.yaml", "unit: {}\n"),
             (
-                "targets/prod/target.yaml",
-                "target:\n  cluster: c\n  configPaths:\n    - ./t/u/${{obelisk:unit}}.yaml\n    - ./t/plain.yaml\n",
+                "units/web/unit.yaml",
+                "unit:\n  build: \"${{obelisk:path:unit}}/${{obelisk:target}}.gotmpl\"\n",
             ),
-            (
-                "units/app/unit.yaml",
-                "unit:\n  configPaths:\n    - ./u/t/${{obelisk:target}}.yaml\n    - ./u/plain.yaml\n",
-            ),
-            ("r/plain.yaml", "a: 1\n"),
-            ("u/t/prod.yaml", "a: 2\n"),
+            ("builds/prod.gotmpl", ""),
         ])
     }
 
     #[test]
-    fn merges_by_scope_then_file_then_written_order() {
-        let dir = full_repo();
+    fn a_units_build_file_overrides_the_repos() {
+        let dir = builds_repo();
         let config = RepoConfig::load(dir.path()).unwrap();
-        let paths = config.config_paths_for(dir.path(), "prod", "app").unwrap();
-        let order: Vec<_> = paths
-            .iter()
-            .map(|p| {
-                (
-                    p.scope,
-                    p.path.to_str().unwrap().trim_start_matches(".obelisk-k8s/"),
-                )
-            })
+        let app = config.build_path_for(dir.path(), "prod", "app").unwrap();
+        assert_eq!(app.path, Path::new(".obelisk-k8s/builds/prod.gotmpl"));
+        assert_eq!(app.declared_in, Path::new(".obelisk-k8s/repo.yaml"));
+        assert!(app.found);
+        let web = config.build_path_for(dir.path(), "prod", "web").unwrap();
+        // `${{obelisk:path:unit}}` is the unit's directory, from `.obelisk-k8s/`.
+        assert_eq!(web.path, Path::new(".obelisk-k8s/units/web/prod.gotmpl"));
+        assert_eq!(
+            web.declared_in,
+            Path::new(".obelisk-k8s/units/web/unit.yaml")
+        );
+        assert!(!web.found);
+    }
+
+    #[test]
+    fn a_repo_build_file_can_use_the_units_path() {
+        let dir = repo(&[
+            (
+                "repo.yaml",
+                "repo:\n  name: r\n  build: \"${{obelisk:path:unit}}/build.yaml.gotmpl\"\n",
+            ),
+            ("targets/prod/target.yaml", "target:\n  cluster: c\n"),
+            ("units/a/unit.yaml", "unit: {}\n"),
+            ("units/b/unit.yaml", "unit: {}\n"),
+            ("units/b/build.yaml.gotmpl", ""),
+        ]);
+        let config = RepoConfig::load(dir.path()).unwrap();
+        let paths: Vec<_> = ["a", "b"]
+            .map(|u| config.build_path_for(dir.path(), "prod", u).unwrap())
+            .into_iter()
+            .map(|b| (b.path.display().to_string(), b.found))
             .collect();
         assert_eq!(
-            order,
+            paths,
             [
-                (Scope::Repo, "r/plain.yaml"),
-                (Scope::Target, "r/t/prod.yaml"),
-                (Scope::Target, "t/plain.yaml"),
-                (Scope::Unit, "r/u/app.yaml"),
-                (Scope::Unit, "u/plain.yaml"),
-                (Scope::TargetUnit, "r/t-u/prod-app.yaml"),
-                (Scope::TargetUnit, "t/u/app.yaml"),
-                (Scope::TargetUnit, "u/t/prod.yaml"),
+                (".obelisk-k8s/units/a/build.yaml.gotmpl".to_owned(), false),
+                (".obelisk-k8s/units/b/build.yaml.gotmpl".to_owned(), true),
             ]
         );
-        let found: Vec<_> = paths
-            .iter()
-            .filter(|p| p.found)
-            .map(|p| p.path.clone())
-            .collect();
-        assert_eq!(
-            found,
-            [
-                PathBuf::from(".obelisk-k8s/r/plain.yaml"),
-                PathBuf::from(".obelisk-k8s/u/t/prod.yaml")
-            ]
-        );
-        assert_eq!(paths[5].declared_in, Path::new(".obelisk-k8s/repo.yaml"));
-        assert_eq!(
-            paths[7].declared_in,
-            Path::new(".obelisk-k8s/units/app/unit.yaml")
-        );
-        assert_eq!(paths[7].written.raw(), "./u/t/${{obelisk:target}}.yaml");
+    }
+
+    #[test]
+    fn an_absolute_build_path_is_used_as_it_is() {
+        let dir = repo(&[
+            (
+                "repo.yaml",
+                "repo:\n  name: r\n  build: /abs/build.gotmpl\n",
+            ),
+            ("targets/prod/target.yaml", "target:\n  cluster: c\n"),
+            ("units/app/unit.yaml", "unit: {}\n"),
+        ]);
+        let config = RepoConfig::load(dir.path()).unwrap();
+        let build = config.build_path_for(dir.path(), "prod", "app").unwrap();
+        assert_eq!(build.path, Path::new("/abs/build.gotmpl"));
+        let selection = config.select(&[], &[]).unwrap();
+        let mut report = config.paths_report(dir.path(), &selection, false).unwrap();
+        report.shown_root = Some("~/r".into());
+        assert_eq!(report.to_string(), "/abs/build.gotmpl\n");
     }
 
     #[test]
     fn explains_as_a_table() {
-        let dir = full_repo();
+        let dir = builds_repo();
         let config = RepoConfig::load(dir.path()).unwrap();
-        let paths = config.config_paths_for(dir.path(), "prod", "app").unwrap();
+        let build = config.build_path_for(dir.path(), "prod", "web").unwrap();
         let styled = Explain {
             target: "prod",
-            unit: "app",
-            paths: &paths[..3],
+            unit: "web",
+            build: &build,
             shown_root: None,
         }
         .to_string();
         assert_eq!(
             anstream::adapter::strip_str(&styled).to_string(),
-            "config paths for unit `app` on target `prod`, lowest priority first:\n\n\
-             \x20 RAW                             EVALUATED                   STATUS\n\
-             \x20 ./r/plain.yaml                  .obelisk-k8s/r/plain.yaml   found\n\
-             \x20 ./r/t/${{obelisk:target}}.yaml  .obelisk-k8s/r/t/prod.yaml  skipped\n\
-             \x20 ./t/plain.yaml                  .obelisk-k8s/t/plain.yaml   skipped\n"
+            "build file for unit `web` on target `prod`:\n\n\
+             \x20 RAW                                                FROM                              EVALUATED                           STATUS\n\
+             \x20 ${{obelisk:path:unit}}/${{obelisk:target}}.gotmpl  .obelisk-k8s/units/web/unit.yaml  .obelisk-k8s/units/web/prod.gotmpl  missing\n"
         );
-        // Vars and their values are highlighted, and the statuses colored.
+        // Vars and their values are highlighted, and the status colored.
         assert!(
             styled.contains(&format!("{VAR}${{{{obelisk:target}}}}{VAR:#}")),
             "{styled}"
         );
-        assert!(styled.contains(&format!("{VAR}prod{VAR:#}")), "{styled}");
         assert!(
-            styled.contains(&format!("{FOUND}found{FOUND:#}")),
+            styled.contains(&format!("{VAR}.obelisk-k8s/units/web{VAR:#}")),
             "{styled}"
         );
-
-        let none = Explain {
-            target: "prod",
-            unit: "app",
-            paths: &[],
-            shown_root: None,
-        }
-        .to_string();
         assert!(
-            anstream::adapter::strip_str(&none)
-                .to_string()
-                .ends_with("STATUS\n  (none)\n"),
-            "{none}"
+            styled.contains(&format!("{MISSING}missing{MISSING:#}")),
+            "{styled}"
         );
     }
 
@@ -822,23 +573,23 @@ mod tests {
         let dir = repo(&[
             (
                 "repo.yaml",
-                "repo:\n  name: r\n  configPaths: [\"./a$${{b}}.yaml\"]\n",
+                "repo:\n  name: r\n  build: \"./a$${{b}}.yaml\"\n",
             ),
             ("targets/t/target.yaml", "target:\n  cluster: c\n"),
             ("units/u/unit.yaml", "unit: {}\n"),
         ]);
         let config = RepoConfig::load(dir.path()).unwrap();
-        let paths = config.config_paths_for(dir.path(), "t", "u").unwrap();
+        let build = config.build_path_for(dir.path(), "t", "u").unwrap();
         let text = Explain {
             target: "t",
             unit: "u",
-            paths: &paths,
+            build: &build,
             shown_root: None,
         }
         .to_string();
         let text = anstream::adapter::strip_str(&text).to_string();
         assert!(
-            text.contains("./a$${{b}}.yaml  .obelisk-k8s/a${{b}}.yaml"),
+            text.contains("./a$${{b}}.yaml  .obelisk-k8s/repo.yaml  .obelisk-k8s/a${{b}}.yaml"),
             "{text}"
         );
     }
@@ -846,7 +597,7 @@ mod tests {
     #[test]
     fn refuses_unknown_or_undeployed_names() {
         let dir = repo(&[
-            ("repo.yaml", "repo:\n  name: r\n"),
+            ("repo.yaml", "repo:\n  name: r\n  build: ./b\n"),
             ("targets/prod/target.yaml", "target:\n  cluster: c\n"),
             ("targets/dev/target.yaml", "target:\n  cluster: c\n"),
             ("units/app/unit.yaml", "unit:\n  targets: [dev]\n"),
@@ -854,7 +605,7 @@ mod tests {
         let config = RepoConfig::load(dir.path()).unwrap();
         let error = |t, u| {
             config
-                .config_paths_for(dir.path(), t, u)
+                .build_path_for(dir.path(), t, u)
                 .unwrap_err()
                 .to_string()
         };
@@ -874,13 +625,13 @@ mod tests {
         repo(&[
             (
                 "repo.yaml",
-                "repo:\n  name: r\n  configPaths: [\"./${{obelisk:unit}}.yaml\"]\n",
+                "repo:\n  name: r\n  build: \"./${{obelisk:unit}}.gotmpl\"\n",
             ),
             ("targets/t1/target.yaml", "target:\n  cluster: c\n"),
             ("targets/t2/target.yaml", "target:\n  cluster: c\n"),
             ("units/u1/unit.yaml", "unit: {}\n"),
             ("units/u2/unit.yaml", "unit:\n  targets: [t2]\n"),
-            ("u1.yaml", ""),
+            ("u1.gotmpl", ""),
         ])
     }
 
@@ -949,13 +700,13 @@ mod tests {
             .paths_report(dir.path(), &selection, false)
             .unwrap()
             .to_string();
-        assert_eq!(plain, ".obelisk-k8s/u1.yaml\n");
+        assert_eq!(plain, ".obelisk-k8s/u1.gotmpl\n");
         let explain = config
             .paths_report(dir.path(), &selection, true)
             .unwrap()
             .to_string();
         assert!(
-            explain.starts_with("config paths for unit `u1` on target `t1`"),
+            explain.starts_with("build file for unit `u1` on target `t1`"),
             "{explain}"
         );
     }
@@ -972,9 +723,10 @@ mod tests {
                 .unwrap()
                 .to_string(),
         );
+        // A missing build file is shown too: rendering it is the error.
         assert_eq!(
             plain,
-            "[ target=t1, unit=u1 ]\n.obelisk-k8s/u1.yaml\n\n[ target=t2, unit=u1 ]\n.obelisk-k8s/u1.yaml\n\n[ target=t2, unit=u2 ]\n"
+            "[ target=t1, unit=u1 ]\n.obelisk-k8s/u1.gotmpl\n\n[ target=t2, unit=u1 ]\n.obelisk-k8s/u1.gotmpl\n\n[ target=t2, unit=u2 ]\n.obelisk-k8s/u2.gotmpl\n"
         );
         let styled = config
             .paths_report(dir.path(), &selection, true)
@@ -987,7 +739,7 @@ mod tests {
             "{styled}"
         );
         let explain = strip(styled);
-        assert!(!explain.contains("config paths for"), "{explain}");
+        assert!(!explain.contains("build file for"), "{explain}");
         assert!(
             explain.starts_with("[ target=t1, unit=u1 ]\n  RAW"),
             "{explain}"
@@ -996,96 +748,6 @@ mod tests {
             explain.contains("found\n\n[ target=t2, unit=u2 ]\n  RAW"),
             "{explain}"
         );
-    }
-
-    #[test]
-    fn orders_generators_like_config_paths() {
-        let dir = repo(&[
-            (
-                "repo.yaml",
-                "repo:\n  name: r\n  generators:\n    - { type: gotmpl, path: \"./${{obelisk:unit}}.gen\" }\n    - { type: gotmpl, path: ./global.gen }\n",
-            ),
-            (
-                "targets/prod/target.yaml",
-                "target:\n  cluster: c\n  generators: [{ type: gotmpl, path: ./prod.gen }]\n",
-            ),
-            (
-                "units/app/unit.yaml",
-                "unit:\n  generators: [{ type: gotmpl, path: \"./${{obelisk:target}}-app.gen\" }]\n",
-            ),
-            ("global.gen", ""),
-            ("prod-app.gen", ""),
-        ]);
-        let config = RepoConfig::load(dir.path()).unwrap();
-        let target = &config.targets[0];
-        let unit = &config.units[0];
-        let order: Vec<_> = config
-            .resolve_generators(dir.path(), target, unit)
-            .unwrap()
-            .into_iter()
-            .map(|p| match p.source {
-                Source::Gotmpl { path, found } => (p.scope, path.display().to_string(), found),
-                other => panic!("{other:?}"),
-            })
-            .collect();
-        assert_eq!(
-            order,
-            [
-                (Scope::Repo, ".obelisk-k8s/global.gen".to_owned(), true),
-                (Scope::Target, ".obelisk-k8s/prod.gen".to_owned(), false),
-                (Scope::Unit, ".obelisk-k8s/app.gen".to_owned(), false),
-                (
-                    Scope::TargetUnit,
-                    ".obelisk-k8s/prod-app.gen".to_owned(),
-                    true
-                ),
-            ]
-        );
-        // Config paths, generators and templates are separate lists.
-        assert_eq!(config.resolve(dir.path(), target, unit).unwrap(), []);
-        assert!(
-            config
-                .resolve_templates(dir.path(), target, unit)
-                .unwrap()
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn orders_any_render_by_the_variables_it_uses() {
-        let dir = write_repo(&[
-            (
-                "repo.yaml",
-                "repo:\n  name: r\n  templates:\n    - { type: command, command: [gen, \"${{obelisk:unit}}\"] }\n    - { type: url, url: \"https://x/${{obelisk:target}}.yaml\", sha256: null }\n    - { type: command, command: [gen, plain] }\n",
-            ),
-            ("targets/prod/target.yaml", "target:\n  cluster: c\n"),
-            ("units/app/unit.yaml", "unit: {}\n"),
-        ]);
-        let config = RepoConfig::load(dir.path()).unwrap();
-        let order: Vec<_> = config
-            .resolve_templates(dir.path(), &config.targets[0], &config.units[0])
-            .unwrap()
-            .into_iter()
-            .map(|r| (r.scope, r.describe().display().to_string()))
-            .collect();
-        assert_eq!(
-            order,
-            [
-                (Scope::Repo, "gen".to_owned()),
-                (Scope::Target, "https://x/prod.yaml".to_owned()),
-                (Scope::Unit, "gen".to_owned()),
-            ]
-        );
-    }
-
-    #[test]
-    fn bad_interpolation_fails_the_load_with_a_location() {
-        let dir = repo(&[(
-            "repo.yaml",
-            "repo:\n  name: r\n  configPaths:\n    - ./${{obelisk:untis}}.yaml\n",
-        )]);
-        let error = RepoConfig::load(dir.path()).unwrap_err().to_string();
-        assert!(error.contains(".obelisk-k8s/repo.yaml:4:"), "{error}");
-        assert!(error.contains("unknown var `obelisk:untis`"), "{error}");
+        assert!(explain.ends_with("missing\n"), "{explain}");
     }
 }
