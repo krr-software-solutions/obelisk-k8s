@@ -24,10 +24,10 @@ use std::path::{Path, PathBuf};
 use serde_json::{Map, Value};
 
 use crate::ObeliskK8sError;
-use crate::config::global::Cluster;
+use crate::config::global::{Cluster, normalize};
 use crate::config::paths::write_yaml_cases;
 use crate::config::repo::{RepoConfig, Target, Unit};
-use crate::config::run::RunInputs;
+use crate::config::run::{RunInputs, utf8};
 use crate::yaml;
 
 /// The key the tool's own block goes under, at the top of the merged values.
@@ -72,8 +72,8 @@ pub struct ValuesReport<'a> {
 
 impl RepoConfig {
     /// What the tool knows about the case, as values: just `obelisk: { repo, target, unit, cluster,
-    /// ephemeral, git, paths }` (the release goes in once it's agreed). What the build file renders
-    /// with, and what the phases start from (with the ephemeral values over it). Made once per case.
+    /// ephemeral, git, paths }`, `paths` with the case's `unit` and `target` directories (the release
+    /// goes in once it's agreed). What the build file renders with, and what the phases start from (with the ephemeral values over it). Made once per case.
     pub(crate) fn obelisk_values(
         &self,
         target: &Target,
@@ -91,22 +91,42 @@ impl RepoConfig {
             ephemeral.map_or(Value::Null, |e| Value::String(e.name.clone())),
         );
         block.insert("git".to_owned(), inputs.git.clone());
-        block.insert("paths".to_owned(), inputs.paths.clone());
+        let paths = case_paths(&inputs.paths, &inputs.repo_root, target, unit)?;
+        block.insert("paths".to_owned(), paths);
         let mut values = Map::new();
         values.insert(OBELISK_KEY.to_owned(), Value::Object(block));
         Ok(values)
     }
 }
 
-/// `obelisk.cluster`: what the global config says about a cluster: its name, and the obeliskd
-/// supernet and subnet it runs on (`null` without `obeliskd`).
+/// `obelisk.cluster`: what the global config says about a cluster: its name, the kubectl context
+/// it's reached through (`null` without one), and the obeliskd supernet and subnet it runs on
+/// (`null` without `obeliskd`).
 fn cluster_block(cluster: &Cluster) -> Value {
     let obeliskd = cluster.obeliskd.as_ref();
     serde_json::json!({
         "name": cluster.name,
+        "context": cluster.context(),
         "supernet": obeliskd.map(|o| &o.supernet),
         "subnet": obeliskd.map(|o| &o.subnet),
     })
+}
+
+/// `obelisk.paths`: the run's (`paths`: `repo` and `global`), plus the case's `unit` and `target`
+/// directories (where their `unit.yaml` / `target.yaml` are, under the absolute, normalized
+/// `repo_root`), absolute and normalized like them.
+fn case_paths(
+    paths: &Value,
+    repo_root: &Path,
+    target: &Target,
+    unit: &Unit,
+) -> Result<Value, ObeliskK8sError> {
+    let mut paths = paths.as_object().cloned().unwrap_or_default();
+    for (key, file) in [("unit", &unit.file), ("target", &target.file)] {
+        let dir = normalize(&repo_root.join(file.parent().unwrap_or(Path::new(""))));
+        paths.insert(key.to_owned(), Value::String(utf8(&dir)?.to_owned()));
+    }
+    Ok(Value::Object(paths))
 }
 
 /// What each values source set under `obelisk:`, in merge order: as [`ValuesCase::sets`] describes
@@ -436,6 +456,50 @@ mod tests {
             serde_json::json!({
                 "obelisk": { "repo": "r", "release": { "name": "app", "namespace": "ns", "version": "v1" } },
                 "a": 1,
+            })
+        );
+    }
+
+    #[test]
+    fn the_cluster_block_names_its_context() {
+        use crate::config::global::{K8s, Location};
+        let global = crate::config::test_support::global();
+        let k3d = global.cluster("c").unwrap();
+        assert_eq!(cluster_block(k3d)["context"], "k3d-c");
+        let mut remote = k3d.clone();
+        (remote.k8s, remote.location) = (K8s::Talos, Location::Remote);
+        assert_eq!(cluster_block(&remote)["context"], Value::Null);
+        remote.kubectl_context = Some("admin@r".to_owned());
+        assert_eq!(cluster_block(&remote)["context"], "admin@r");
+    }
+
+    #[test]
+    fn paths_add_the_cases_unit_and_target_directories() {
+        let unit = Unit {
+            name: "app".to_owned(),
+            file: ".obelisk-k8s/units/app/unit.yaml".into(),
+            build: None,
+            targets: crate::config::repo::UnitTargets::All,
+            release: crate::config::repo::Release::default(),
+        };
+        let target = Target {
+            name: "prod".to_owned(),
+            file: ".obelisk-k8s/targets/prod/target.yaml".into(),
+            cluster: "c".to_owned(),
+            release: crate::config::repo::Release::default(),
+            ephemeral: false,
+        };
+        let run = serde_json::json!({
+            "repo": { "root": "/r", "obelisk": "/r/.obelisk-k8s" },
+            "global": { "obelisk": "/home/me/.obelisk-k8s" },
+        });
+        assert_eq!(
+            case_paths(&run, Path::new("/r"), &target, &unit).unwrap(),
+            serde_json::json!({
+                "repo": { "root": "/r", "obelisk": "/r/.obelisk-k8s" },
+                "global": { "obelisk": "/home/me/.obelisk-k8s" },
+                "unit": "/r/.obelisk-k8s/units/app",
+                "target": "/r/.obelisk-k8s/targets/prod",
             })
         );
     }

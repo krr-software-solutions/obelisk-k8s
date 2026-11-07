@@ -127,15 +127,17 @@ ip-allocator.
   `--resolve`. Quoted strings stay as written; plain scalars come out parsed, the YAML 1.1 way where
   it matters (`0755` is `493`), with known limits listed in `config/values.rs`. Replaces the old
   `values` (config files only) and `generated-values`.
-- `obelisk.paths: { repo: { root, obelisk }, global: { obelisk } }`: the repo root, the repo's
-  `.obelisk-k8s/`, and the global config's directory on this machine, absolute and normalized (`.` and
+- `obelisk.paths: { repo: { root, obelisk }, global: { obelisk }, unit, target }`: the repo root, the
+  repo's `.obelisk-k8s/`, the global config's directory on this machine, and the case's unit and
+  target directories (where its `unit.yaml` / `target.yaml` are), absolute and normalized (`.` and
   `..` resolved; symlinks kept); an error if any isn't UTF-8. Machine-specific, so rendered output
   that uses it differs between machines (a source path under the repo root is shown relative to it,
   though: see **The design**).
-- `obelisk.cluster: { name, supernet, subnet }` is the target's cluster, from the global config:
-  its name, and the obeliskd supernet and subnet it runs on (`null` without `obeliskd`). So every
-  `template` command (and `apply`) loads the global config, and a selected target whose cluster
-  isn't in it is an error.
+- `obelisk.cluster: { name, context, supernet, subnet }` is the target's cluster, from the global
+  config: its name, the kubectl context it's reached through (k3d's own for a local k3d cluster,
+  else its `kubectlContext`; `null` without one), and the obeliskd supernet and subnet it runs on
+  (`null` without `obeliskd`). So every `template` command (and `apply`) loads the global config,
+  and a selected target whose cluster isn't in it is an error.
 - The `obelisk:` block also carries what git says about the repo: `obelisk.git: { sha: { short, value
   }, tag: { exact, value }, dirty: { tracked, untracked, any } }` (`null` outside a git repo; `tag.*`
   null without tags; `dirty` null if `git status` can't say). It's whichever repo the repo root is in,

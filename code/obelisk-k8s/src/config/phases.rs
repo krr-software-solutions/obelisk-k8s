@@ -482,7 +482,7 @@ mod tests {
 
     /// The `obelisk:` block for unit `app` on `prod` (no git, no ephemeral, cluster `c`), with the
     /// release.
-    const OBELISK_PROD: &str = "obelisk:\n  repo: r\n  target: prod\n  unit: app\n  cluster:\n    name: c\n    supernet: null\n    subnet: null\n  ephemeral: null\n  git: null\n  paths:\n    repo:\n      root: <repo>\n      obelisk: <repo>/.obelisk-k8s\n    global:\n      obelisk: /home/me/.obelisk-k8s\n  release:\n    name: app\n    namespace: prod\n    version: \"1.0.0\"\n";
+    const OBELISK_PROD: &str = "obelisk:\n  repo: r\n  target: prod\n  unit: app\n  cluster:\n    name: c\n    context: k3d-c\n    supernet: null\n    subnet: null\n  ephemeral: null\n  git: null\n  paths:\n    repo:\n      root: <repo>\n      obelisk: <repo>/.obelisk-k8s\n    global:\n      obelisk: /home/me/.obelisk-k8s\n    unit: <repo>/.obelisk-k8s/units/app\n    target: <repo>/.obelisk-k8s/targets/prod\n  release:\n    name: app\n    namespace: prod\n    version: \"1.0.0\"\n";
 
     #[test]
     fn the_obelisk_block_alone_without_phases() {
@@ -667,7 +667,7 @@ mod tests {
         let out = run(&dir, "prod", "build: {}\n").unwrap();
         assert!(
             out.yaml
-                .contains("  cluster:\n    name: obd\n    supernet: main\n    subnet: sub\n"),
+                .contains("  cluster:\n    name: obd\n    context: k3d-obd\n    supernet: main\n    subnet: sub\n"),
             "{}",
             out.yaml
         );

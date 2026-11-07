@@ -1,6 +1,6 @@
 //! What every case in a run shares, beyond the repo's config.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
@@ -19,6 +19,8 @@ pub(crate) struct RunInputs<'a> {
     /// `obelisk.paths`: `{ repo: { root, obelisk }, global: { obelisk } }`, the repo root, its
     /// `.obelisk-k8s/`, and the global config's directory; absolute and normalized.
     pub(crate) paths: Value,
+    /// The repo root, absolute and normalized (`paths.repo.root`).
+    pub(crate) repo_root: PathBuf,
     pub(crate) ephemeral: Option<&'a Ephemeral>,
     /// `None`: refs are only checked, and left as written.
     pub(crate) ssm: Option<&'a Ssm>,
@@ -57,6 +59,7 @@ impl<'a> RunInputs<'a> {
                 },
                 "global": { "obelisk": utf8(&global.dir)? },
             }),
+            repo_root: repo_root_absolute,
             ephemeral,
             ssm,
             global,
@@ -96,7 +99,7 @@ impl<'a> RunInputs<'a> {
 }
 
 /// `path` as text, for the values.
-fn utf8(path: &Path) -> Result<&str, ObeliskK8sError> {
+pub(crate) fn utf8(path: &Path) -> Result<&str, ObeliskK8sError> {
     path.to_str().ok_or_else(|| {
         ObeliskK8sError::Usage(format!(
             "{} isn't UTF-8, so it can't go into `obelisk.paths`",
