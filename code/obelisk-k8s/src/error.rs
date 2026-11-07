@@ -12,6 +12,10 @@ pub enum ObeliskK8sError {
     #[error("{0}")]
     K3d(String),
 
+    /// An image didn't build: its `preBuild` or `docker build` couldn't run, or failed.
+    #[error("{0}")]
+    Image(String),
+
     /// A values or manifests source couldn't run: a URL that can't be fetched or doesn't match its
     /// `sha256`, or a command that can't run or fails.
     #[error("{0}")]

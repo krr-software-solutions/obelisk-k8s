@@ -42,7 +42,7 @@ defines the CLI (the clap types, `--help` headings, completions) and dispatches 
 - `config/manifests.rs`: the rendered resources (`template manifests`): each phase's manifests
   sources, rendered with the values before it.
 - `config/images.rs`: the image specs (`template images`): each phase's images sources, rendered
-  with the values before it, and checked.
+  with the values before it, and checked; and `images build`, each tag once.
 - `config/apply.rs`: `apply`: rendered manifests installed as Helm releases on each target's cluster.
 - `config/diff.rs`: `diff`: what `apply` would change (planned as `apply` plans), with helm-diff.
 - `config/ephemeral.rs`: an ephemeral target's copy (`--ephemeral-name` and its values), and checking
@@ -51,6 +51,7 @@ defines the CLI (the clap types, `--help` headings, completions) and dispatches 
   the global config its targets' clusters come from (each must be in it), and `obelisk.paths`.
 - `cluster.rs`: `cluster status` / `up` / `down` / `destroy` for managed clusters (local k3d only).
 - `base.rs`: a managed cluster's base (obeliskd gateway ip and names, MetalLB, Envoy Gateway).
+- `docker.rs`: building an image: its `preBuild`, then `docker build`.
 - `k3d.rs`: running `k3d` (and `docker`, to tell obelisk-k8s's clusters from others).
 - `obeliskd.rs`: asking `obeliskd` for the docker subnet a cluster runs on, and claiming /
   releasing the base's ips and hostnames.

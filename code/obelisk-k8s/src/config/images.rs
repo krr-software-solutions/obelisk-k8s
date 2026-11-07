@@ -1,6 +1,6 @@
 //! The images a unit declares on a target (`template images`): its build plan's images sources,
 //! each rendered against the values of the phases before its own (see `config::phases`), as image
-//! specs. Nothing builds them yet: this is only what they say, checked.
+//! specs, checked; and building them locally (`images build`: see `docker`).
 //!
 //! An images source renders as a manifests source does (see `config::render` for the types), but
 //! its output is image specs: a YAML stream, one spec per document (`---` between them), or none.
@@ -8,7 +8,7 @@
 //!
 //! ```yaml
 //! name: my-image                                    # a valid name, unique in the case
-//! version: "1.2.3"                                  # any string: the template decides
+//! version: "1.2.3"                                  # a docker tag (no `+`): the template decides
 //! preBuild:                                         # optional: run before the image builds
 //!   type: file                                      # a script (or `type: command`, `command: [ … ]`)
 //!   path: ./units/my-app/pre-image-build.sh
@@ -16,12 +16,16 @@
 //! dockerfile:
 //!   type: file
 //!   path: ./units/my-app/Dockerfile
+//! contextPath: ./..                                 # optional: the build context (default: the repo root)
 //! ```
 //!
 //! Paths are written as in the build plan (absolute, or `./…` from `.obelisk-k8s/`), and kept and
-//! printed absolute and normalized; only messages show them relative to the repo root. The Dockerfile, a `preBuild` script and its `cwd` must exist. A
+//! printed absolute and normalized; only messages show them relative to the repo root. The Dockerfile, a `preBuild` script, its `cwd` and the `contextPath` must exist. A
 //! built image's ref isn't added to the values: templates make it from the same `name` and
 //! `version`. A unit with no images sources declares none, and its values phases don't run.
+//!
+//! `images build` builds each tag (`<name>:<version>`) once, however many cases declare it: its
+//! `preBuild`, then `docker build`. One tag declared two ways is an error. Nothing is pushed.
 
 use std::fmt;
 use std::fmt::Write as _;
@@ -50,6 +54,16 @@ pub struct Image {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pre_build: Option<PreBuild>,
     pub dockerfile: Dockerfile,
+    /// The build context: what the Dockerfile's `COPY`s see. Absolute and normalized.
+    pub context_path: PathBuf,
+}
+
+impl Image {
+    /// Its tag: `<name>:<version>`.
+    #[must_use]
+    pub fn tag(&self) -> String {
+        format!("{}:{}", self.name, self.version)
+    }
 }
 
 /// What runs before an image builds, and where.
@@ -246,6 +260,131 @@ fn source_images(
         .collect()
 }
 
+/// What `images build` built: each image (by tag, in the order first declared), and the cases
+/// that declare it.
+#[derive(Debug)]
+pub struct BuiltImages<'a> {
+    pub images: Vec<Built<'a>>,
+}
+
+/// `(target, unit)` cases, e.g. those that declare an image.
+pub type Cases<'a> = Vec<(&'a str, &'a str)>;
+
+/// One image `images build` built.
+#[derive(Debug)]
+pub struct Built<'a> {
+    pub tag: String,
+    pub cases: Cases<'a>,
+}
+
+impl RepoConfig {
+    /// Builds the images of every case in `selection` (only those named `only`, if any): each
+    /// distinct image once, its `preBuild` then `docker build`. `shown_root` and `warn` are as for
+    /// [`RepoConfig::values_report`]; `step` hears each step before it starts.
+    ///
+    /// # Errors
+    ///
+    /// As [`RepoConfig::images_report`]; [`ObeliskK8sError::Usage`] if `only` names an image no
+    /// case declares, or one tag is declared differently by two cases; [`ObeliskK8sError::Image`]
+    /// if a `preBuild` or `docker build` fails (nothing after it builds).
+    #[allow(clippy::too_many_arguments)]
+    pub fn images_build<'a>(
+        &'a self,
+        repo_root: &Path,
+        selection: &Selection<'a>,
+        shown_root: Option<&Path>,
+        ephemeral: Option<&Ephemeral>,
+        global: &GlobalConfig,
+        only: &[String],
+        warn: impl FnMut(&str),
+        mut step: impl FnMut(&str),
+    ) -> Result<BuiltImages<'a>, ObeliskK8sError> {
+        let report =
+            self.images_report(repo_root, selection, shown_root, ephemeral, global, warn)?;
+        let builds = distinct(&report, only)?;
+        let mut images = Vec::new();
+        for (tag, image, cases) in builds {
+            if image.pre_build.is_some() {
+                step(&format!("Running the `preBuild` of image `{tag}`"));
+                crate::docker::pre_build(image, repo_root)?;
+            }
+            step(&format!("Building image `{tag}`"));
+            crate::docker::build(image)?;
+            images.push(Built { tag, cases });
+        }
+        Ok(BuiltImages { images })
+    }
+}
+
+/// `report`'s images, each tag once (with the image and the cases that declare it), only those
+/// named `only` if any.
+fn distinct<'r, 'a>(
+    report: &'r ImagesReport<'a>,
+    only: &[String],
+) -> Result<Vec<(String, &'r Image, Cases<'a>)>, ObeliskK8sError> {
+    let mut builds: Vec<(String, &Image, Cases<'a>)> = Vec::new();
+    for case in &report.cases {
+        for declared in &case.images {
+            let image = &declared.image;
+            if !only.is_empty() && !only.contains(&image.name) {
+                continue;
+            }
+            let tag = image.tag();
+            match builds.iter_mut().find(|(t, _, _)| *t == tag) {
+                Some((_, first, cases)) if *first == image => cases.push((case.target, case.unit)),
+                Some((_, _, cases)) => {
+                    let (target, unit) = cases[0];
+                    return Err(ObeliskK8sError::Usage(format!(
+                        "image `{tag}` is declared differently by unit `{}` on target `{}` and unit `{unit}` on target `{target}`: one tag must be one image",
+                        case.unit, case.target
+                    )));
+                }
+                None => builds.push((tag, image, vec![(case.target, case.unit)])),
+            }
+        }
+    }
+    if let Some(missing) = only.iter().find(|name| {
+        !report
+            .cases
+            .iter()
+            .any(|c| c.images.iter().any(|i| &i.image.name == *name))
+    }) {
+        let mut known: Vec<&str> = report
+            .cases
+            .iter()
+            .flat_map(|c| c.images.iter().map(|i| i.image.name.as_str()))
+            .collect();
+        known.sort_unstable();
+        known.dedup();
+        return Err(ObeliskK8sError::Usage(format!(
+            "no selected unit declares image `{missing}` (they declare: {})",
+            if known.is_empty() {
+                "none".to_owned()
+            } else {
+                known.join(", ")
+            }
+        )));
+    }
+    Ok(builds)
+}
+
+impl fmt::Display for BuiltImages<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.images.is_empty() {
+            return writeln!(f, "No images to build");
+        }
+        for built in &self.images {
+            let cases: Vec<String> = built
+                .cases
+                .iter()
+                .map(|(target, unit)| format!("{unit} on {target}"))
+                .collect();
+            writeln!(f, "Built {} ({})", built.tag, cases.join(", "))?;
+        }
+        Ok(())
+    }
+}
+
 // An image spec, as written: decoded first (so a shape error says where, e.g. `dockerfile.path`),
 // then checked into an `Image`.
 
@@ -256,6 +395,7 @@ struct RawImage {
     version: String,
     pre_build: Option<RawPreBuild>,
     dockerfile: RawDockerfile,
+    context_path: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -305,17 +445,40 @@ fn parse_image(document: &Value, paths: &RepoPaths) -> Result<Image, String> {
     if raw.version.is_empty() {
         return Err("`version`: is empty".to_owned());
     }
+    if !is_valid_tag(&raw.version) {
+        return Err(format!(
+            "`version`: `{}` isn't a valid image tag ({TAG_RULE})",
+            raw.version
+        ));
+    }
     let pre_build = raw.pre_build.map(|raw| pre_build(raw, paths)).transpose()?;
     let RawDockerfile::File { path } = raw.dockerfile;
     let dockerfile = Dockerfile::File {
         path: existing(paths, paths.file(&path), "dockerfile.path", "file")?,
+    };
+    let context_path = match raw.context_path {
+        Some(context) => existing(paths, paths.dir(&context), "contextPath", "directory")?,
+        None => paths.root().to_owned(),
     };
     Ok(Image {
         name: raw.name,
         version: raw.version,
         pre_build,
         dockerfile,
+        context_path,
     })
+}
+
+const TAG_RULE: &str =
+    "at most 128 letters, digits, `_`, `.` and `-`, not starting with `.` or `-`";
+
+/// A docker tag: `version` is one (`<name>:<version>`).
+fn is_valid_tag(version: &str) -> bool {
+    let bytes = version.as_bytes();
+    let word = |b: &u8| b.is_ascii_alphanumeric() || *b == b'_';
+    bytes.len() <= 128
+        && bytes.first().is_some_and(word)
+        && bytes.iter().all(|b| word(b) || *b == b'.' || *b == b'-')
 }
 
 fn pre_build(raw: RawPreBuild, paths: &RepoPaths) -> Result<PreBuild, String> {
@@ -461,7 +624,7 @@ mod tests {
         let found = images(
             &dir,
             &inline(&format!(
-                "{{ name: app, version: \"1\", preBuild: {{ type: file, path: ./app/pre.sh, cwd: ./app }}, {DOCKERFILE} }}, {{ name: tool, version: v2, preBuild: {{ type: command, command: [./app/pre.sh, x] }}, {DOCKERFILE} }}"
+                "{{ name: app, version: \"1\", preBuild: {{ type: file, path: ./app/pre.sh, cwd: ./app }}, {DOCKERFILE} }}, {{ name: tool, version: v2, preBuild: {{ type: command, command: [./app/pre.sh, x] }}, {DOCKERFILE}, contextPath: ./app }}"
             )),
         )
         .unwrap();
@@ -483,6 +646,7 @@ mod tests {
                         cwd: root.join(".obelisk-k8s/app"),
                     }),
                     dockerfile: dockerfile.clone(),
+                    context_path: root.clone(),
                 },
                 Image {
                     name: "tool".to_owned(),
@@ -497,6 +661,7 @@ mod tests {
                         cwd: root.clone(),
                     }),
                     dockerfile,
+                    context_path: root.join(".obelisk-k8s/app"),
                 },
             ]
         );
@@ -569,6 +734,10 @@ mod tests {
                 "image spec 1: `version`: is empty",
             ),
             (
+                format!("{{ name: a, version: 1.0.0+abc, {DOCKERFILE} }}"),
+                "image spec 1: `version`: `1.0.0+abc` isn't a valid image tag",
+            ),
+            (
                 format!("{{ name: Bad_Name, version: x, {DOCKERFILE} }}"),
                 "image spec 1: `name`: `Bad_Name` isn't a valid name",
             ),
@@ -590,6 +759,10 @@ mod tests {
                     "{{ name: a, version: x, preBuild: {{ type: file, path: ./app/pre.sh, cwd: ./nope }}, {DOCKERFILE} }}"
                 ),
                 "image spec 1: `preBuild.cwd`: .obelisk-k8s/nope doesn't exist (or isn't a directory)",
+            ),
+            (
+                format!("{{ name: a, version: x, {DOCKERFILE}, contextPath: ./nope }}"),
+                "image spec 1: `contextPath`: .obelisk-k8s/nope doesn't exist (or isn't a directory)",
             ),
             (
                 format!(
@@ -701,11 +874,112 @@ mod tests {
         assert_eq!(
             report.to_string(),
             format!(
-                "---\n# Source: .obelisk-k8s/build.gotmpl (build.phases[0].images[0]) (phase `p`)\nname: a\nversion: x\ndockerfile:\n  type: file\n  path: {}\n",
-                crate::config::build::absolute_root(dir.path())
-                    .join(".obelisk-k8s/app/Dockerfile")
-                    .display()
+                "---\n# Source: .obelisk-k8s/build.gotmpl (build.phases[0].images[0]) (phase `p`)\nname: a\nversion: x\ndockerfile:\n  type: file\n  path: {root}/.obelisk-k8s/app/Dockerfile\ncontextPath: {root}\n",
+                root = crate::config::build::absolute_root(dir.path()).display()
             )
+        );
+    }
+
+    /// `(target, unit, [(name, version)])`.
+    type Case<'a> = (&'a str, &'a str, &'a [(&'a str, &'a str)]);
+
+    /// A report of `cases`, each image's Dockerfile `df`.
+    fn report<'a>(cases: &[Case<'a>], df: &str) -> ImagesReport<'a> {
+        let cases = cases
+            .iter()
+            .map(|(target, unit, images)| ImagesCase {
+                target,
+                unit,
+                images: images
+                    .iter()
+                    .map(|(name, version)| DeclaredImage {
+                        image: Image {
+                            name: (*name).to_owned(),
+                            version: (*version).to_owned(),
+                            pre_build: None,
+                            dockerfile: Dockerfile::File { path: df.into() },
+                            context_path: "/r".into(),
+                        },
+                        phase: "p".to_owned(),
+                        source: "s".into(),
+                    })
+                    .collect(),
+            })
+            .collect();
+        ImagesReport {
+            cases,
+            single: false,
+            yaml: Vec::new(),
+        }
+    }
+
+    fn tags(builds: &[(String, &Image, Cases<'_>)]) -> Vec<(String, Vec<(String, String)>)> {
+        builds
+            .iter()
+            .map(|(tag, _, cases)| {
+                (
+                    tag.clone(),
+                    cases
+                        .iter()
+                        .map(|(t, u)| ((*t).to_owned(), (*u).to_owned()))
+                        .collect(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn builds_each_tag_once_with_the_cases_declaring_it() {
+        let report = report(
+            &[
+                ("prod", "app", &[("a", "1"), ("b", "1")]),
+                ("dev", "app", &[("a", "1"), ("b", "2")]),
+            ],
+            "/r/Dockerfile",
+        );
+        let pair = |t: &str, u: &str| (t.to_owned(), u.to_owned());
+        assert_eq!(
+            tags(&distinct(&report, &[]).unwrap()),
+            [
+                (
+                    "a:1".to_owned(),
+                    vec![pair("prod", "app"), pair("dev", "app")]
+                ),
+                ("b:1".to_owned(), vec![pair("prod", "app")]),
+                ("b:2".to_owned(), vec![pair("dev", "app")]),
+            ]
+        );
+        assert_eq!(
+            tags(&distinct(&report, &["b".to_owned()]).unwrap())
+                .into_iter()
+                .map(|(tag, _)| tag)
+                .collect::<Vec<_>>(),
+            ["b:1", "b:2"]
+        );
+    }
+
+    #[test]
+    fn refuses_an_unknown_image_or_one_tag_two_ways() {
+        let one = report(&[("prod", "app", &[("a", "1")])], "/r/Dockerfile");
+        assert_eq!(
+            distinct(&one, &["nope".to_owned()])
+                .unwrap_err()
+                .to_string(),
+            "no selected unit declares image `nope` (they declare: a)"
+        );
+        let mut two = report(
+            &[
+                ("prod", "app", &[("a", "1")]),
+                ("dev", "web", &[("a", "1")]),
+            ],
+            "/r/Dockerfile",
+        );
+        two.cases[1].images[0].image.dockerfile = Dockerfile::File {
+            path: "/r/Other".into(),
+        };
+        assert_eq!(
+            distinct(&two, &[]).unwrap_err().to_string(),
+            "image `a:1` is declared differently by unit `web` on target `dev` and unit `app` on target `prod`: one tag must be one image"
         );
     }
 }

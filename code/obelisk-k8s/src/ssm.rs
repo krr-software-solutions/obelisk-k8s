@@ -210,6 +210,7 @@ impl Ssm {
         match error {
             E::Helm(s) => E::Helm(r(s)),
             E::K3d(s) => E::K3d(r(s)),
+            E::Image(s) => E::Image(r(s)),
             E::Render(s) => E::Render(r(s)),
             E::Kubectl(s) => E::Kubectl(r(s)),
             E::Obeliskd(s) => E::Obeliskd(r(s)),

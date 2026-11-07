@@ -21,8 +21,8 @@
 //!
 //! A phase may have values, manifests and images sources (any of them, or none), in any order and
 //! number. Everything in a phase renders against the values of the phases before it (see
-//! `config::phases`). An images source outputs image specs (see `config::images`); nothing builds
-//! them yet. A source is `{ type, … }`:
+//! `config::phases`). An images source outputs image specs (see `config::images`). A source is
+//! `{ type, … }`:
 //!
 //! - `{ type: inline, values }`: a values mapping, as it is (values only); `{ type: inline, images }`:
 //!   a list of image specs, as they are (images only).

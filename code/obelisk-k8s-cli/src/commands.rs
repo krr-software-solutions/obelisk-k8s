@@ -14,8 +14,8 @@ use obelisk_k8s::ssm::Ssm;
 use obelisk_k8s::{ObeliskK8sError, cluster};
 
 use crate::{
-    ClusterCommand, EphemeralArgs, GlobalRepoCommand, ManagedClusterCommand, TemplateArgs,
-    TemplateCommand,
+    ClusterCommand, EphemeralArgs, GlobalRepoCommand, ImagesCommand, ManagedClusterCommand,
+    TemplateArgs, TemplateCommand,
 };
 
 fn cwd() -> Result<PathBuf, ObeliskK8sError> {
@@ -258,6 +258,31 @@ fn run_apply_with(
         |step| eprintln!("{step}"),
     )?;
     print!("{}", ssm.redact(&report.to_string()));
+    Ok(())
+}
+
+/// `images build`: builds the selected units' images (only `images`, if any), printing each step
+/// on stderr and what was built on stdout.
+pub fn run_images(
+    global_root_arg: Option<PathBuf>,
+    command: &ImagesCommand,
+) -> Result<(), ObeliskK8sError> {
+    let ImagesCommand::Build { repo, args, images } = command;
+    let (global, repo_root, shown_root) = global_and_repo(repo.as_deref(), global_root_arg)?;
+    let config = load_repo_config(&repo_root)?;
+    let selection = config.select(&args.targets, &args.units)?;
+    let ephemeral = ephemeral(&args.ephemeral)?;
+    let built = config.images_build(
+        &repo_root,
+        &selection,
+        shown_root.as_deref(),
+        ephemeral.as_ref(),
+        &global,
+        images,
+        warn_one,
+        |step| eprintln!("{step}"),
+    )?;
+    print!("{built}");
     Ok(())
 }
 

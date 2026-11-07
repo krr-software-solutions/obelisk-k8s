@@ -133,20 +133,26 @@ ip-allocator.
 - `obelisk-k8s template images [-t …]… [-u …]…`: the image specs each unit declares: every phase's
   images sources, rendered like manifests sources (against the values of the phases before their
   own, plus the agreed release), each a YAML stream of specs, printed under a `# Source:` comment
-  naming the source and phase. Nothing builds them yet. A spec:
+  naming the source and phase (`images build` builds them). A spec:
 
   ```yaml
   name: my-image                    # a valid name, unique in the unit
-  version: "1.2.3"                  # any string: the template decides (e.g. obelisk.release.version)
+  version: "1.2.3"                  # a docker tag (no `+`): the template decides (e.g. obelisk.release.version)
   preBuild:                         # optional: { type: file, path } or { type: command, command }
     type: file
     path: ./units/my-app/pre-image-build.sh
     cwd: ./units/my-app             # optional, default the repo root
   dockerfile: { type: file, path: ./units/my-app/Dockerfile }
+  contextPath: ./units/my-app       # optional: the build context, default the repo root
   ```
 
-  The Dockerfile, a `preBuild` script and its `cwd` must exist. An image's ref isn't added to the
-  values (yet): templates make it from the same name and version.
+  The Dockerfile, a `preBuild` script, its `cwd` and the `contextPath` must exist. An image's ref
+  isn't added to the values (yet): templates make it from the same name and version.
+- `obelisk-k8s images build [-t …]… [-u …]… [-i <image>]…`: builds those images locally, each tag
+  (`<name>:<version>`) once however many cases declare it: its `preBuild` (in its `cwd`), then
+  `docker build --file <dockerfile> --tag <name>:<version> <contextPath>`. Their output goes to
+  stderr; stdout lists what was built. Nothing is pushed or imported, and `apply` doesn't build.
+  One tag declared two different ways is an error.
 - `obelisk-k8s apply [-t …]… [-u …]… [--ephemeral-*] [--yes] [--take-ownership] [--force-conflicts]`: installs what `template manifests`
   renders, one Helm release per unit on a target: its agreed release name, into its agreed namespace
   (created if missing), at its agreed version, via a throwaway chart that ships the rendered
@@ -223,7 +229,7 @@ build file ─▶ build plan ─▶ phase 1 … phase n ─▶ values (+ agreed 
       - name: out
         manifests:
           - { type: gotmpl, path: ./app.yaml.gotmpl }
-        images:                     # image specs (see `template images`); not built yet
+        images:                     # image specs (see `template images`, `images build`)
           - { type: gotmpl, path: ./images.yaml.gotmpl }
   ```
 
@@ -347,8 +353,10 @@ Nothing below is decided. Don't silently pick an answer in code; raise it.
 - Do our own apps need Helm charts, or can a Go template / command emit plain YAML?
 - ~~Images in a phase (`images:`): what they declare.~~ Decided: image specs (`template images`,
   above), any number per source; images sources are `gotmpl`, `file`, `command` or `inline`.
-- Building images: where they go (registry from the target, or the spec?), k3d (import, or a
-  registry?), and whether the ref is injected under `obelisk.images`.
+- ~~Building images.~~ Decided, to start: `images build`, plain `docker build`, tagged
+  `<name>:<version>`, context `contextPath` (default the repo root). Still open: where built images
+  go (registry from the target, or the spec? a name prefix?), k3d (import, or a registry?), whether
+  the ref is injected under `obelisk.images`, and whether `apply` builds.
 - ~~Do raw/URL YAML units still get SSM resolution (obelisk-local's `doTemplate`)?~~ Decided: `file`
   and `url` manifests sources always do (**SSM**, above).
 - CRD upgrades, given Helm never upgrades `crds/`.

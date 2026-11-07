@@ -96,6 +96,12 @@ enum Command {
         #[arg(long)]
         exit_code: bool,
     },
+    /// Build the images units declare (see `template images`), locally: each one's `preBuild`, then
+    /// `docker build` (nothing is pushed)
+    Images {
+        #[command(subcommand)]
+        command: ImagesCommand,
+    },
     /// Bring managed clusters up, down, and away (local k3d only, so far)
     Cluster {
         #[command(subcommand)]
@@ -270,7 +276,7 @@ enum TemplateCommand {
     /// rendered with the values of the phases before it, joined in order
     Manifests(TemplateArgs),
     /// The image specs each unit declares on each target: every phase's images sources, each
-    /// rendered with the values of the phases before it (nothing builds them yet)
+    /// rendered with the values of the phases before it (`images build` builds them)
     Images(TemplateArgs),
 }
 
@@ -282,6 +288,22 @@ impl TemplateCommand {
             }
         }
     }
+}
+
+#[derive(Debug, Subcommand)]
+enum ImagesCommand {
+    /// Build each image the selected units declare, once per tag: its `preBuild` (in its `cwd`),
+    /// then `docker build --file <dockerfile> --tag <name>:<version> <contextPath>`
+    Build {
+        /// The repo, by its name in the global `repos.yaml` [default: the one in the current directory]
+        #[arg(long, help_heading = SPECIAL, value_name = "NAME")]
+        repo: Option<String>,
+        #[command(flatten)]
+        args: TemplateArgs,
+        /// Only these images, by name (repeatable; default: all)
+        #[arg(short, long = "image", value_name = "IMAGE")]
+        images: Vec<String>,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -514,6 +536,7 @@ fn main_impl() -> Result<ExitCode, ObeliskK8sError> {
                 exit_code,
             );
         }
+        Command::Images { command } => commands::run_images(cli.global_root, &command),
         Command::Cluster { command } => commands::run_cluster(cli.global_root, &command),
         Command::Completions { shell } => {
             run_completions(shell);

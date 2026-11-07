@@ -1,6 +1,7 @@
 mod base;
 pub mod cluster;
 pub mod config;
+mod docker;
 pub mod error;
 mod git;
 mod helm;
