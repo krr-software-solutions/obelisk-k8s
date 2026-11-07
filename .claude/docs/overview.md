@@ -197,7 +197,9 @@ config files ─▶ values ─▶ generators ─▶ generated values ─▶ temp
   comments go and its plain scalars are re-spelled as in values (`08` → `8.0`): quote them. `apply`
   always resolves; `template` only with `--resolve` (else refs are only checked), and then prints
   every resolved value masked as `<aws-ssm:KEY>` (in errors too; every occurrence, so a short value
-  like `5432` masks unrelated text too). Credentials are read the first time a ref is found:
+  like `5432` masks unrelated text too), unless `--reveal` (which needs `--resolve`) asks for
+  plaintext: the one deliberate exception to never printing a resolved value, with a warning on
+  stderr. Credentials are read the first time a ref is found:
   `AWS_SSM_ACCESS_KEY`, `AWS_SSM_SECRET_KEY` and `AWS_SSM_REGION` if all are set (the GitLab CI
   variables), else the named profile `AWS_SSM_PROFILE` (`~/.aws`; SSO, assume-role and
   `credential_process` work; its region unless `AWS_SSM_REGION` is set), else it's an error. A

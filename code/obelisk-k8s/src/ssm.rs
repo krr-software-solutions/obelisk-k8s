@@ -14,7 +14,8 @@
 //! [`ACCESS_KEY_VAR`], [`SECRET_KEY_VAR`] and [`REGION_VAR`] if all three are set, else from the
 //! profile [`PROFILE_VAR`] names (its region, unless [`REGION_VAR`] is set); neither is an error. Every
 //! key in a tree is fetched at once (and kept for the run), so one that's missing fails naming all
-//! of them. Resolved values are never printed: [`Ssm::redact`] masks them in anything shown.
+//! of them. Resolved values are never printed (bar `template --resolve --reveal`, which asks for
+//! them): [`Ssm::redact`] masks them in anything shown.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};

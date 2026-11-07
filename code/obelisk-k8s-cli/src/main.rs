@@ -1,6 +1,8 @@
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use clap::error::ErrorKind;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 use obelisk_k8s::ObeliskK8sError;
@@ -38,9 +40,16 @@ enum Command {
         repo: Option<String>,
         /// Resolve `${{obelisk:aws-ssm:…}}` refs, as `apply` does (needs `AWS_SSM_ACCESS_KEY`,
         /// `AWS_SSM_SECRET_KEY` and `AWS_SSM_REGION`, or `AWS_SSM_PROFILE`); resolved values print
-        /// masked
+        /// masked (unless `--reveal`)
         #[arg(long, global = true)]
         resolve: bool,
+        /// With `--resolve`: print resolved values in plaintext, not masked (errors too). Mind where
+        /// the output goes (CI logs, scrollback)
+        // Not `requires = "resolve"`: clap checks that per level, so it would refuse a `--resolve`
+        // given on the other side of the subcommand (`template --reveal values --resolve`); `parse`
+        // checks it.
+        #[arg(long, global = true)]
+        reveal: bool,
 
         #[command(subcommand)]
         command: TemplateCommand,
@@ -363,8 +372,30 @@ fn run_completions(shell: Shell) {
     print!("{}", completions(shell));
 }
 
+/// The CLI parsed from `args` (the binary's name first), with the checks clap can't do itself.
+fn parse<I, T>(args: I) -> Result<Cli, clap::Error>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
+    let mut cmd = command();
+    let cli = Cli::from_arg_matches(&cmd.try_get_matches_from_mut(args)?)?;
+    if let Command::Template {
+        resolve: false,
+        reveal: true,
+        ..
+    } = cli.command
+    {
+        return Err(cmd.error(
+            ErrorKind::MissingRequiredArgument,
+            "`--reveal` needs `--resolve`",
+        ));
+    }
+    Ok(cli)
+}
+
 fn main_impl() -> Result<(), ObeliskK8sError> {
-    let cli = Cli::from_arg_matches(&command().get_matches()).unwrap_or_else(|e| e.exit());
+    let cli = parse(std::env::args_os()).unwrap_or_else(|e| e.exit());
     match cli.command {
         Command::Config {
             command:
@@ -418,8 +449,9 @@ fn main_impl() -> Result<(), ObeliskK8sError> {
         Command::Template {
             repo,
             resolve,
+            reveal,
             command,
-        } => commands::run_template(repo.as_deref(), cli.global_root, resolve, &command),
+        } => commands::run_template(repo.as_deref(), cli.global_root, resolve, reveal, &command),
         Command::Apply {
             repo,
             args,
@@ -487,6 +519,17 @@ mod tests {
         ] {
             assert!(parse(bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn reveal_needs_resolve() {
+        let parse = |args: &[&str]| super::parse([BIN, "template"].iter().chain(args)).map(|_| ());
+        assert!(parse(&["manifests", "--resolve", "--reveal"]).is_ok());
+        assert!(parse(&["--resolve", "--reveal", "values"]).is_ok());
+        assert!(parse(&["--reveal", "values", "--resolve"]).is_ok());
+        assert!(parse(&["--resolve", "values", "--reveal"]).is_ok());
+        assert!(parse(&["manifests", "--reveal"]).is_err());
+        assert!(parse(&["--reveal", "manifests"]).is_err());
     }
 
     #[test]

@@ -257,15 +257,19 @@ pub fn run_template(
     repo: Option<&str>,
     global_root_arg: Option<PathBuf>,
     resolve: bool,
+    reveal: bool,
     command: &TemplateCommand,
 ) -> Result<(), ObeliskK8sError> {
     let ssm = resolve.then(Ssm::from_env);
+    if reveal {
+        eprintln!("WARN - --reveal: resolved SSM values are printed in plaintext");
+    }
     let report = template_report(repo, global_root_arg, ssm.as_ref(), command);
     let report = match &ssm {
-        Some(ssm) => report
+        Some(ssm) if !reveal => report
             .map(|r| ssm.redact(&r))
             .map_err(|e| ssm.redact_error(e))?,
-        None => report?,
+        _ => report?,
     };
     // anstream drops the colors when stdout isn't a terminal, or with NO_COLOR set.
     anstream::print!("{report}");

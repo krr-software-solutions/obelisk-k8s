@@ -33,7 +33,8 @@ config files → values → generators → generated values → templates → k8
 - **Templates:** render the resources: Go templates, raw YAML files or URLs, upstream Helm charts,
   or commands. Every unit is installed as one Helm release (`helm upgrade --install`).
 - **obelisk-k8s:** orders the units (CRDs before the resources that use them, across namespaces),
-  waits for readiness, and resolves SSM refs before values reach Helm. It never prints resolved secrets.
+  waits for readiness, and resolves SSM refs before values reach Helm. It never prints resolved secrets
+  (unless asked to, with `template --resolve --reveal`).
 
 IP allocation and DNS for local clusters come from
 [obeliskd](https://github.com/krr-software-solutions/obeliskd).
