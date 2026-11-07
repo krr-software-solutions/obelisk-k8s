@@ -815,14 +815,15 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn redacts_a_long_value_yaml_folds_over_lines() {
+    fn redacts_a_long_value_kept_on_its_line() {
+        // Our YAML never folds a long one-line string (`>-`), so the value stays whole.
         let long = "word ".repeat(40) + "end";
         let (ssm, _) = fake(&[("/l", long.as_str())]);
         let mut value = json!({ "a": "x ${{obelisk:aws-ssm:/l}}" });
         ssm.resolve(&mut value, "values").unwrap();
         let yaml = crate::yaml::to_string(&value, std::path::Path::new("x")).unwrap();
-        assert!(yaml.contains(">-\n"), "{yaml}");
-        assert_eq!(ssm.redact(&yaml), "a: >-\n  x <aws-ssm:/l>\n");
+        assert!(!yaml.contains(">-\n"), "{yaml}");
+        assert_eq!(ssm.redact(&yaml), "a: x <aws-ssm:/l>\n");
     }
 
     #[test]

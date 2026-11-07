@@ -41,6 +41,8 @@ defines the CLI (the clap types, `--help` headings, completions) and dispatches 
   `command`).
 - `config/manifests.rs`: the rendered resources (`template manifests`): each phase's manifests
   sources, rendered with the values before it.
+- `config/images.rs`: the image specs (`template images`): each phase's images sources, rendered
+  with the values before it, and checked.
 - `config/apply.rs`: `apply`: rendered manifests installed as Helm releases on each target's cluster.
 - `config/diff.rs`: `diff`: what `apply` would change (planned as `apply` plans), with helm-diff.
 - `config/ephemeral.rs`: an ephemeral target's copy (`--ephemeral-name` and its values), and checking

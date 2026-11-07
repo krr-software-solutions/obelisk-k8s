@@ -15,25 +15,30 @@
 //!     - name: out
 //!       manifests:                                    # manifests sources
 //!         - { type: gotmpl, path: ./app.yaml.gotmpl }
-//!       images: []                                    # reserved: only empty, for now
+//!       images:                                       # images sources
+//!         - { type: gotmpl, path: ./images.yaml.gotmpl }
 //! ```
 //!
-//! A phase may have values sources and manifests sources (either, both, or neither), in any order and
+//! A phase may have values, manifests and images sources (any of them, or none), in any order and
 //! number. Everything in a phase renders against the values of the phases before it (see
-//! `config::phases`). A source is `{ type, … }`:
+//! `config::phases`). An images source outputs image specs (see `config::images`); nothing builds
+//! them yet. A source is `{ type, … }`:
 //!
-//! - `{ type: inline, values }`: a values mapping, as it is (values only).
+//! - `{ type: inline, values }`: a values mapping, as it is (values only); `{ type: inline, images }`:
+//!   a list of image specs, as they are (images only).
 //! - `{ type: gotmpl, path }`: a Go template, rendered by Helm through a throwaway chart.
 //! - `{ type: file, path }`: used as it is.
-//! - `{ type: url, url, sha256? }`: fetched (https only), checked against `sha256` when given.
+//! - `{ type: url, url, sha256? }`: fetched (https only), checked against `sha256` when given (not
+//!   images).
 //! - `{ type: helm, chart, repo?, version, values? }`: an upstream chart (manifests only); `repo` is a
 //!   URL or a name in `repo.yaml`'s `helmRepos`, and none for an `oci://` chart.
 //! - `{ type: command, command: [program, args…] }`: run with the values on stdin. The program is
 //!   `./…` (from `.obelisk-k8s/`), an absolute path, or a name on `PATH`.
 //!
-//! A `path` is absolute, or starts with `./` (from `.obelisk-k8s/`); an absolute one under the repo
-//! root (e.g. from `.Values.obelisk.paths.repo.obelisk`) is shown relative to it, like a `./…` one,
-//! so messages and `# Source:` comments are the same on every machine. A `gotmpl` or `file` source
+//! A `path` (and a `command`'s program, if it's a path) is absolute, or starts with `./` (from
+//! `.obelisk-k8s/`). It's kept absolute and normalized (`..` resolved), and shown relative to the
+//! repo root when it's under it (`.obelisk-k8s/…`, or `.` for the root itself), so messages and
+//! `# Source:` comments are the same on every machine. A `gotmpl` or `file` source
 //! whose file is missing is skipped. Nothing in the plan is `${{obelisk:…}}`-interpolated: it's a Go
 //! template's output, so it already has `.Values.obelisk`. The plan's strings are read like a values
 //! file's: a plain `1` is a number, so quote a `version: "1"`.
@@ -47,7 +52,7 @@ use std::path::{Path, PathBuf};
 
 use indexmap::IndexMap;
 use serde::de::value::MapAccessDeserializer;
-use serde::de::{IgnoredAny, MapAccess, Visitor};
+use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Value};
 
@@ -78,25 +83,27 @@ pub struct BuildPlan {
     pub warnings: Vec<String>,
 }
 
-/// One phase: its values sources and manifests sources, in the order written.
+/// One phase: its values, manifests and images sources, in the order written.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Phase {
     pub name: String,
     pub values: Vec<Source>,
     pub manifests: Vec<Source>,
+    pub images: Vec<Source>,
 }
 
-/// Something a phase renders: values (a mapping) or manifests (k8s resources).
+/// Something a phase renders: values (a mapping), manifests (k8s resources) or image specs.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Source {
-    /// Values as written in the plan. `at` labels it, for messages: the build file (relative to the
-    /// repo root, or absolute), then its place in the plan (`build.phases[0].values[1]`).
+    /// Values as written in the plan (or, in `images:`, a list of image specs). `at` labels it, for
+    /// messages: the build file (relative to the repo root, or absolute), then its place in the plan
+    /// (`build.phases[0].values[1]`).
     Inline {
         values: Value,
         at: PathBuf,
     },
-    /// Relative to the repo root (`./…` was from `.obelisk-k8s/`), or absolute; and whether it
-    /// exists (if not, it's skipped).
+    /// Absolute and normalized (`./…` was from `.obelisk-k8s/`); and whether it exists (if not, it's
+    /// skipped).
     Gotmpl {
         path: PathBuf,
         found: bool,
@@ -111,7 +118,7 @@ pub enum Source {
         sha256: Option<String>,
     },
     Helm(HelmChart),
-    /// The program (`./…` made relative to the repo root), then its arguments.
+    /// The program (`./…` made absolute), then its arguments.
     Command(Vec<String>),
 }
 
@@ -153,27 +160,26 @@ impl Source {
     }
 
     /// What it is, for messages, `# Source:` comments and what a values source set under
-    /// `obelisk:`: its path (relative to the repo root), URL, chart, where it's written (inline), or
-    /// (not its arguments, which may hold secrets) a command's program.
-    pub(crate) fn describe(&self) -> PathBuf {
+    /// `obelisk:`: its path (relative to `repo_root` when it's under it), URL, chart, where it's
+    /// written (inline), or (not its arguments, which may hold secrets) a command's program.
+    pub(crate) fn describe(&self, repo_root: &Path) -> PathBuf {
         match self {
-            Self::Inline { at: path, .. } | Self::Gotmpl { path, .. } | Self::File { path, .. } => {
-                path.clone()
-            }
+            Self::Inline { at, .. } => at.clone(),
+            Self::Gotmpl { path, .. } | Self::File { path, .. } => in_repo(repo_root, path),
             Self::Url { url, .. } => url.into(),
             Self::Helm(chart) => format!("{}@{}", chart.chart, chart.version).into(),
-            Self::Command(words) => words[0].clone().into(),
+            Self::Command(words) => in_repo(repo_root, Path::new(&words[0])),
         }
     }
 
     /// [`Source::describe`], as the user should see it: a path (an inline source's build file
     /// included) under `shown_root`.
-    pub(crate) fn shown(&self, shown_root: Option<&Path>) -> PathBuf {
+    pub(crate) fn shown(&self, repo_root: &Path, shown_root: Option<&Path>) -> PathBuf {
         match self {
-            Self::Inline { at: path, .. } | Self::Gotmpl { path, .. } | Self::File { path, .. } => {
-                shown_under(shown_root, path)
+            Self::Inline { .. } | Self::Gotmpl { .. } | Self::File { .. } => {
+                shown_under(shown_root, &self.describe(repo_root))
             }
-            _ => self.describe(),
+            _ => self.describe(repo_root),
         }
     }
 }
@@ -184,6 +190,12 @@ impl Phase {
     pub fn has_manifests(&self) -> bool {
         self.manifests.iter().any(Source::present)
     }
+
+    /// Whether any of its images sources renders.
+    #[must_use]
+    pub fn has_images(&self) -> bool {
+        self.images.iter().any(Source::present)
+    }
 }
 
 impl BuildPlan {
@@ -191,6 +203,12 @@ impl BuildPlan {
     #[must_use]
     pub fn has_manifests(&self) -> bool {
         self.phases.iter().any(Phase::has_manifests)
+    }
+
+    /// Whether any phase has an images source that renders.
+    #[must_use]
+    pub fn has_images(&self) -> bool {
+        self.phases.iter().any(Phase::has_images)
     }
 }
 
@@ -331,6 +349,7 @@ impl fmt::Display for BuildReport<'_> {
 enum List {
     Values,
     Manifests,
+    Images,
 }
 
 impl List {
@@ -339,6 +358,7 @@ impl List {
         match self {
             Self::Values => "values",
             Self::Manifests => "manifests",
+            Self::Images => "images",
         }
     }
 }
@@ -365,8 +385,7 @@ struct RawPhase {
     name: String,
     values: Option<Vec<Mapping<RawSource>>>,
     manifests: Option<Vec<Mapping<RawSource>>>,
-    /// Reserved: only empty, for now.
-    images: Option<Vec<IgnoredAny>>,
+    images: Option<Vec<Mapping<RawSource>>>,
 }
 
 #[derive(Deserialize)]
@@ -374,6 +393,7 @@ struct RawPhase {
 enum RawSource {
     Inline {
         values: Option<Map<String, Value>>,
+        images: Option<Vec<Value>>,
     },
     Gotmpl {
         path: String,
@@ -453,8 +473,7 @@ pub(crate) fn parse_plan(
         file,
         shown,
         helm_repos,
-        repo_root,
-        absolute_root: std::path::absolute(repo_root).ok().map(|r| normalize(&r)),
+        paths: RepoPaths::new(repo_root),
         warnings: Vec::new(),
     };
     let phases = checker.plan(raw).map_err(error)?;
@@ -487,9 +506,7 @@ struct Checker<'a> {
     file: &'a Path,
     shown: &'a Path,
     helm_repos: &'a IndexMap<String, String>,
-    repo_root: &'a Path,
-    /// `repo_root`, absolute and normalized (as `obelisk.paths.repo.root` is), if it can be.
-    absolute_root: Option<PathBuf>,
+    paths: RepoPaths,
     warnings: Vec<String>,
 }
 
@@ -524,15 +541,11 @@ impl Checker<'_> {
                 "`{at}.name`: `{name}` isn't a valid name ({NAME_RULE})"
             ));
         }
-        if raw.images.is_some_and(|images| !images.is_empty()) {
-            return Err(format!(
-                "`{at}.images`: images aren't supported yet (leave it out, or empty)"
-            ));
-        }
         Ok(Phase {
             name,
             values: self.sources(raw.values, at, List::Values)?,
             manifests: self.sources(raw.manifests, at, List::Manifests)?,
+            images: self.sources(raw.images, at, List::Images)?,
         })
     }
 
@@ -558,19 +571,34 @@ impl Checker<'_> {
             (RawSource::Inline { .. }, List::Manifests) => {
                 Err("`type: inline` makes values, not manifests: put it in `values:`".to_owned())
             }
-            (RawSource::Helm { .. }, List::Values) => {
-                Err("a Helm chart renders resources, not values: put it in `manifests:`".to_owned())
+            (RawSource::Helm { .. }, List::Values | List::Images) => Err(format!(
+                "a Helm chart renders resources, not {}: put it in `manifests:`",
+                if list == List::Values { "values" } else { "image specs" }
+            )),
+            (RawSource::Inline { images: Some(_), .. }, List::Values) => {
+                Err("`images` is for an inline source in `images:`; values go in `values`".to_owned())
             }
-            (RawSource::Inline { values }, List::Values) => Ok(Source::Inline {
+            (RawSource::Inline { values: Some(_), .. }, List::Images) => Err(
+                "an inline source in `images:` takes `images` (a list of image specs), not `values`"
+                    .to_owned(),
+            ),
+            (RawSource::Inline { values, .. }, List::Values) => Ok(Source::Inline {
                 values: values.map_or(Value::Null, Value::Object),
                 at: format!("{} ({at})", self.file.display()).into(),
             }),
+            (RawSource::Inline { images, .. }, List::Images) => Ok(Source::Inline {
+                values: Value::Array(images.unwrap_or_default()),
+                at: format!("{} ({at})", self.file.display()).into(),
+            }),
+            (RawSource::Url { .. }, List::Images) => {
+                Err("`type: url` isn't an images source: use `gotmpl`, `file`, `command` or `inline`".to_owned())
+            }
             (RawSource::Gotmpl { path }, _) => {
-                let (path, found) = self.path(&path)?;
+                let (path, found) = self.paths.file(&path)?;
                 Ok(Source::Gotmpl { path, found })
             }
             (RawSource::File { path }, _) => {
-                let (path, found) = self.path(&path)?;
+                let (path, found) = self.paths.file(&path)?;
                 Ok(Source::File { path, found })
             }
             (RawSource::Url { url, sha256 }, _) => {
@@ -600,55 +628,100 @@ impl Checker<'_> {
                 },
                 self.helm_repos,
             ),
-            (RawSource::Command { command: words }, _) => command(words),
+            (RawSource::Command { command: words }, _) => self.paths.command(words).map(Source::Command),
+        }
+    }
+}
+
+/// Where paths written in the config are: absolute, or `./…` from `.obelisk-k8s/`. They're kept
+/// absolute and normalized (`..` resolved), and shown relative to the repo root (see [`in_repo`]).
+pub(crate) struct RepoPaths {
+    /// The repo root, absolute and normalized (as `obelisk.paths.repo.root` is).
+    root: PathBuf,
+}
+
+impl RepoPaths {
+    pub(crate) fn new(repo_root: &Path) -> Self {
+        Self {
+            root: absolute_root(repo_root),
         }
     }
 
-    /// A `gotmpl` or `file` source's `path` (as written: absolute, or `./…` from `.obelisk-k8s/`),
-    /// relative to the repo root if it's under it; and whether it exists.
-    fn path(&self, written: &str) -> Result<(PathBuf, bool), String> {
+    /// A path as written (absolute, or `./…` from `.obelisk-k8s/`), absolute and normalized.
+    pub(crate) fn path(&self, written: &str) -> Result<PathBuf, String> {
         if !written.starts_with("./") && !written.starts_with('/') {
             return Err(format!(
                 "path `{written}` must be absolute, or start with `./` (from `{REPO_CONFIG_DIR}/`)"
             ));
         }
-        let path = self.in_repo(from_repo_config(written));
-        let found = self.repo_root.join(&path).is_file();
+        Ok(normalize(&self.root.join(from_repo_config(written))))
+    }
+
+    /// The repo root, absolute and normalized.
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// `path` (absolute and normalized) as the user should see it: see [`in_repo`].
+    pub(crate) fn shown(&self, path: &Path) -> PathBuf {
+        shown_from(&self.root, path)
+    }
+
+    /// [`RepoPaths::path`], and whether it's a file.
+    pub(crate) fn file(&self, written: &str) -> Result<(PathBuf, bool), String> {
+        let path = self.path(written)?;
+        let found = path.is_file();
         Ok((path, found))
     }
 
-    /// `path`, relative to the repo root if it's an absolute path under it (e.g. from
-    /// `.Values.obelisk.paths.repo.obelisk`): so it's shown the same on every machine.
-    fn in_repo(&self, path: PathBuf) -> PathBuf {
-        match &self.absolute_root {
-            Some(root) if path.is_absolute() => normalize(&path)
-                .strip_prefix(root)
-                .map_or(path, Path::to_path_buf),
-            _ => path,
+    /// [`RepoPaths::path`], and whether it's a directory.
+    pub(crate) fn dir(&self, written: &str) -> Result<(PathBuf, bool), String> {
+        let path = self.path(written)?;
+        let found = path.is_dir();
+        Ok((path, found))
+    }
+
+    /// A `type: command`'s words: the program first, `./…` (from `.obelisk-k8s/`, made absolute),
+    /// absolute, or a name on `PATH`.
+    pub(crate) fn command(&self, mut words: Vec<String>) -> Result<Vec<String>, String> {
+        let Some(program) = words.first() else {
+            return Err(
+                "`type: command` needs a `command`: the program, then its arguments".to_owned(),
+            );
+        };
+        // `./x`, `/abs/x` or a bare name: not a path relative to who knows where.
+        if program.is_empty()
+            || (program.contains('/') && !program.starts_with("./") && !program.starts_with('/'))
+        {
+            return Err(format!(
+                "program `{program}` must be `./…` (from `{REPO_CONFIG_DIR}/`), an absolute path, or a name on `PATH`"
+            ));
         }
+        if program.contains('/') {
+            words[0] = self.path(program)?.display().to_string();
+        }
+        Ok(words)
     }
 }
 
-/// A `type: command`'s words: the program first, `./…` (from `.obelisk-k8s/`), absolute, or a name
-/// on `PATH`.
-fn command(mut words: Vec<String>) -> Result<Source, String> {
-    let Some(program) = words.first() else {
-        return Err(
-            "`type: command` needs a `command`: the program, then its arguments".to_owned(),
-        );
-    };
-    // `./x`, `/abs/x` or a bare name: not a path relative to who knows where.
-    if program.is_empty()
-        || (program.contains('/') && !program.starts_with("./") && !program.starts_with('/'))
-    {
-        return Err(format!(
-            "program `{program}` must be `./…` (from `{REPO_CONFIG_DIR}/`), an absolute path, or a name on `PATH`"
-        ));
+/// `repo_root`, absolute and normalized.
+pub(crate) fn absolute_root(repo_root: &Path) -> PathBuf {
+    normalize(&std::path::absolute(repo_root).unwrap_or_else(|_| repo_root.to_owned()))
+}
+
+/// `path` as the user should see it: relative to the repo root if it's under it (the root itself
+/// is `.`), so it's shown the same on every machine; else as it is.
+pub(crate) fn in_repo(repo_root: &Path, path: &Path) -> PathBuf {
+    shown_from(&absolute_root(repo_root), path)
+}
+
+/// [`in_repo`], with the repo root already absolute and normalized.
+fn shown_from(root: &Path, path: &Path) -> PathBuf {
+    match path.strip_prefix(root) {
+        Ok(rest) if rest.as_os_str().is_empty() => ".".into(),
+        Ok(rest) => rest.to_owned(),
+        Err(_) => path.to_owned(),
     }
-    if program.starts_with("./") {
-        words[0] = from_repo_config(program).display().to_string();
-    }
-    Ok(Source::Command(words))
 }
 
 /// A `type: url`: https, and a `sha256` (if any) that looks like one.
@@ -716,13 +789,19 @@ mod tests {
     const SHOWN: &str = ".obelisk-k8s/build.yaml.gotmpl";
 
     fn parse(text: &str) -> Result<BuildPlan, ObeliskK8sError> {
+        parse_in(text).0
+    }
+
+    /// [`parse`], and the repo it was parsed in.
+    fn parse_in(text: &str) -> (Result<BuildPlan, ObeliskK8sError>, tempfile::TempDir) {
         let dir = write_repo(&[("here.yaml", "")]);
         let repos: IndexMap<String, String> = [(
             "metallb".to_owned(),
             "https://metallb.github.io/metallb".to_owned(),
         )]
         .into();
-        parse_plan(text, Path::new(SHOWN), Path::new(SHOWN), &repos, dir.path())
+        let plan = parse_plan(text, Path::new(SHOWN), Path::new(SHOWN), &repos, dir.path());
+        (plan, dir)
     }
 
     fn error(text: &str) -> String {
@@ -739,14 +818,18 @@ mod tests {
     #[test]
     fn parses_phases_and_every_source_type() {
         let sha = "a".repeat(64);
-        let plan = parse(&format!(
-            "build:\n  phases:\n    - name: base\n      values:\n        - {{ type: inline, values: {{ a: 1 }} }}\n        - {{ type: gotmpl, path: ./here.yaml }}\n        - {{ type: file, path: /nowhere/x.yaml }}\n        - {{ type: url, url: https://x/v.yaml, sha256: {sha} }}\n        - {{ type: command, command: [./gen.sh, prod] }}\n    - name: out\n      manifests:\n        - {{ type: helm, chart: metallb, repo: metallb, version: 0.16.1, values: metallb }}\n        - {{ type: helm, chart: oci://docker.io/envoyproxy/gateway-helm, version: 1.9.3 }}\n        - {{ type: command, command: [sh, -c, x] }}\n      images: []\n    - name: empty\n"
-        ))
-        .unwrap();
+        let (plan, dir) = parse_in(&format!(
+            "build:\n  phases:\n    - name: base\n      values:\n        - {{ type: inline, values: {{ a: 1 }} }}\n        - {{ type: gotmpl, path: ./here.yaml }}\n        - {{ type: file, path: /nowhere/x.yaml }}\n        - {{ type: url, url: https://x/v.yaml, sha256: {sha} }}\n        - {{ type: command, command: [./gen.sh, prod] }}\n    - name: out\n      manifests:\n        - {{ type: helm, chart: metallb, repo: metallb, version: 0.16.1, values: metallb }}\n        - {{ type: helm, chart: oci://docker.io/envoyproxy/gateway-helm, version: 1.9.3 }}\n        - {{ type: command, command: [sh, -c, x] }}\n      images:\n        - {{ type: gotmpl, path: ./here.yaml }}\n        - {{ type: command, command: [./images.sh] }}\n        - {{ type: inline, images: [{{ name: app }}] }}\n    - name: empty\n"
+        ));
+        let plan = plan.unwrap();
+        let root = absolute_root(dir.path());
         let names: Vec<_> = plan.phases.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(names, ["base", "out", "empty"]);
         let kinds: Vec<_> = plan.phases[0].values.iter().map(Source::kind).collect();
         assert_eq!(kinds, ["inline", "gotmpl", "file", "url", "command"]);
+        let kinds: Vec<_> = plan.phases[1].images.iter().map(Source::kind).collect();
+        assert_eq!(kinds, ["gotmpl", "command", "inline"]);
+        assert_eq!(plan.phases[2].images.len(), 0);
         assert_eq!(
             plan.phases[0].values[0],
             Source::Inline {
@@ -754,13 +837,18 @@ mod tests {
                 at: format!("{SHOWN} (build.phases[0].values[0])").into(),
             }
         );
-        // `./…` is from `.obelisk-k8s/`; a missing file is kept, and skipped when it renders.
+        // `./…` is from `.obelisk-k8s/`, kept absolute and shown from the repo root; a missing
+        // file is kept, and skipped when it renders.
         assert_eq!(
             plan.phases[0].values[1],
             Source::Gotmpl {
-                path: ".obelisk-k8s/here.yaml".into(),
+                path: root.join(".obelisk-k8s/here.yaml"),
                 found: true
             }
+        );
+        assert_eq!(
+            plan.phases[0].values[1].describe(dir.path()),
+            Path::new(".obelisk-k8s/here.yaml")
         );
         assert_eq!(
             plan.phases[0].values[2],
@@ -772,7 +860,14 @@ mod tests {
         assert!(!plan.phases[0].values[2].present());
         assert_eq!(
             plan.phases[0].values[4],
-            Source::Command(vec![".obelisk-k8s/gen.sh".into(), "prod".into()])
+            Source::Command(vec![
+                root.join(".obelisk-k8s/gen.sh").display().to_string(),
+                "prod".into()
+            ])
+        );
+        assert_eq!(
+            plan.phases[0].values[4].describe(dir.path()),
+            Path::new(".obelisk-k8s/gen.sh")
         );
         assert_eq!(
             plan.phases[1].manifests[0],
@@ -790,7 +885,7 @@ mod tests {
     }
 
     #[test]
-    fn an_absolute_path_in_the_repo_is_shown_from_it() {
+    fn an_absolute_path_in_the_repo_is_normalized_and_shown_from_it() {
         let dir = write_repo(&[("here.yaml", "")]);
         let obelisk = dir.path().join(".obelisk-k8s");
         let text = format!(
@@ -800,17 +895,30 @@ mod tests {
         );
         let shown = Path::new(SHOWN);
         let plan = parse_plan(&text, shown, shown, &IndexMap::new(), dir.path()).unwrap();
+        let root = absolute_root(dir.path());
         assert_eq!(
             plan.phases[0].values,
             [
                 Source::File {
-                    path: ".obelisk-k8s/here.yaml".into(),
+                    path: root.join(".obelisk-k8s/here.yaml"),
                     found: true
                 },
                 Source::File {
-                    path: ".obelisk-k8s/nope.yaml".into(),
+                    path: root.join(".obelisk-k8s/nope.yaml"),
                     found: false
                 },
+            ]
+        );
+        let shown: Vec<_> = plan.phases[0]
+            .values
+            .iter()
+            .map(|s| s.describe(dir.path()))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                PathBuf::from(".obelisk-k8s/here.yaml"),
+                PathBuf::from(".obelisk-k8s/nope.yaml")
             ]
         );
     }
@@ -893,12 +1001,6 @@ mod tests {
             phases("    - { name: a, nmae: b }\n"),
             format!(
                 "{SHOWN}: `build.phases[0].nmae`: unknown field `nmae`, expected one of `name`, `values`, `manifests`, `images`"
-            )
-        );
-        assert_eq!(
-            phases("    - { name: a, images: [app] }\n"),
-            format!(
-                "{SHOWN}: `build.phases[0].images`: images aren't supported yet (leave it out, or empty)"
             )
         );
         assert_eq!(
@@ -1001,6 +1103,41 @@ mod tests {
                 "values",
                 "{ type: command, command: [gen, 1] }",
                 "`build.phases[0].values[0]`: invalid type: integer `1`, expected a string (quote it)",
+            ),
+        ] {
+            let e = source_error(key, source);
+            assert!(e.starts_with(&format!("{SHOWN}: ")), "{source}: {e}");
+            assert!(e.contains(expected), "{source}: {e}");
+        }
+    }
+
+    #[test]
+    fn rejects_bad_images_sources() {
+        for (key, source, expected) in [
+            (
+                "images",
+                "{ type: inline, values: {} }",
+                "`build.phases[0].images[0]`: an inline source in `images:` takes `images` (a list of image specs), not `values`",
+            ),
+            (
+                "images",
+                "{ type: url, url: https://x/i.yaml }",
+                "`build.phases[0].images[0]`: `type: url` isn't an images source: use `gotmpl`, `file`, `command` or `inline`",
+            ),
+            (
+                "images",
+                "{ type: helm, chart: x, repo: https://x, version: \"1\" }",
+                "`build.phases[0].images[0]`: a Helm chart renders resources, not image specs: put it in `manifests:`",
+            ),
+            (
+                "images",
+                "app",
+                "`build.phases[0].images[0]`: invalid type: string \"app\", expected a mapping",
+            ),
+            (
+                "values",
+                "{ type: inline, images: [] }",
+                "`build.phases[0].values[0]`: `images` is for an inline source in `images:`; values go in `values`",
             ),
         ] {
             let e = source_error(key, source);

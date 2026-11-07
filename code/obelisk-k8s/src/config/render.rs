@@ -18,7 +18,7 @@ use serde_json::{Map, Value};
 use sha2::{Digest as _, Sha256};
 
 use crate::ObeliskK8sError;
-use crate::config::build::{HelmChart, Source};
+use crate::config::build::{HelmChart, Source, in_repo};
 use crate::helm;
 
 /// What a render gets: the values (as a tree, and as the YAML it's given), the release it renders
@@ -158,13 +158,18 @@ fn hex(bytes: &[u8]) -> String {
 
 /// Runs `words` (the program first) from `repo_root`, with `stdin` on its stdin.
 fn run(words: &[String], repo_root: &Path, stdin: &str) -> Result<String, ObeliskK8sError> {
-    let shown = words.join(" ");
-    // A path (with a `/`) is relative to the repo root; a bare name is looked up on `PATH`.
+    // A path (with a `/`) is absolute, or relative to the repo root; a bare name is looked up on
+    // `PATH`. Shown relative to the repo root.
     let program = if words[0].contains('/') {
         repo_root.join(&words[0])
     } else {
         words[0].clone().into()
     };
+    let mut shown_words = words.to_vec();
+    shown_words[0] = in_repo(repo_root, Path::new(&words[0]))
+        .display()
+        .to_string();
+    let shown = shown_words.join(" ");
     let mut child = Command::new(&program)
         .args(&words[1..])
         .current_dir(repo_root)

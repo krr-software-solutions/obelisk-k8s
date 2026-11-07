@@ -125,7 +125,10 @@ pub fn parse_values_stream(
 ///
 /// [`ObeliskK8sError::Yaml`] if it can't be serialized.
 pub fn to_string<T: Serialize>(value: &T, display: &Path) -> Result<String, ObeliskK8sError> {
-    serde_saphyr::to_string(value).map_err(|error| ObeliskK8sError::Yaml {
+    // A long one-line string (an absolute path, a URL) stays on its line: never folded (`>-`).
+    let mut options = serde_saphyr::SerializerOptions::default();
+    options.folded_wrap_chars = usize::MAX;
+    serde_saphyr::to_string_with_options(value, options).map_err(|error| ObeliskK8sError::Yaml {
         path: display.to_owned(),
         message: format!("{}: {error}", display.display()),
     })

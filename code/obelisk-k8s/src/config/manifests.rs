@@ -122,7 +122,8 @@ impl RepoConfig {
             // Phase k renders against the values before it, V₍ₖ₋₁₎: kept for each phase with
             // manifests.
             for (phase, before) in plan.phases.iter().zip(evaluated.before) {
-                let Some(before) = before else {
+                // Kept for a phase with images too: only ones with manifests render here.
+                let Some(before) = before.filter(|_| phase.has_manifests()) else {
                     continue;
                 };
                 let values = with_release(before, &agreed);
@@ -159,7 +160,7 @@ fn render_source(
     inputs: &RunInputs<'_>,
     manifests: &mut String,
 ) -> Result<(), ObeliskK8sError> {
-    let shown = source.shown(shown_root);
+    let shown = source.shown(render_inputs.repo_root, shown_root);
     let mut rendered = render::text(source, &shown, render_inputs)?;
     // A raw manifest's refs are its own; the others' come from the (resolved) values.
     if matches!(source, Source::File { .. } | Source::Url { .. }) {

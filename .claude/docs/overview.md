@@ -130,6 +130,23 @@ ip-allocator.
   source may print any number of documents. No shared `define`s across files for now (tentative).
   `.Release.{Name, Namespace}` is the case's agreed release (see below). A unit with no manifests
   sources (or only missing files) renders nothing, and its values phases don't run.
+- `obelisk-k8s template images [-t …]… [-u …]…`: the image specs each unit declares: every phase's
+  images sources, rendered like manifests sources (against the values of the phases before their
+  own, plus the agreed release), each a YAML stream of specs, printed under a `# Source:` comment
+  naming the source and phase. Nothing builds them yet. A spec:
+
+  ```yaml
+  name: my-image                    # a valid name, unique in the unit
+  version: "1.2.3"                  # any string: the template decides (e.g. obelisk.release.version)
+  preBuild:                         # optional: { type: file, path } or { type: command, command }
+    type: file
+    path: ./units/my-app/pre-image-build.sh
+    cwd: ./units/my-app             # optional, default the repo root
+  dockerfile: { type: file, path: ./units/my-app/Dockerfile }
+  ```
+
+  The Dockerfile, a `preBuild` script and its `cwd` must exist. An image's ref isn't added to the
+  values (yet): templates make it from the same name and version.
 - `obelisk-k8s apply [-t …]… [-u …]… [--ephemeral-*] [--yes] [--take-ownership] [--force-conflicts]`: installs what `template manifests`
   renders, one Helm release per unit on a target: its agreed release name, into its agreed namespace
   (created if missing), at its agreed version, via a throwaway chart that ships the rendered
@@ -206,15 +223,16 @@ build file ─▶ build plan ─▶ phase 1 … phase n ─▶ values (+ agreed 
       - name: out
         manifests:
           - { type: gotmpl, path: ./app.yaml.gotmpl }
-        images: []                  # reserved: only empty (or missing), for now
+        images:                     # image specs (see `template images`); not built yet
+          - { type: gotmpl, path: ./images.yaml.gotmpl }
   ```
 
 - **Phases** run in order. V₀ is the `obelisk:` block (with the ephemeral values over it). Everything in
-  phase k, its values sources and its manifests sources, renders against V₍ₖ₋₁₎, the values after the
+  phase k, its values, manifests and images sources, renders against V₍ₖ₋₁₎, the values after the
   phases before it; its own sources don't see each other. Phase k's values outputs then deep-merge over
-  V₍ₖ₋₁₎, in source order, into Vₖ (and the ephemeral values over that again). A phase may have values
-  sources, manifests sources, both, or neither, in any number and order. After every phase's values, the
-  release is agreed on (**Release**, above); then each phase's manifests render against its V₍ₖ₋₁₎ with
+  V₍ₖ₋₁₎, in source order, into Vₖ (and the ephemeral values over that again). A phase may have values,
+  manifests and images sources (any of them, or none), in any number and order. After every phase's values, the
+  release is agreed on (**Release**, above); then each phase's manifests (and images) render against its V₍ₖ₋₁₎ with
   the agreed `obelisk.release.{name, namespace, version}` added, and `template values` is Vₙ with it.
 - **Sources** are `{ type, … }`, and each renders on its own:
   - `{ type: inline, values }`: a values mapping, as it is. Values only.
@@ -235,9 +253,10 @@ build file ─▶ build plan ─▶ phase 1 … phase n ─▶ values (+ agreed 
     stdin; its stdout is the output. `./…` resolves from `.obelisk-k8s/`, an absolute path is used as
     it is, a bare name is looked up on `PATH` (anything else is an error). No timeout. Its
     `# Source:` names only the program (arguments may hold secrets).
-  A `path` is absolute or starts with `./` (from `.obelisk-k8s/`), and is skipped if it's missing; an
-  absolute one under the repo root is shown relative to it (`.obelisk-k8s/…`), so `# Source:`
-  comments and errors are the same on every machine. Nothing in a plan is `${{obelisk:…}}`
+  A `path` is absolute or starts with `./` (from `.obelisk-k8s/`), and is skipped if it's missing.
+  It's kept absolute and normalized (`..` resolved), and shown relative to the repo root when it's
+  under it (`.obelisk-k8s/…`, `.` for the root), so `# Source:` comments and errors are the same on
+  every machine. Image spec paths are kept absolute too, and `template images` prints them so. Nothing in a plan is `${{obelisk:…}}`
   interpolated (it's a Go template's output: use `.Values.obelisk`), and its strings are read like a
   values file's (a plain `1` is a number: quote `version: "1"`). A values source's output must be one
   mapping (or nothing); a manifests source's is resources, each from a `file`, `url` or `command`
@@ -269,7 +288,7 @@ build file ─▶ build plan ─▶ phase 1 … phase n ─▶ values (+ agreed 
   source's keys are fetched together (Rust AWS SDK, `GetParameters` in tens) and kept for the run;
   missing ones fail naming them all.
 - **obelisk-k8s** will order units (CRDs before what uses them, across namespaces), and wait for
-  readiness. A phase's `images` (reserved, empty for now) is where image builds will go.
+  readiness, and build a phase's `images` (only parsed, for now).
 
 ## Roadmap
 
@@ -326,7 +345,10 @@ Nothing below is decided. Don't silently pick an answer in code; raise it.
   (**The design**, above): a values source gets the values before its phase (YAML on stdin, or
   `.Values`) and outputs one mapping.
 - Do our own apps need Helm charts, or can a Go template / command emit plain YAML?
-- Images in a phase (`images:`): what they declare, and when they build.
+- ~~Images in a phase (`images:`): what they declare.~~ Decided: image specs (`template images`,
+  above), any number per source; images sources are `gotmpl`, `file`, `command` or `inline`.
+- Building images: where they go (registry from the target, or the spec?), k3d (import, or a
+  registry?), and whether the ref is injected under `obelisk.images`.
 - ~~Do raw/URL YAML units still get SSM resolution (obelisk-local's `doTemplate`)?~~ Decided: `file`
   and `url` manifests sources always do (**SSM**, above).
 - CRD upgrades, given Helm never upgrades `crds/`.

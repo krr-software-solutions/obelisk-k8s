@@ -50,8 +50,8 @@ use crate::{helm, yaml};
 /// A case's values phases, run. The values are without the release.
 #[derive(Debug)]
 pub(crate) struct Evaluated {
-    /// Per phase, what its manifests render against (V₍ₖ₋₁₎ for phase k): kept only for a phase with
-    /// manifests (`None` for the others: nothing reads it).
+    /// Per phase, what its manifests and images render against (V₍ₖ₋₁₎ for phase k): kept only for
+    /// a phase with manifests or images (`None` for the others: nothing reads it).
     pub(crate) before: Vec<Option<Map<String, Value>>>,
     /// Vₙ: the values after every phase.
     pub(crate) values: Map<String, Value>,
@@ -156,9 +156,9 @@ impl RepoConfig {
         for phase in &plan.phases {
             // Its sources render against the values before it, so they don't see each other.
             let input = values_yaml(&values, target, unit)?;
-            before.push(phase.has_manifests().then(|| values.clone()));
+            before.push((phase.has_manifests() || phase.has_images()).then(|| values.clone()));
             for source in phase.values.iter().filter(|s| s.present()) {
-                let shown = source.shown(shown_root);
+                let shown = source.shown(repo_root, shown_root);
                 let Some(output) = values_output(source, &shown, repo_root, &input, inputs)? else {
                     continue;
                 };
@@ -166,7 +166,7 @@ impl RepoConfig {
                     &mut values,
                     &mut sets,
                     output,
-                    &source.describe(),
+                    &source.describe(repo_root),
                     &shown,
                     "a values source's output",
                 )?;

@@ -32,4 +32,6 @@ build:
           path: "{{ $baseDir }}/units/{{ $unit }}/manifests.yaml.gotmpl"
         - type: "gotmpl"
           path: "{{ $baseDir }}/units/{{ $unit }}/{{ $target }}.manifests.yaml.gotmpl"
-      images: [] # TODO : add this after the `build.yaml.gotmpl` is all working and merged
+      images:
+        - type: "gotmpl"
+          path: "{{ $baseDir }}/units/{{ $unit }}/images.yaml.gotmpl"

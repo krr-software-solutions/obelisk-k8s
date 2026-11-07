@@ -269,12 +269,17 @@ enum TemplateCommand {
     /// The k8s resources each unit renders on each target: every phase's manifests sources, each
     /// rendered with the values of the phases before it, joined in order
     Manifests(TemplateArgs),
+    /// The image specs each unit declares on each target: every phase's images sources, each
+    /// rendered with the values of the phases before it (nothing builds them yet)
+    Images(TemplateArgs),
 }
 
 impl TemplateCommand {
     fn args(&self) -> &TemplateArgs {
         match self {
-            Self::Build(args) | Self::Values(args) | Self::Manifests(args) => args,
+            Self::Build(args) | Self::Values(args) | Self::Manifests(args) | Self::Images(args) => {
+                args
+            }
         }
     }
 }

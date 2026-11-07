@@ -12,6 +12,7 @@ pub mod build;
 pub mod diff;
 pub mod ephemeral;
 pub mod global;
+pub mod images;
 pub mod manifests;
 pub mod paths;
 pub mod phases;

@@ -370,6 +370,12 @@ fn template_report(
                 &repo_root, &selection, shown_root, ephemeral, &global, ssm, warn_one,
             )?
             .to_string(),
+        // Nothing in an image spec is resolved, as in a build plan.
+        TemplateCommand::Images(_) => config
+            .images_report(
+                &repo_root, &selection, shown_root, ephemeral, &global, warn_one,
+            )?
+            .to_string(),
     })
 }
 

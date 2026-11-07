@@ -1,0 +1,14 @@
+
+{{- $baseDir := .Values.obelisk.paths.repo.obelisk }}
+{{- $unit := .Values.obelisk.unit }}
+{{- $version := .Values.obelisk.release.version }}
+
+name: my-image
+version: {{ $version | quote }}
+preBuild:
+  cwd: {{ .Values.obelisk.paths.repo.root | quote }}
+  type: file
+  path: "{{ $baseDir }}/units/{{ $unit }}/pre-image-build.sh"
+dockerfile:
+  type: file
+  path: "{{ $baseDir }}/units/{{ $unit }}/Dockerfile"
