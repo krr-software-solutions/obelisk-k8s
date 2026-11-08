@@ -30,11 +30,15 @@
 //! - `{ type: file, path }`: used as it is.
 //! - `{ type: url, url, sha256? }`: fetched (https only), checked against `sha256` when given (not
 //!   images).
-//! - `{ type: helm, chart, repo?, version, values? }`: an upstream chart (manifests only); `repo` is a
-//!   URL or a name in `repo.yaml`'s `helmRepos`, and none for an `oci://` chart.
+//! - `{ type: helm, chart, repo?, version }`: an upstream chart (manifests only); `repo` is a URL or
+//!   a name in `repo.yaml`'s `helmRepos`, and none for an `oci://` chart.
 //! - `{ type: command, command: [program, args…], env? }`: run with the values on stdin. The program
 //!   is `./…` (from `.obelisk-k8s/`), an absolute path, or a name on `PATH`. `env` (`{ NAME: value }`,
 //!   strings only) is set for it, over what it inherits.
+//!
+//! A `gotmpl`, `helm` or `command` source may take `unnestInput: a.b.c`: it sees only what's there,
+//! not all the values (a chart sees none without one). A values source of any type but `helm` may
+//! take `nestOutput: d.e.f`: its output goes there before it merges (never under `obelisk:`).
 //!
 //! A `path` (and a `command`'s program, if it's a path) is absolute, or starts with `./` (from
 //! `.obelisk-k8s/`). It's kept absolute and normalized (`..` resolved), and shown relative to the
@@ -61,6 +65,7 @@ use serde_json::{Map, Value};
 use crate::ObeliskK8sError;
 use crate::config::ephemeral::Ephemeral;
 use crate::config::global::{GlobalConfig, normalize};
+use crate::config::key_path::KeyPath;
 use crate::config::paths::{Selection, from_repo_config, write_yaml_cases};
 use crate::config::repo::{REPO_CONFIG_DIR, RepoConfig, Target, Unit};
 use crate::config::run::RunInputs;
@@ -94,9 +99,21 @@ pub struct Phase {
     pub images: Vec<Source>,
 }
 
-/// Something a phase renders: values (a mapping), manifests (k8s resources) or image specs.
+/// Something a phase renders: values (a mapping), manifests (k8s resources) or image specs; and
+/// where its input and output are in the values.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Source {
+pub struct Source {
+    pub kind: SourceKind,
+    /// It sees only what's at this key (as `.Values`, on stdin, or as a chart's values), not all
+    /// the values. A chart sees no values without one.
+    pub unnest_input: Option<KeyPath>,
+    /// Its output (a values source's) is put under this key before it merges.
+    pub nest_output: Option<KeyPath>,
+}
+
+/// What a source is, by type.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SourceKind {
     /// Values as written in the plan (or, in `images:`, a list of image specs). `at` labels it, for
     /// messages: the build file (relative to the repo root, or absolute), then its place in the plan
     /// (`build.phases[0].values[1]`).
@@ -110,7 +127,7 @@ pub enum Source {
         path: PathBuf,
         found: bool,
     },
-    /// As [`Source::Gotmpl`].
+    /// As [`SourceKind::Gotmpl`].
     File {
         path: PathBuf,
         found: bool,
@@ -136,15 +153,46 @@ pub struct HelmChart {
     /// for an OCI chart.
     pub repo: Option<String>,
     pub version: String,
-    /// Where its values are in the values: a dot-separated key (`metallb`, `charts.x`); none means
-    /// no values.
-    pub values: Option<String>,
 }
 
 impl Source {
+    /// A source of `kind` that sees all the values (a chart: none), and whose output merges as it is.
+    #[must_use]
+    pub fn new(kind: SourceKind) -> Self {
+        Self {
+            kind,
+            unnest_input: None,
+            nest_output: None,
+        }
+    }
+
     /// Its type, as written.
     #[must_use]
-    pub fn kind(&self) -> &'static str {
+    pub fn type_name(&self) -> &'static str {
+        self.kind.type_name()
+    }
+
+    /// Whether it renders: everything but a missing file does.
+    #[must_use]
+    pub fn present(&self) -> bool {
+        self.kind.present()
+    }
+
+    /// See [`SourceKind::describe`].
+    pub(crate) fn describe(&self, repo_root: &Path) -> PathBuf {
+        self.kind.describe(repo_root)
+    }
+
+    /// See [`SourceKind::shown`].
+    pub(crate) fn shown(&self, repo_root: &Path, shown_root: Option<&Path>) -> PathBuf {
+        self.kind.shown(repo_root, shown_root)
+    }
+}
+
+impl SourceKind {
+    /// Its type, as written.
+    #[must_use]
+    pub fn type_name(&self) -> &'static str {
         match self {
             Self::Inline { .. } => "inline",
             Self::Gotmpl { .. } => "gotmpl",
@@ -177,7 +225,7 @@ impl Source {
         }
     }
 
-    /// [`Source::describe`], as the user should see it: a path (an inline source's build file
+    /// [`SourceKind::describe`], as the user should see it: a path (an inline source's build file
     /// included) under `shown_root`.
     pub(crate) fn shown(&self, repo_root: &Path, shown_root: Option<&Path>) -> PathBuf {
         match self {
@@ -393,34 +441,73 @@ struct RawPhase {
     images: Option<Vec<Mapping<RawSource>>>,
 }
 
+// A type takes `unnestInput` only if it has an input, and `nestOutput` only if it can be a values
+// source (a `helm` chart can't: see `Checker::source`).
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
 enum RawSource {
     Inline {
         values: Option<Map<String, Value>>,
         images: Option<Vec<Value>>,
+        #[serde(rename = "nestOutput")]
+        nest_output: Option<String>,
     },
     Gotmpl {
         path: String,
+        #[serde(rename = "unnestInput")]
+        unnest_input: Option<String>,
+        #[serde(rename = "nestOutput")]
+        nest_output: Option<String>,
     },
     File {
         path: String,
+        #[serde(rename = "nestOutput")]
+        nest_output: Option<String>,
     },
     Url {
         url: String,
         sha256: Option<String>,
+        #[serde(rename = "nestOutput")]
+        nest_output: Option<String>,
     },
     Helm {
         chart: String,
         repo: Option<String>,
         version: String,
-        values: Option<String>,
+        #[serde(rename = "unnestInput")]
+        unnest_input: Option<String>,
     },
     Command {
         command: Vec<String>,
         #[serde(default)]
         env: BTreeMap<String, String>,
+        #[serde(rename = "unnestInput")]
+        unnest_input: Option<String>,
+        #[serde(rename = "nestOutput")]
+        nest_output: Option<String>,
     },
+}
+
+impl RawSource {
+    /// Its `unnestInput` and `nestOutput` (as written), taken out.
+    fn take_nesting(&mut self) -> (Option<String>, Option<String>) {
+        match self {
+            Self::Inline { nest_output, .. }
+            | Self::File { nest_output, .. }
+            | Self::Url { nest_output, .. } => (None, nest_output.take()),
+            Self::Helm { unnest_input, .. } => (unnest_input.take(), None),
+            Self::Gotmpl {
+                unnest_input,
+                nest_output,
+                ..
+            }
+            | Self::Command {
+                unnest_input,
+                nest_output,
+                ..
+            } => (unnest_input.take(), nest_output.take()),
+        }
+    }
 }
 
 /// A `T` that must be written as a mapping: serde would also take a list of its fields, in order.
@@ -573,11 +660,44 @@ impl Checker<'_> {
             .collect()
     }
 
-    fn source(&mut self, raw: RawSource, at: &str, list: List) -> Result<Source, String> {
+    fn source(&mut self, mut raw: RawSource, at: &str, list: List) -> Result<Source, String> {
+        let (unnest_input, nest_output) = raw.take_nesting();
+        let unnest_input = unnest_input
+            .map(|written| KeyPath::parse(&written).map_err(|e| format!("`unnestInput`: {e}")))
+            .transpose()?;
+        let nest_output = match nest_output {
+            Some(_) if list != List::Values => {
+                return Err(format!(
+                    "`nestOutput` is for a values source: what's in `{}:` isn't merged into the values",
+                    list.key()
+                ));
+            }
+            Some(written) => {
+                let path = KeyPath::parse(&written).map_err(|e| format!("`nestOutput`: {e}"))?;
+                if path.under_obelisk() {
+                    return Err(format!(
+                        "`nestOutput`: `{path}` is under `obelisk:`, which is the tool's: pick another key"
+                    ));
+                }
+                Some(path)
+            }
+            None => None,
+        };
+        Ok(Source {
+            kind: self.kind(raw, at, list)?,
+            unnest_input,
+            nest_output,
+        })
+    }
+
+    /// A source's type, checked against the list it's in.
+    fn kind(&mut self, raw: RawSource, at: &str, list: List) -> Result<SourceKind, String> {
         match (raw, list) {
             (RawSource::Inline { .. }, List::Manifests) => {
                 Err("`type: inline` makes values, not manifests: put it in `values:`".to_owned())
             }
+            // TODO: a chart's default values (`helm show values`) could be a values source, e.g. a
+            // `type: helmValues` (with `nestOutput`); for now a chart is manifests only.
             (RawSource::Helm { .. }, List::Values | List::Images) => Err(format!(
                 "a Helm chart renders resources, not {}: put it in `manifests:`",
                 if list == List::Values { "values" } else { "image specs" }
@@ -589,28 +709,28 @@ impl Checker<'_> {
                 "an inline source in `images:` takes `images` (a list of image specs), not `values`"
                     .to_owned(),
             ),
-            (RawSource::Inline { values, .. }, List::Values) => Ok(Source::Inline {
+            (RawSource::Inline { values, .. }, List::Values) => Ok(SourceKind::Inline {
                 values: values.map_or(Value::Null, Value::Object),
                 at: format!("{} ({at})", self.file.display()).into(),
             }),
-            (RawSource::Inline { images, .. }, List::Images) => Ok(Source::Inline {
+            (RawSource::Inline { images, .. }, List::Images) => Ok(SourceKind::Inline {
                 values: Value::Array(images.unwrap_or_default()),
                 at: format!("{} ({at})", self.file.display()).into(),
             }),
             (RawSource::Url { .. }, List::Images) => {
                 Err("`type: url` isn't an images source: use `gotmpl`, `file`, `command` or `inline`".to_owned())
             }
-            (RawSource::Gotmpl { path }, _) => {
+            (RawSource::Gotmpl { path, .. }, _) => {
                 let (path, found) = self.paths.file(&path)?;
-                Ok(Source::Gotmpl { path, found })
+                Ok(SourceKind::Gotmpl { path, found })
             }
-            (RawSource::File { path }, _) => {
+            (RawSource::File { path, .. }, _) => {
                 let (path, found) = self.paths.file(&path)?;
-                Ok(Source::File { path, found })
+                Ok(SourceKind::File { path, found })
             }
-            (RawSource::Url { url, sha256 }, _) => {
+            (RawSource::Url { url, sha256, .. }, _) => {
                 let source = check_url(url, sha256)?;
-                if let Source::Url { url, sha256: None } = &source {
+                if let SourceKind::Url { url, sha256: None } = &source {
                     self.warnings.push(format!(
                         "{}: url `{url}` has no `sha256`: what it fetches can change under you",
                         self.shown.display()
@@ -623,7 +743,7 @@ impl Checker<'_> {
                     chart,
                     repo,
                     version,
-                    values,
+                    ..
                 },
                 List::Manifests,
             ) => check_helm(
@@ -631,11 +751,10 @@ impl Checker<'_> {
                     chart,
                     repo,
                     version,
-                    values,
                 },
                 self.helm_repos,
             ),
-            (RawSource::Command { command, env }, _) => Ok(Source::Command {
+            (RawSource::Command { command, env, .. }, _) => Ok(SourceKind::Command {
                 command: self.paths.command(command)?,
                 env: check_env(env)?,
             }),
@@ -751,7 +870,7 @@ fn shown_from(root: &Path, path: &Path) -> PathBuf {
 }
 
 /// A `type: url`: https, and a `sha256` (if any) that looks like one.
-fn check_url(url: String, sha256: Option<String>) -> Result<Source, String> {
+fn check_url(url: String, sha256: Option<String>) -> Result<SourceKind, String> {
     if !url.starts_with("https://") {
         return Err(format!(
             "url `{url}` must be https:// (it's applied to clusters)"
@@ -767,7 +886,7 @@ fn check_url(url: String, sha256: Option<String>) -> Result<Source, String> {
             "sha256 `{sha}` isn't a SHA-256: 64 lowercase hex digits"
         ));
     }
-    Ok(Source::Url { url, sha256 })
+    Ok(SourceKind::Url { url, sha256 })
 }
 
 /// A `type: helm`'s chart, with `repo` (as written) resolved: an `oci://` chart takes none; any
@@ -775,7 +894,7 @@ fn check_url(url: String, sha256: Option<String>) -> Result<Source, String> {
 fn check_helm(
     mut chart: HelmChart,
     helm_repos: &IndexMap<String, String>,
-) -> Result<Source, String> {
+) -> Result<SourceKind, String> {
     let name = &chart.chart;
     chart.repo = match (name.starts_with("oci://"), chart.repo.take()) {
         (true, None) => None,
@@ -804,7 +923,7 @@ fn check_helm(
             )
         })?),
     };
-    Ok(Source::Helm(chart))
+    Ok(SourceKind::Helm(chart))
 }
 
 #[cfg(test)]
@@ -845,32 +964,40 @@ mod tests {
     fn parses_phases_and_every_source_type() {
         let sha = "a".repeat(64);
         let (plan, dir) = parse_in(&format!(
-            "build:\n  phases:\n    - name: base\n      values:\n        - {{ type: inline, values: {{ a: 1 }} }}\n        - {{ type: gotmpl, path: ./here.yaml }}\n        - {{ type: file, path: /nowhere/x.yaml }}\n        - {{ type: url, url: https://x/v.yaml, sha256: {sha} }}\n        - {{ type: command, command: [./gen.sh, prod], env: {{ MODE: prod, N: \"1\" }} }}\n    - name: out\n      manifests:\n        - {{ type: helm, chart: metallb, repo: metallb, version: 0.16.1, values: metallb }}\n        - {{ type: helm, chart: oci://docker.io/envoyproxy/gateway-helm, version: 1.9.3 }}\n        - {{ type: command, command: [sh, -c, x] }}\n      images:\n        - {{ type: gotmpl, path: ./here.yaml }}\n        - {{ type: command, command: [./images.sh] }}\n        - {{ type: inline, images: [{{ name: app }}] }}\n    - name: empty\n"
+            "build:\n  phases:\n    - name: base\n      values:\n        - {{ type: inline, values: {{ a: 1 }} }}\n        - {{ type: gotmpl, path: ./here.yaml }}\n        - {{ type: file, path: /nowhere/x.yaml }}\n        - {{ type: url, url: https://x/v.yaml, sha256: {sha} }}\n        - {{ type: command, command: [./gen.sh, prod], env: {{ MODE: prod, N: \"1\" }} }}\n    - name: out\n      manifests:\n        - {{ type: helm, chart: metallb, repo: metallb, version: 0.16.1, unnestInput: metallb }}\n        - {{ type: helm, chart: oci://docker.io/envoyproxy/gateway-helm, version: 1.9.3 }}\n        - {{ type: command, command: [sh, -c, x] }}\n      images:\n        - {{ type: gotmpl, path: ./here.yaml }}\n        - {{ type: command, command: [./images.sh] }}\n        - {{ type: inline, images: [{{ name: app }}] }}\n    - name: empty\n"
         ));
         let plan = plan.unwrap();
         let root = absolute_root(dir.path());
         let names: Vec<_> = plan.phases.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(names, ["base", "out", "empty"]);
-        let kinds: Vec<_> = plan.phases[0].values.iter().map(Source::kind).collect();
+        let kinds: Vec<_> = plan.phases[0]
+            .values
+            .iter()
+            .map(Source::type_name)
+            .collect();
         assert_eq!(kinds, ["inline", "gotmpl", "file", "url", "command"]);
-        let kinds: Vec<_> = plan.phases[1].images.iter().map(Source::kind).collect();
+        let kinds: Vec<_> = plan.phases[1]
+            .images
+            .iter()
+            .map(Source::type_name)
+            .collect();
         assert_eq!(kinds, ["gotmpl", "command", "inline"]);
         assert_eq!(plan.phases[2].images.len(), 0);
         assert_eq!(
             plan.phases[0].values[0],
-            Source::Inline {
+            Source::new(SourceKind::Inline {
                 values: serde_json::json!({ "a": 1 }),
                 at: format!("{SHOWN} (build.phases[0].values[0])").into(),
-            }
+            })
         );
         // `./…` is from `.obelisk-k8s/`, kept absolute and shown from the repo root; a missing
         // file is kept, and skipped when it renders.
         assert_eq!(
             plan.phases[0].values[1],
-            Source::Gotmpl {
+            Source::new(SourceKind::Gotmpl {
                 path: root.join(".obelisk-k8s/here.yaml"),
                 found: true
-            }
+            })
         );
         assert_eq!(
             plan.phases[0].values[1].describe(dir.path()),
@@ -878,15 +1005,15 @@ mod tests {
         );
         assert_eq!(
             plan.phases[0].values[2],
-            Source::File {
+            Source::new(SourceKind::File {
                 path: "/nowhere/x.yaml".into(),
                 found: false
-            }
+            })
         );
         assert!(!plan.phases[0].values[2].present());
         assert_eq!(
             plan.phases[0].values[4],
-            Source::Command {
+            Source::new(SourceKind::Command {
                 command: vec![
                     root.join(".obelisk-k8s/gen.sh").display().to_string(),
                     "prod".into()
@@ -895,7 +1022,7 @@ mod tests {
                     ("MODE".to_owned(), "prod".to_owned()),
                     ("N".to_owned(), "1".to_owned()),
                 ]),
-            }
+            })
         );
         assert_eq!(
             plan.phases[0].values[4].describe(dir.path()),
@@ -903,12 +1030,14 @@ mod tests {
         );
         assert_eq!(
             plan.phases[1].manifests[0],
-            Source::Helm(HelmChart {
-                chart: "metallb".to_owned(),
-                repo: Some("https://metallb.github.io/metallb".to_owned()),
-                version: "0.16.1".to_owned(),
-                values: Some("metallb".to_owned()),
-            })
+            Source {
+                unnest_input: Some(KeyPath::parse("metallb").unwrap()),
+                ..Source::new(SourceKind::Helm(HelmChart {
+                    chart: "metallb".to_owned(),
+                    repo: Some("https://metallb.github.io/metallb".to_owned()),
+                    version: "0.16.1".to_owned(),
+                }))
+            }
         );
         assert!(plan.has_manifests());
         assert!(!plan.phases[0].has_manifests());
@@ -931,14 +1060,14 @@ mod tests {
         assert_eq!(
             plan.phases[0].values,
             [
-                Source::File {
+                Source::new(SourceKind::File {
                     path: root.join(".obelisk-k8s/here.yaml"),
                     found: true
-                },
-                Source::File {
+                }),
+                Source::new(SourceKind::File {
                     path: root.join(".obelisk-k8s/nope.yaml"),
                     found: false
-                },
+                }),
             ]
         );
         let shown: Vec<_> = plan.phases[0]
@@ -967,8 +1096,8 @@ mod tests {
         let plan = parse("build:\n  phases:\n    - { name: p, values: null, manifests: null, images: null }\n    - { name: q, values: [{ type: inline }] }\n").unwrap();
         assert_eq!(plan.phases[0].values, []);
         assert!(matches!(
-            &plan.phases[1].values[0],
-            Source::Inline {
+            &plan.phases[1].values[0].kind,
+            SourceKind::Inline {
                 values: Value::Null,
                 ..
             }
@@ -1139,6 +1268,78 @@ mod tests {
         ] {
             let e = source_error(key, source);
             assert!(e.starts_with(&format!("{SHOWN}: ")), "{source}: {e}");
+            assert!(e.contains(expected), "{source}: {e}");
+        }
+    }
+
+    #[test]
+    fn parses_unnest_input_and_nest_output() {
+        let plan = parse(
+            "build:\n  phases:\n    - name: p\n      values:\n        - { type: inline, values: {}, nestOutput: a.b }\n        - { type: command, command: [cat], unnestInput: x.y, nestOutput: c }\n      manifests:\n        - { type: gotmpl, path: ./t.gotmpl, unnestInput: x }\n        - { type: helm, chart: oci://x/y, version: \"1\" }\n",
+        )
+        .unwrap();
+        let path = |key: &str| Some(KeyPath::parse(key).unwrap());
+        let nesting = |s: &Source| (s.unnest_input.clone(), s.nest_output.clone());
+        let phase = &plan.phases[0];
+        assert_eq!(nesting(&phase.values[0]), (None, path("a.b")));
+        assert_eq!(nesting(&phase.values[1]), (path("x.y"), path("c")));
+        assert_eq!(nesting(&phase.manifests[0]), (path("x"), None));
+        // A chart without one gets no values.
+        assert_eq!(nesting(&phase.manifests[1]), (None, None));
+    }
+
+    #[test]
+    fn rejects_bad_nesting() {
+        for (key, source, expected) in [
+            (
+                "manifests",
+                "{ type: gotmpl, path: ./t, nestOutput: a }",
+                "`build.phases[0].manifests[0]`: `nestOutput` is for a values source: what's in `manifests:` isn't merged into the values",
+            ),
+            (
+                "images",
+                "{ type: command, command: [x], nestOutput: a }",
+                "`build.phases[0].images[0]`: `nestOutput` is for a values source: what's in `images:` isn't merged into the values",
+            ),
+            (
+                "values",
+                "{ type: inline, values: {}, nestOutput: obelisk.release }",
+                "`nestOutput`: `obelisk.release` is under `obelisk:`, which is the tool's: pick another key",
+            ),
+            (
+                "values",
+                "{ type: file, path: ./x, nestOutput: a..b }",
+                "`nestOutput`: `a..b` has an empty key: write `a.b.c`",
+            ),
+            (
+                "values",
+                "{ type: command, command: [x], unnestInput: \"\" }",
+                "`unnestInput`: `` has an empty key: write `a.b.c`",
+            ),
+            // Only a type with an input takes `unnestInput`, and a chart has no output to nest.
+            (
+                "values",
+                "{ type: inline, values: {}, unnestInput: a }",
+                "unknown field `unnestInput`, expected one of `values`, `images`, `nestOutput`",
+            ),
+            (
+                "values",
+                "{ type: url, url: https://x, unnestInput: a }",
+                "unknown field `unnestInput`",
+            ),
+            (
+                "manifests",
+                "{ type: helm, chart: oci://x/y, version: \"1\", nestOutput: a }",
+                "unknown field `nestOutput`, expected one of `chart`, `repo`, `version`, `unnestInput`",
+            ),
+            // `values:` was a chart's `unnestInput`.
+            (
+                "manifests",
+                "{ type: helm, chart: oci://x/y, version: \"1\", values: a }",
+                "unknown field `values`",
+            ),
+        ] {
+            let e = source_error(key, source);
             assert!(e.contains(expected), "{source}: {e}");
         }
     }

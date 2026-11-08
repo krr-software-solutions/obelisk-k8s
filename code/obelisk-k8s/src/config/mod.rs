@@ -13,6 +13,7 @@ pub mod diff;
 pub mod ephemeral;
 pub mod global;
 pub mod images;
+pub mod key_path;
 pub mod manifests;
 pub mod paths;
 pub mod phases;

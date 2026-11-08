@@ -325,10 +325,10 @@ build file ─▶ build plan ─▶ phase 1 … phase n ─▶ values (+ agreed 
   - `{ type: url, url, sha256? }`: fetched with `curl` every run (https only, redirects too; 2m
     timeout), checked against `sha256` when given (without one, a `WARN`, printed as soon as the plan
     is built: before anything renders from it or installs), used as it is.
-  - `{ type: helm, chart, repo?, version, values? }`: an upstream chart, `helm template`d as the
-    case's release, CRDs included. `repo` is a URL or a name in `repo.yaml`'s `helmRepos`; an
-    `oci://` chart takes none. Its values are the values' mapping at `values` (a dot-separated key;
-    keys with a `.` can't be reached), or none. Manifests only. `apply` renders it for the target
+  - `{ type: helm, chart, repo?, version, unnestInput? }`: an upstream chart, `helm template`d as
+    the case's release, CRDs included. `repo` is a URL or a name in `repo.yaml`'s `helmRepos`; an
+    `oci://` chart takes none. Its values are the mapping at `unnestInput` (below), or none without
+    one (never all the values). Manifests only. `apply` renders it for the target
     cluster's capabilities (its Kubernetes and API versions, from `kubectl` on its context, so charts
     that check `.Capabilities` render what that cluster can take); `template` renders offline, with
     Helm's defaults.
@@ -337,6 +337,14 @@ build file ─▶ build plan ─▶ phase 1 … phase n ─▶ values (+ agreed 
     the environment it inherits. `./…` resolves from `.obelisk-k8s/`, an absolute path is used as
     it is, a bare name is looked up on `PATH` (anything else is an error). No timeout. Its
     `# Source:` names only the program (arguments may hold secrets).
+  - **Nesting**, on any source where it means something: `unnestInput: a.b.c` gives it only what's
+    at `a.b.c` in the values (as `.Values` for a `gotmpl`, which needs a mapping there; on stdin for
+    a `command`, any value), not all of them, so it loses `.Values.obelisk` too; nothing there is an
+    error. `nestOutput: d.e.f` puts a values source's output (any one value, a list or scalar too)
+    at `d.e.f` before it merges; an empty output still merges nothing. Keys are dot-separated into
+    mappings (no key may hold a `.`; no list indices). `unnestInput` is for `gotmpl`, `command` and
+    `helm` (the types with an input); `nestOutput` for every type but `helm`, in `values:` only (and
+    never under `obelisk:`). Anything else is an error when the plan is built.
   A `path` is absolute or starts with `./` (from `.obelisk-k8s/`), and is skipped if it's missing.
   It's kept absolute and normalized (`..` resolved), and shown relative to the repo root when it's
   under it (`.obelisk-k8s/…`, `.` for the root), so `# Source:` comments and errors are the same on
@@ -439,6 +447,9 @@ Nothing below is decided. Don't silently pick an answer in code; raise it.
 - ~~Do raw/URL YAML units still get SSM resolution (obelisk-local's `doTemplate`)?~~ Decided: `file`
   and `url` manifests sources always do (**SSM**, above).
 - CRD upgrades, given Helm never upgrades `crds/`.
+- TODO: a chart is manifests only, so there's no way to get its default values (`helm show
+  values`) into the values. Probably wants cleaning up, e.g. a `type: helmValues` values source
+  (with `nestOutput`); not decided.
 - ~~Is apply part of v1, or only `template`?~~ Decided: it is (`obelisk-k8s apply`, above).
 - Does the tool own instance identity for clean up/down (v1.1)? Hook shape (v1.2)?
 

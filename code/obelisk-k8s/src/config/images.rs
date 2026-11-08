@@ -48,7 +48,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::config::build::{BuildPlan, RepoPaths, Source, Warnings, check_env};
+use crate::config::build::{BuildPlan, RepoPaths, Source, SourceKind, Warnings, check_env};
 use crate::config::ephemeral::Ephemeral;
 use crate::config::global::GlobalConfig;
 use crate::config::global::docker::bad_path_segment;
@@ -309,7 +309,7 @@ fn source_images(
     paths: &RepoPaths,
 ) -> Result<Vec<Image>, ObeliskK8sError> {
     // An inline source in `images:` lists its specs (see `config::build`); it's never rendered.
-    let documents = if let Source::Inline { values, .. } = source {
+    let documents = if let SourceKind::Inline { values, .. } = &source.kind {
         match values {
             Value::Array(images) => images.clone(),
             Value::Null => Vec::new(),

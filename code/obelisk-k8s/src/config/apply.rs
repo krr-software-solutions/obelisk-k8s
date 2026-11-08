@@ -22,7 +22,7 @@ use std::fmt;
 use std::path::Path;
 
 use crate::ObeliskK8sError;
-use crate::config::build::{Source, Warnings};
+use crate::config::build::{SourceKind, Warnings};
 use crate::config::ephemeral::Ephemeral;
 use crate::config::global::{Cluster, GlobalConfig, Location};
 use crate::config::manifests::ManifestsCase;
@@ -168,7 +168,7 @@ impl RepoConfig {
                 .phases
                 .iter()
                 .flat_map(|p| &p.manifests)
-                .any(|s| matches!(s, Source::Helm(_)));
+                .any(|s| matches!(s.kind, SourceKind::Helm(_)));
             if has_chart && !capabilities.iter().any(|(c, _)| *c == context) {
                 capabilities.push((context.clone(), helm::capabilities(&context)?));
             }

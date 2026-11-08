@@ -1,14 +1,16 @@
 //! Rendering one source of a phase ([`Source`]) for a case: each type turns the values it's given
 //! into text. A values source's text is read as one values mapping; a manifests source's is k8s
-//! resources. (An `inline` source isn't rendered: its values are used as they are.)
+//! resources. (An `inline` source isn't rendered: its values are used as they are.) A source with
+//! an `unnestInput` is given only what's at that key, not all the values.
 //!
-//! - `gotmpl`: rendered by Helm through a throwaway chart, with the values as `.Values`.
+//! - `gotmpl`: rendered by Helm through a throwaway chart, with the values as `.Values` (so what's
+//!   at `unnestInput` must be a mapping).
 //! - `file`: the file, as it is.
 //! - `url`: fetched (`curl`), checked against `sha256` when it has one, and used as it is.
-//! - `helm`: `helm template` of the chart as the case's release (CRDs included), with its values
-//!   taken from the given values at the chart's `values` key (none without one).
-//! - `command`: run from the repo root with the values (YAML) on stdin, and its `env` set over what
-//!   it inherits; its stdout is the text.
+//! - `helm`: `helm template` of the chart as the case's release (CRDs included), with what's at its
+//!   `unnestInput` (a mapping) as its values, or none without one.
+//! - `command`: run from the repo root with the values (YAML; at `unnestInput`, any value) on
+//!   stdin, and its `env` set over what it inherits; its stdout is the text.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -20,15 +22,16 @@ use serde_json::{Map, Value};
 use sha2::{Digest as _, Sha256};
 
 use crate::ObeliskK8sError;
-use crate::config::build::{HelmChart, Source, in_repo};
+use crate::config::build::{Source, SourceKind, in_repo};
 use crate::helm;
 
 /// What a render gets: the values (as a tree, and as the YAML it's given), the release it renders
 /// as, the chart version gotmpl templates see, and (for a chart) the cluster's capabilities.
 pub(crate) struct Inputs<'a> {
     pub(crate) repo_root: &'a Path,
-    /// Read only by a `helm` render (for its `values` key).
+    /// Read for a source's `unnestInput`.
     pub(crate) values: &'a Map<String, Value>,
+    /// `values`, as YAML: what a source without an `unnestInput` gets (but a chart, which gets none).
     pub(crate) values_yaml: &'a str,
     pub(crate) release: &'a str,
     pub(crate) namespace: &'a str,
@@ -44,74 +47,64 @@ pub(crate) struct Inputs<'a> {
 ///
 /// [`ObeliskK8sError::Helm`] if Helm fails (a `gotmpl` or `helm`); [`ObeliskK8sError::Render`] if a
 /// URL can't be fetched or doesn't match its `sha256`, or a command can't run or fails;
-/// [`ObeliskK8sError::Io`] if a file can't be read; [`ObeliskK8sError::Usage`] if a chart's `values`
-/// key isn't a mapping in the values.
+/// [`ObeliskK8sError::Io`] if a file can't be read; [`ObeliskK8sError::Config`] if nothing is at
+/// its `unnestInput`, or (a `gotmpl` or `helm`) what is isn't a mapping.
 pub(crate) fn text(
     source: &Source,
     shown: &Path,
     inputs: &Inputs<'_>,
 ) -> Result<String, ObeliskK8sError> {
-    match source {
-        Source::Inline { .. } => unreachable!("an inline source's values aren't rendered"),
-        Source::Gotmpl { path, .. } => helm::render(
+    let unnested = unnested_input(source, shown, inputs.values)?;
+    let values_yaml = unnested.as_deref().unwrap_or(inputs.values_yaml);
+    match &source.kind {
+        SourceKind::Inline { .. } => unreachable!("an inline source's values aren't rendered"),
+        SourceKind::Gotmpl { path, .. } => helm::render(
             &inputs.repo_root.join(path),
             shown,
-            inputs.values_yaml,
+            values_yaml,
             inputs.release,
             inputs.namespace,
             inputs.chart_version,
         ),
-        Source::File { path, .. } => {
-            std::fs::read_to_string(inputs.repo_root.join(path)).map_err(|source| {
-                ObeliskK8sError::Io {
-                    path: shown.to_owned(),
-                    source,
-                }
-            })
-        }
-        Source::Url { url, sha256 } => fetch(url, sha256.as_deref()),
-        Source::Helm(chart) => {
-            let values = chart_values(chart, inputs.values)?;
-            helm::template_chart(
-                chart,
-                inputs.release,
-                inputs.namespace,
-                values.as_deref(),
-                inputs.capabilities,
-            )
-        }
-        Source::Command { command, env } => run(command, env, inputs.repo_root, inputs.values_yaml),
+        SourceKind::File { path, .. } => std::fs::read_to_string(inputs.repo_root.join(path))
+            .map_err(|source| ObeliskK8sError::Io {
+                path: shown.to_owned(),
+                source,
+            }),
+        SourceKind::Url { url, sha256 } => fetch(url, sha256.as_deref()),
+        SourceKind::Helm(chart) => helm::template_chart(
+            chart,
+            inputs.release,
+            inputs.namespace,
+            unnested.as_deref(),
+            inputs.capabilities,
+        ),
+        SourceKind::Command { command, env } => run(command, env, inputs.repo_root, values_yaml),
     }
 }
 
-/// `chart`'s values: the subtree of `values` at its `values` key, as YAML.
-fn chart_values(
-    chart: &HelmChart,
+/// What's at `source`'s `unnestInput` in `values`, as YAML; `None` without one.
+fn unnested_input(
+    source: &Source,
+    shown: &Path,
     values: &Map<String, Value>,
 ) -> Result<Option<String>, ObeliskK8sError> {
-    let Some(key) = &chart.values else {
+    let Some(key) = &source.unnest_input else {
         return Ok(None);
     };
-    // Each part a key in the mapping the one before it found.
-    let mut at: Option<&Value> = None;
-    let mut map = Some(values);
-    for part in key.split('.') {
-        at = map.and_then(|m| m.get(part));
-        map = match at {
-            Some(Value::Object(inner)) => Some(inner),
-            _ => None,
-        };
-    }
-    let Some(subtree) = at else {
-        return Err(ObeliskK8sError::Usage(format!(
-            "chart `{}` takes its values from `{key}`, which isn't in the values",
-            chart.chart
-        )));
+    let error = |message: String| ObeliskK8sError::Config {
+        file: shown.to_owned(),
+        at: None,
+        message: format!("`unnestInput: {key}`: {message}"),
     };
-    if !subtree.is_object() {
-        return Err(ObeliskK8sError::Usage(format!(
-            "chart `{}` takes its values from `{key}`, which isn't a mapping",
-            chart.chart
+    let subtree = key.get(values).map_err(error)?;
+    // Helm's `.Values` (a template's, or a chart's) is a mapping.
+    if matches!(source.kind, SourceKind::Gotmpl { .. } | SourceKind::Helm(_))
+        && !subtree.is_object()
+    {
+        return Err(error(format!(
+            "a `{}` source's values must be a mapping, and this isn't",
+            source.type_name()
         )));
     }
     crate::yaml::to_string(subtree, Path::new(&format!("the values at `{key}`"))).map(Some)
@@ -217,6 +210,8 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+    use crate::config::build::HelmChart;
+    use crate::config::key_path::KeyPath;
     use crate::config::test_support::{helm_installed, write_script};
 
     fn values() -> Map<String, Value> {
@@ -245,10 +240,10 @@ mod tests {
     fn a_file_is_used_as_it_is() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("x.yaml"), "a: {{ not templated }}\n").unwrap();
-        let source = Source::File {
+        let source = Source::new(SourceKind::File {
             path: PathBuf::from("x.yaml"),
             found: true,
-        };
+        });
         let values = values();
         let text = text(&source, Path::new("x.yaml"), &inputs(dir.path(), &values)).unwrap();
         assert_eq!(text, "a: {{ not templated }}\n");
@@ -287,10 +282,10 @@ mod tests {
         );
         let words = vec![".obelisk-k8s/gen.sh".to_owned(), "prod".to_owned()];
         let values = values();
-        let source = Source::Command {
+        let source = Source::new(SourceKind::Command {
             command: words,
             env: BTreeMap::from([("MODE".to_owned(), "fast".to_owned())]),
-        };
+        });
         let text = text(&source, Path::new("-"), &inputs(dir.path(), &values)).unwrap();
         assert_eq!(text, "seen: 1\narg: prod\nmode: fast\n");
 
@@ -317,31 +312,46 @@ mod tests {
     }
 
     #[test]
-    fn a_chart_takes_its_values_from_its_key() {
-        let chart = |values: Option<&str>| HelmChart {
-            chart: "x".to_owned(),
-            repo: None,
-            version: "1".to_owned(),
-            values: values.map(str::to_owned),
-        };
+    fn a_source_sees_only_what_is_at_its_unnest_input() {
+        let dir = tempfile::tempdir().unwrap();
         let values = values();
-        assert_eq!(chart_values(&chart(None), &values).unwrap(), None);
-        assert_eq!(
-            chart_values(&chart(Some("charts.x")), &values)
-                .unwrap()
-                .as_deref(),
-            Some("replicas: 2\n")
-        );
-        let error = chart_values(&chart(Some("charts.x.replicas")), &values)
-            .unwrap_err()
-            .to_string();
-        assert!(error.ends_with("which isn't a mapping"), "{error}");
-        for missing in ["charts.y", "charts.x.replicas.deeper", "nope"] {
-            let error = chart_values(&chart(Some(missing)), &values)
-                .unwrap_err()
-                .to_string();
-            assert!(error.contains("isn't in the values"), "{missing}: {error}");
+        let cat = |unnest: Option<&str>| Source {
+            unnest_input: unnest.map(|key| KeyPath::parse(key).unwrap()),
+            ..Source::new(SourceKind::Command {
+                command: vec!["cat".to_owned()],
+                env: BTreeMap::new(),
+            })
+        };
+        let text = |source: &Source| text(source, Path::new("-"), &inputs(dir.path(), &values));
+        // Without one, all the values; with one, what's there, whatever it is.
+        assert_eq!(text(&cat(None)).unwrap(), "obelisk:\n  unit: app\n");
+        assert_eq!(text(&cat(Some("charts.x"))).unwrap(), "replicas: 2\n");
+        assert_eq!(text(&cat(Some("charts.x.replicas"))).unwrap(), "2\n");
+        for (key, expected) in [
+            ("charts.y", "no `y` under `charts`"),
+            (
+                "charts.x.replicas.deeper",
+                "`charts.x.replicas` isn't a mapping",
+            ),
+            ("nope", "no `nope` in the values"),
+        ] {
+            assert_eq!(
+                text(&cat(Some(key))).unwrap_err().to_string(),
+                format!("-: `unnestInput: {key}`: {expected}")
+            );
         }
+        // A template's (or a chart's) values are a mapping.
+        let gotmpl = Source {
+            unnest_input: Some(KeyPath::parse("charts.x.replicas").unwrap()),
+            ..Source::new(SourceKind::Gotmpl {
+                path: PathBuf::from("t.gotmpl"),
+                found: true,
+            })
+        };
+        assert_eq!(
+            text(&gotmpl).unwrap_err().to_string(),
+            "-: `unnestInput: charts.x.replicas`: a `gotmpl` source's values must be a mapping, and this isn't"
+        );
     }
 
     #[test]
@@ -373,15 +383,13 @@ mod tests {
             chart: chart_dir.display().to_string(),
             repo: None,
             version: "1.0.0".to_owned(),
-            values: Some("charts.x".to_owned()),
         };
         let values = values();
-        let text = text(
-            &Source::Helm(chart),
-            Path::new("-"),
-            &inputs(dir.path(), &values),
-        )
-        .unwrap();
+        let source = Source {
+            unnest_input: Some(KeyPath::parse("charts.x").unwrap()),
+            ..Source::new(SourceKind::Helm(chart))
+        };
+        let text = text(&source, Path::new("-"), &inputs(dir.path(), &values)).unwrap();
         assert!(
             text.contains("kind: CustomResourceDefinition"),
             "CRDs included: {text}"

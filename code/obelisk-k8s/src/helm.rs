@@ -796,7 +796,6 @@ mod tests {
             chart: "metallb".to_owned(),
             repo: Some("https://example.org/charts".to_owned()),
             version: "0.16.1".to_owned(),
-            values: None,
         };
         let capabilities = Capabilities {
             kube_version: "v1.35.5+k3s1".to_owned(),

@@ -32,7 +32,7 @@ use std::path::Path;
 use serde_json::{Map, Value};
 
 use crate::ObeliskK8sError;
-use crate::config::build::{BuildPlan, Phase, Source, Warnings};
+use crate::config::build::{BuildPlan, Phase, Source, SourceKind, Warnings};
 use crate::config::ephemeral::Ephemeral;
 use crate::config::global::GlobalConfig;
 use crate::config::images::{images_values, render_images};
@@ -212,8 +212,11 @@ fn render_source(
     let shown = source.shown(render_inputs.repo_root, shown_root);
     let mut rendered = render::text(source, &shown, render_inputs)?;
     // A raw manifest's refs are its own; the others' come from the (resolved) values.
-    if matches!(source, Source::File { .. } | Source::Url { .. }) {
-        if let Source::Url { sha256, .. } = source {
+    if matches!(
+        source.kind,
+        SourceKind::File { .. } | SourceKind::Url { .. }
+    ) {
+        if let SourceKind::Url { sha256, .. } = &source.kind {
             ssm::check_pinned(&rendered, sha256.as_deref(), &shown)?;
         }
         rendered = ssm::in_manifests(inputs.ssm, &rendered, &shown)?;
@@ -223,7 +226,7 @@ fn render_source(
         return Ok(());
     }
     // Helm names each document's template (`# Source:`); the others are named here.
-    if matches!(source, Source::Gotmpl { .. } | Source::Helm(_)) {
+    if matches!(source.kind, SourceKind::Gotmpl { .. } | SourceKind::Helm(_)) {
         manifests.push_str(&rendered);
     } else {
         let _ = write!(manifests, "---\n# Source: {}\n", shown.display());

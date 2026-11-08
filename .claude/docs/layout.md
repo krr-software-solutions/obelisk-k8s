@@ -38,7 +38,9 @@ defines the CLI (the clap types, `--help` headings, completions) and dispatches 
   `preserve_order`; YAML in and out still goes through `yaml.rs`), and what values sources may set
   under `obelisk:`.
 - `config/render.rs`: rendering one source, by type (`inline`, `gotmpl`, `file`, `url`, `helm`,
-  `command`).
+  `command`), given what's at its `unnestInput`.
+- `config/key_path.rs`: a dot-separated key path (`a.b.c`) into the values, as `unnestInput` and
+  `nestOutput` are written.
 - `config/manifests.rs`: the rendered resources (`template manifests`): each phase's manifests
   sources, rendered with the values before it.
 - `config/images.rs`: the image specs (`template images`): each phase's images sources, rendered

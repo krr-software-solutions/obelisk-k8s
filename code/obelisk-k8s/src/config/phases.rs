@@ -31,7 +31,9 @@ use std::path::{Path, PathBuf};
 use serde_json::{Map, Value};
 
 use crate::ObeliskK8sError;
-use crate::config::build::{BuildPlan, RENDER_NAMESPACE, RENDER_RELEASE, Source, Warnings};
+use crate::config::build::{
+    BuildPlan, RENDER_NAMESPACE, RENDER_RELEASE, Source, SourceKind, Warnings,
+};
 use crate::config::ephemeral::Ephemeral;
 use crate::config::global::GlobalConfig;
 use crate::config::paths::Selection;
@@ -155,11 +157,14 @@ impl RepoConfig {
         let mut before = Vec::with_capacity(plan.phases.len());
         for phase in &plan.phases {
             // Its sources render against the values before it, so they don't see each other.
-            let input = values_yaml(&values, target, unit)?;
+            let before_values = values.clone();
+            let input = values_yaml(&before_values, target, unit)?;
             before.push((phase.has_manifests() || phase.has_images()).then(|| values.clone()));
             for source in phase.values.iter().filter(|s| s.present()) {
                 let shown = source.shown(repo_root, shown_root);
-                let Some(output) = values_output(source, &shown, repo_root, &input, inputs)? else {
+                let rendered =
+                    values_output(source, &shown, repo_root, &before_values, &input, inputs)?;
+                let Some(output) = rendered else {
                     continue;
                 };
                 absorb(
@@ -191,23 +196,23 @@ impl RepoConfig {
     }
 }
 
-/// What a values source (shown as `shown`) outputs, given the values (`input`, as YAML): one
-/// mapping (with its SSM refs resolved, or checked), or nothing.
+/// What a values source (shown as `shown`) outputs, given the values (`values`, and `input`, the
+/// same as YAML): one mapping, under its `nestOutput` if it has one (with its SSM refs resolved, or
+/// checked), or nothing.
 fn values_output(
     source: &Source,
     shown: &Path,
     repo_root: &Path,
+    values: &Map<String, Value>,
     input: &str,
     inputs: &RunInputs<'_>,
 ) -> Result<Option<Value>, ObeliskK8sError> {
-    let mut documents = if let Source::Inline { values, .. } = source {
+    let mut documents = if let SourceKind::Inline { values, .. } = &source.kind {
         vec![values.clone()]
     } else {
-        // Only a chart reads the values as a tree, and a chart can't be a values source.
-        let no_tree = Map::new();
         let render_inputs = render::Inputs {
             repo_root,
-            values: &no_tree,
+            values,
             values_yaml: input,
             release: RENDER_RELEASE,
             namespace: RENDER_NAMESPACE,
@@ -215,7 +220,7 @@ fn values_output(
             capabilities: None,
         };
         let text = render::text(source, shown, &render_inputs)?;
-        if let Source::Url { sha256, .. } = source {
+        if let SourceKind::Url { sha256, .. } = &source.kind {
             ssm::check_pinned(&text, sha256.as_deref(), shown)?;
         }
         yaml::parse_values_stream(&text, shown)?
@@ -233,6 +238,9 @@ fn values_output(
     let Some(mut output) = documents.pop() else {
         return Ok(None);
     };
+    if let Some(key) = &source.nest_output {
+        output = key.wrap(output);
+    }
     resolve_refs(inputs.ssm, &mut output, shown)?;
     Ok(Some(output))
 }
@@ -585,6 +593,32 @@ mod tests {
         )
         .unwrap();
         assert!(out.yaml.ends_with("e: 1000.0\nz: 8.0\n"), "{}", out.yaml);
+    }
+
+    #[test]
+    fn a_source_can_see_a_subtree_and_nest_its_output() {
+        let dir = repo(&[("list.yaml", "- a\n- b\n"), ("empty.yaml", "")]);
+        let out = run(
+            &dir,
+            "prod",
+            &phases(&[
+                "{ type: inline, values: { app: { config: { port: 1 } } }, nestOutput: given }, { type: file, path: ./list.yaml, nestOutput: lists.l }, { type: file, path: ./empty.yaml, nestOutput: empty }",
+                "{ type: command, command: [cat], unnestInput: given.app.config, nestOutput: copied.config }, { type: command, command: [cat], unnestInput: given.app.config.port, nestOutput: port }",
+            ]),
+        )
+        .unwrap();
+        assert_eq!(
+            out.yaml.strip_prefix(OBELISK_PROD).unwrap(),
+            "given:\n  app:\n    config:\n      port: 1\nlists:\n  l:\n  - a\n  - b\ncopied:\n  config:\n    port: 1\nport: 1\n"
+        );
+        let error = run(
+            &dir,
+            "prod",
+            &phases(&["{ type: command, command: [cat], unnestInput: nope.x }"]),
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(error, "cat: `unnestInput: nope.x`: no `nope` in the values");
     }
 
     #[test]
