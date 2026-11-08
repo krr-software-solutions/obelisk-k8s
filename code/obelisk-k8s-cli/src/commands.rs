@@ -109,7 +109,8 @@ fn warn_one(warning: &str) {
     eprintln!("WARN - {warning}");
 }
 
-/// `export`: the values on stdin, a subtree exported to a temp file, its path printed as values.
+/// `export`: the values on stdin, a subtree exported to the file they name (or a temp file, its path
+/// printed as values).
 pub fn run_export(
     in_path: &str,
     out_path: &str,

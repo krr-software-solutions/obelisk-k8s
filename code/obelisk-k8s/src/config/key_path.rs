@@ -28,18 +28,30 @@ impl KeyPath {
 
     /// What's at it in `values`.
     pub(crate) fn get<'v>(&self, values: &'v Map<String, Value>) -> Result<&'v Value, String> {
+        self.find(values)?.ok_or_else(|| {
+            let (i, key) = self.missing(values);
+            let here = self.0[..i].join(".");
+            if here.is_empty() {
+                format!("no `{key}` in the values")
+            } else {
+                format!("no `{key}` under `{here}`")
+            }
+        })
+    }
+
+    /// What's at it in `values`: `None` if a key on the way is missing; an error if something on
+    /// the way isn't a mapping.
+    pub(crate) fn find<'v>(
+        &self,
+        values: &'v Map<String, Value>,
+    ) -> Result<Option<&'v Value>, String> {
         let mut map = values;
         for (i, key) in self.0.iter().enumerate() {
-            let here = self.0[..i].join(".");
             let Some(at) = map.get(key) else {
-                return Err(if here.is_empty() {
-                    format!("no `{key}` in the values")
-                } else {
-                    format!("no `{key}` under `{here}`")
-                });
+                return Ok(None);
             };
             if i + 1 == self.0.len() {
-                return Ok(at);
+                return Ok(Some(at));
             }
             let Value::Object(inner) = at else {
                 return Err(format!("`{}` isn't a mapping", self.0[..=i].join(".")));
@@ -47,6 +59,19 @@ impl KeyPath {
             map = inner;
         }
         unreachable!("a key path has a key")
+    }
+
+    /// The first of its keys missing from `values` (which [`KeyPath::find`] found `None` in), and
+    /// its index.
+    fn missing(&self, values: &Map<String, Value>) -> (usize, &str) {
+        let mut map = values;
+        for (i, key) in self.0.iter().enumerate() {
+            match map.get(key) {
+                Some(Value::Object(inner)) => map = inner,
+                _ => return (i, key),
+            }
+        }
+        unreachable!("a key path that was found")
     }
 
     /// `value`, nested under it (`a: { b: { c: value } }`).

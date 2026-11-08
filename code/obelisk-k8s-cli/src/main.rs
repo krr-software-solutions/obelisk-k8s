@@ -108,16 +108,17 @@ enum Command {
         #[command(subcommand)]
         command: ManagedClusterCommand,
     },
-    /// Write the subtree of the values on stdin at --in-path to a new temp file, and print values
-    /// setting --out-path to its path: a `command` values source that hands a subtree to something
+    /// Write the subtree of the values on stdin at --in-values-path to the file the values name at
+    /// --out-values-path (printing `{}`), or else to a new temp file (printing values setting
+    /// --out-values-path to its path): a `command` values source that hands a subtree to something
     /// wanting a file
     Export {
-        /// Where the subtree is, as dot-separated keys (`a.b.c`)
-        #[arg(long, value_name = "PATH")]
-        in_path: String,
-        /// Where the file's path goes in the printed values (`d.e.f`)
-        #[arg(long, value_name = "PATH")]
-        out_path: String,
+        /// Where the subtree is in the values, as dot-separated keys (`a.b.c`)
+        #[arg(long, value_name = "KEYS")]
+        in_values_path: String,
+        /// Where the file's path is (or, for a temp file, goes) in the values (`d.e.f`)
+        #[arg(long, value_name = "KEYS")]
+        out_values_path: String,
         /// What the file is written as
         #[arg(long, value_enum, default_value_t = ExportFormatArg::Yaml)]
         format: ExportFormatArg,
@@ -692,10 +693,10 @@ fn main_impl() -> Result<ExitCode, ObeliskK8sError> {
         Command::Images { command } => commands::run_images(cli.global_root, &command),
         Command::Cluster { command } => commands::run_cluster(cli.global_root, &command),
         Command::Export {
-            in_path,
-            out_path,
+            in_values_path,
+            out_values_path,
             format,
-        } => commands::run_export(&in_path, &out_path, format.into()),
+        } => commands::run_export(&in_values_path, &out_values_path, format.into()),
         Command::Completions { shell } => {
             run_completions(shell);
             Ok(())
