@@ -25,7 +25,7 @@ pub(crate) fn pre_build(image: &Image, repo_root: &Path) -> Result<(), ObeliskK8
             (command, Path::new(&words[0]))
         }
     };
-    command.current_dir(&pre.cwd);
+    command.current_dir(&pre.cwd).envs(&pre.env);
     let what = format!(
         "the `preBuild` of image `{}` ({})",
         image.tag(),
@@ -225,6 +225,8 @@ fn run(command: &mut Command, what: &str) -> Result<(), ObeliskK8sError> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
     use crate::config::images::PreBuild;
     use crate::config::test_support::write_script;
@@ -258,14 +260,15 @@ mod tests {
     }
 
     #[test]
-    fn pre_build_runs_in_its_cwd() {
+    fn pre_build_runs_in_its_cwd_with_its_env() {
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("pre.sh");
-        write_script(&script, "#!/bin/sh\npwd > seen\n");
+        write_script(&script, "#!/bin/sh\npwd > seen\necho \"$MODE\" > mode\n");
         let pre = |run| {
             image(Some(PreBuild {
                 run,
                 cwd: dir.path().to_owned(),
+                env: BTreeMap::from([("MODE".to_owned(), "release".to_owned())]),
             }))
         };
         pre_build(
@@ -281,6 +284,8 @@ mod tests {
             Path::new(seen.trim()).canonicalize().unwrap(),
             dir.path().canonicalize().unwrap()
         );
+        let mode = std::fs::read_to_string(dir.path().join("mode")).unwrap();
+        assert_eq!(mode, "release\n");
 
         let words = vec!["sh".to_owned(), "-c".to_owned(), "exit 3".to_owned()];
         let error = pre_build(&pre(Run::Command { command: words }), dir.path())

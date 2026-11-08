@@ -7,8 +7,10 @@
 //! - `url`: fetched (`curl`), checked against `sha256` when it has one, and used as it is.
 //! - `helm`: `helm template` of the chart as the case's release (CRDs included), with its values
 //!   taken from the given values at the chart's `values` key (none without one).
-//! - `command`: run from the repo root with the values (YAML) on stdin; its stdout is the text.
+//! - `command`: run from the repo root with the values (YAML) on stdin, and its `env` set over what
+//!   it inherits; its stdout is the text.
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::Path;
@@ -78,7 +80,7 @@ pub(crate) fn text(
                 inputs.capabilities,
             )
         }
-        Source::Command(words) => run(words, inputs.repo_root, inputs.values_yaml),
+        Source::Command { command, env } => run(command, env, inputs.repo_root, inputs.values_yaml),
     }
 }
 
@@ -156,8 +158,14 @@ fn hex(bytes: &[u8]) -> String {
     })
 }
 
-/// Runs `words` (the program first) from `repo_root`, with `stdin` on its stdin.
-fn run(words: &[String], repo_root: &Path, stdin: &str) -> Result<String, ObeliskK8sError> {
+/// Runs `words` (the program first) from `repo_root`, with `env` set over what it inherits and
+/// `stdin` on its stdin.
+fn run(
+    words: &[String],
+    env: &BTreeMap<String, String>,
+    repo_root: &Path,
+    stdin: &str,
+) -> Result<String, ObeliskK8sError> {
     // A path (with a `/`) is absolute, or relative to the repo root; a bare name is looked up on
     // `PATH`. Shown relative to the repo root.
     let program = if words[0].contains('/') {
@@ -172,6 +180,7 @@ fn run(words: &[String], repo_root: &Path, stdin: &str) -> Result<String, Obelis
     let shown = shown_words.join(" ");
     let mut child = Command::new(&program)
         .args(&words[1..])
+        .envs(env)
         .current_dir(repo_root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -274,13 +283,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_script(
             &dir.path().join(".obelisk-k8s/gen.sh"),
-            "#!/bin/sh\nprintf 'seen: %s\\narg: %s\\n' \"$(grep -c 'unit: app')\" \"$1\"\n",
+            "#!/bin/sh\nprintf 'seen: %s\\narg: %s\\nmode: %s\\n' \"$(grep -c 'unit: app')\" \"$1\" \"$MODE\"\n",
         );
         let words = vec![".obelisk-k8s/gen.sh".to_owned(), "prod".to_owned()];
         let values = values();
-        let source = Source::Command(words);
+        let source = Source::Command {
+            command: words,
+            env: BTreeMap::from([("MODE".to_owned(), "fast".to_owned())]),
+        };
         let text = text(&source, Path::new("-"), &inputs(dir.path(), &values)).unwrap();
-        assert_eq!(text, "seen: 1\narg: prod\n");
+        assert_eq!(text, "seen: 1\narg: prod\nmode: fast\n");
 
         let error = run(
             &[
@@ -288,6 +300,7 @@ mod tests {
                 "-c".to_owned(),
                 "echo boom >&2; exit 3".to_owned(),
             ],
+            &BTreeMap::new(),
             dir.path(),
             "",
         )
@@ -297,7 +310,7 @@ mod tests {
             error.contains("failed") && error.contains("boom"),
             "{error}"
         );
-        let error = run(&["./nope".to_owned()], dir.path(), "")
+        let error = run(&["./nope".to_owned()], &BTreeMap::new(), dir.path(), "")
             .unwrap_err()
             .to_string();
         assert!(error.starts_with("can't run `./nope`"), "{error}");

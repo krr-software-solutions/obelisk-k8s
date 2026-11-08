@@ -194,6 +194,7 @@ ip-allocator.
     type: file
     path: ./units/my-app/pre-image-build.sh
     cwd: ./units/my-app             # optional, default the repo root
+    env: { MODE: release }          # optional: set over what it inherits
   dockerfile: { type: file, path: ./units/my-app/Dockerfile }
   contextPath: ./units/my-app       # optional: the build context, default the repo root
   ```
@@ -209,8 +210,8 @@ ip-allocator.
   `apply` and `diff` render (and check) the images sources of the phases before the last manifests
   phase.
 - `obelisk-k8s images build [-t …]… [-u …]… [-i <image>]… [--no-push]`: builds those images, each tag
-  (`<name>:<version>`) once however many cases declare it: its `preBuild` (in its `cwd`), then
-  `docker build --file <dockerfile> --tag <name>:<version> <contextPath>`. Then (unless
+  (`<name>:<version>`) once however many cases declare it: its `preBuild` (in its `cwd`, with its
+  `env`), then `docker build --file <dockerfile> --tag <name>:<version> <contextPath>`. Then (unless
   `--no-push`) delivers each to each selected target's cluster, once per destination: with a
   `docker.yaml`, `docker tag` + `docker push` as `<prefix>/<name>:<version>` (with its `push`
   credentials, SSM refs resolved, written to a throwaway docker client config on your own docker
@@ -322,8 +323,9 @@ build file ─▶ build plan ─▶ phase 1 … phase n ─▶ values (+ agreed 
     cluster's capabilities (its Kubernetes and API versions, from `kubectl` on its context, so charts
     that check `.Capabilities` render what that cluster can take); `template` renders offline, with
     Helm's defaults.
-  - `{ type: command, command: [program, args…] }`: run from the repo root with the values (YAML) on
-    stdin; its stdout is the output. `./…` resolves from `.obelisk-k8s/`, an absolute path is used as
+  - `{ type: command, command: [program, args…], env? }`: run from the repo root with the values
+    (YAML) on stdin; its stdout is the output. `env` (`{ NAME: value }`, strings only) is set over
+    the environment it inherits. `./…` resolves from `.obelisk-k8s/`, an absolute path is used as
     it is, a bare name is looked up on `PATH` (anything else is an error). No timeout. Its
     `# Source:` names only the program (arguments may hold secrets).
   A `path` is absolute or starts with `./` (from `.obelisk-k8s/`), and is skipped if it's missing.

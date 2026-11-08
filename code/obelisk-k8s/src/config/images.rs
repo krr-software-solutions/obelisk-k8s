@@ -13,6 +13,7 @@
 //!   type: file                                      # a script (or `type: command`, `command: [ … ]`)
 //!   path: ./units/my-app/pre-image-build.sh
 //!   cwd: ./units/my-app                             # optional: where it runs (default: the repo root)
+//!   env: { MODE: release }                          # optional (strings): set over what it inherits
 //! dockerfile:
 //!   type: file
 //!   path: ./units/my-app/Dockerfile
@@ -28,6 +29,7 @@
 //! `preBuild`, then `docker build`. One tag declared two ways is an error. Without `--no-push`, it
 //! then pushes them (`config::push`).
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -35,7 +37,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::config::build::{BuildPlan, RepoPaths, Source, Warnings};
+use crate::config::build::{BuildPlan, RepoPaths, Source, Warnings, check_env};
 use crate::config::ephemeral::Ephemeral;
 use crate::config::global::GlobalConfig;
 use crate::config::paths::{Selection, write_yaml_cases};
@@ -75,6 +77,9 @@ pub struct PreBuild {
     pub run: Run,
     /// Absolute and normalized.
     pub cwd: PathBuf,
+    /// Set in its environment, over what it inherits.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
 }
 
 /// A script file to run, or a program and its arguments.
@@ -468,10 +473,14 @@ enum RawPreBuild {
     File {
         path: String,
         cwd: Option<String>,
+        #[serde(default)]
+        env: BTreeMap<String, String>,
     },
     Command {
         command: Vec<String>,
         cwd: Option<String>,
+        #[serde(default)]
+        env: BTreeMap<String, String>,
     },
 }
 
@@ -546,16 +555,18 @@ fn is_valid_tag(version: &str) -> bool {
 }
 
 fn pre_build(raw: RawPreBuild, paths: &RepoPaths) -> Result<PreBuild, String> {
-    let (run, cwd) = match raw {
-        RawPreBuild::File { path, cwd } => (
+    let (run, cwd, env) = match raw {
+        RawPreBuild::File { path, cwd, env } => (
             Run::File {
                 path: existing(paths, paths.file(&path), "preBuild.path", "file")?,
             },
             cwd,
+            env,
         ),
         RawPreBuild::Command {
             command: words,
             cwd,
+            env,
         } => (
             Run::Command {
                 command: paths
@@ -563,13 +574,15 @@ fn pre_build(raw: RawPreBuild, paths: &RepoPaths) -> Result<PreBuild, String> {
                     .map_err(|message| format!("`preBuild`: {message}"))?,
             },
             cwd,
+            env,
         ),
     };
+    let env = check_env(env).map_err(|message| format!("`preBuild`: {message}"))?;
     let cwd = match cwd {
         Some(cwd) => existing(paths, paths.dir(&cwd), "preBuild.cwd", "directory")?,
         None => paths.root().to_owned(),
     };
-    Ok(PreBuild { run, cwd })
+    Ok(PreBuild { run, cwd, env })
 }
 
 /// A checked path (at key `at`) that must exist, as a `what`.
@@ -688,7 +701,7 @@ mod tests {
         let found = images(
             &dir,
             &inline(&format!(
-                "{{ name: app, version: \"1\", preBuild: {{ type: file, path: ./app/pre.sh, cwd: ./app }}, {DOCKERFILE} }}, {{ name: tool, version: v2, preBuild: {{ type: command, command: [./app/pre.sh, x] }}, {DOCKERFILE}, contextPath: ./app }}"
+                "{{ name: app, version: \"1\", preBuild: {{ type: file, path: ./app/pre.sh, cwd: ./app }}, {DOCKERFILE} }}, {{ name: tool, version: v2, preBuild: {{ type: command, command: [./app/pre.sh, x], env: {{ MODE: release }} }}, {DOCKERFILE}, contextPath: ./app }}"
             )),
         )
         .unwrap();
@@ -708,6 +721,7 @@ mod tests {
                             path: root.join(".obelisk-k8s/app/pre.sh")
                         },
                         cwd: root.join(".obelisk-k8s/app"),
+                        env: BTreeMap::new(),
                     }),
                     dockerfile: dockerfile.clone(),
                     context_path: root.clone(),
@@ -723,6 +737,7 @@ mod tests {
                             ]
                         },
                         cwd: root.clone(),
+                        env: BTreeMap::from([("MODE".to_owned(), "release".to_owned())]),
                     }),
                     dockerfile,
                     context_path: root.join(".obelisk-k8s/app"),
@@ -835,6 +850,12 @@ mod tests {
                 "image spec 1: `preBuild`: `type: command` needs a `command`",
             ),
             (
+                format!(
+                    "{{ name: a, version: x, preBuild: {{ type: file, path: ./app/pre.sh, env: {{ \"\": x }} }}, {DOCKERFILE} }}"
+                ),
+                "image spec 1: `preBuild`: `env`: `` isn't a variable name",
+            ),
+            (
                 format!("~, {{ name: a, version: 1, {DOCKERFILE} }}"),
                 "image spec 2: `version`: invalid type",
             ),
@@ -873,6 +894,7 @@ mod tests {
                     },
                     // `./..` is the repo root.
                     cwd: root.clone(),
+                    env: BTreeMap::new(),
                 },
                 Dockerfile::File {
                     path: root.join(".obelisk-k8s/app/Dockerfile")
@@ -942,6 +964,34 @@ mod tests {
                 root = crate::config::build::absolute_root(dir.path()).display()
             )
         );
+    }
+
+    #[test]
+    fn prints_a_pre_builds_env_only_when_it_has_one() {
+        let image = |env: &[(&str, &str)]| Image {
+            name: "a".to_owned(),
+            version: "x".to_owned(),
+            pre_build: Some(PreBuild {
+                run: Run::Command {
+                    command: vec!["gen".to_owned()],
+                },
+                cwd: "/r".into(),
+                env: env
+                    .iter()
+                    .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                    .collect(),
+            }),
+            dockerfile: Dockerfile::File {
+                path: "/r/Dockerfile".into(),
+            },
+            context_path: "/r".into(),
+        };
+        let spec = |env| yaml::to_string(&image(env), Path::new("-")).unwrap();
+        assert_eq!(
+            spec(&[("MODE", "release")]),
+            "name: a\nversion: x\npreBuild:\n  type: command\n  command:\n  - gen\n  cwd: /r\n  env:\n    MODE: release\ndockerfile:\n  type: file\n  path: /r/Dockerfile\ncontextPath: /r\n"
+        );
+        assert!(!spec(&[]).contains("env"));
     }
 
     /// `(target, unit, [(name, version)])`.

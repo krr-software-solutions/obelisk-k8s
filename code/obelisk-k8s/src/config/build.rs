@@ -32,8 +32,9 @@
 //!   images).
 //! - `{ type: helm, chart, repo?, version, values? }`: an upstream chart (manifests only); `repo` is a
 //!   URL or a name in `repo.yaml`'s `helmRepos`, and none for an `oci://` chart.
-//! - `{ type: command, command: [program, args…] }`: run with the values on stdin. The program is
-//!   `./…` (from `.obelisk-k8s/`), an absolute path, or a name on `PATH`.
+//! - `{ type: command, command: [program, args…], env? }`: run with the values on stdin. The program
+//!   is `./…` (from `.obelisk-k8s/`), an absolute path, or a name on `PATH`. `env` (`{ NAME: value }`,
+//!   strings only) is set for it, over what it inherits.
 //!
 //! A `path` (and a `command`'s program, if it's a path) is absolute, or starts with `./` (from
 //! `.obelisk-k8s/`). It's kept absolute and normalized (`..` resolved), and shown relative to the
@@ -46,6 +47,7 @@
 //! A plan that's wrong says where (`build.phases[0].values[1]: …`). Its warnings (a `url` without a
 //! `sha256`) are handed on as soon as it's built (`Warnings`), before anything renders from it.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
@@ -118,8 +120,11 @@ pub enum Source {
         sha256: Option<String>,
     },
     Helm(HelmChart),
-    /// The program (`./…` made absolute), then its arguments.
-    Command(Vec<String>),
+    /// The program (`./…` made absolute), then its arguments; and what's set in its environment.
+    Command {
+        command: Vec<String>,
+        env: BTreeMap<String, String>,
+    },
 }
 
 /// An upstream Helm chart, rendered (`helm template`) as the unit's release.
@@ -146,7 +151,7 @@ impl Source {
             Self::File { .. } => "file",
             Self::Url { .. } => "url",
             Self::Helm(_) => "helm",
-            Self::Command(_) => "command",
+            Self::Command { .. } => "command",
         }
     }
 
@@ -168,7 +173,7 @@ impl Source {
             Self::Gotmpl { path, .. } | Self::File { path, .. } => in_repo(repo_root, path),
             Self::Url { url, .. } => url.into(),
             Self::Helm(chart) => format!("{}@{}", chart.chart, chart.version).into(),
-            Self::Command(words) => in_repo(repo_root, Path::new(&words[0])),
+            Self::Command { command, .. } => in_repo(repo_root, Path::new(&command[0])),
         }
     }
 
@@ -413,6 +418,8 @@ enum RawSource {
     },
     Command {
         command: Vec<String>,
+        #[serde(default)]
+        env: BTreeMap<String, String>,
     },
 }
 
@@ -628,7 +635,10 @@ impl Checker<'_> {
                 },
                 self.helm_repos,
             ),
-            (RawSource::Command { command: words }, _) => self.paths.command(words).map(Source::Command),
+            (RawSource::Command { command, env }, _) => Ok(Source::Command {
+                command: self.paths.command(command)?,
+                env: check_env(env)?,
+            }),
         }
     }
 }
@@ -702,6 +712,22 @@ impl RepoPaths {
         }
         Ok(words)
     }
+}
+
+/// A `command` source's or a `preBuild`'s `env`, checked: each name is non-empty and has no `=`, and
+/// nothing has a NUL.
+pub(crate) fn check_env(env: BTreeMap<String, String>) -> Result<BTreeMap<String, String>, String> {
+    for (name, value) in &env {
+        if name.is_empty() || name.contains(['=', '\0']) {
+            return Err(format!(
+                "`env`: `{name}` isn't a variable name (non-empty, without `=` or a NUL)"
+            ));
+        }
+        if value.contains('\0') {
+            return Err(format!("`env.{name}`: has a NUL"));
+        }
+    }
+    Ok(env)
 }
 
 /// `repo_root`, absolute and normalized.
@@ -819,7 +845,7 @@ mod tests {
     fn parses_phases_and_every_source_type() {
         let sha = "a".repeat(64);
         let (plan, dir) = parse_in(&format!(
-            "build:\n  phases:\n    - name: base\n      values:\n        - {{ type: inline, values: {{ a: 1 }} }}\n        - {{ type: gotmpl, path: ./here.yaml }}\n        - {{ type: file, path: /nowhere/x.yaml }}\n        - {{ type: url, url: https://x/v.yaml, sha256: {sha} }}\n        - {{ type: command, command: [./gen.sh, prod] }}\n    - name: out\n      manifests:\n        - {{ type: helm, chart: metallb, repo: metallb, version: 0.16.1, values: metallb }}\n        - {{ type: helm, chart: oci://docker.io/envoyproxy/gateway-helm, version: 1.9.3 }}\n        - {{ type: command, command: [sh, -c, x] }}\n      images:\n        - {{ type: gotmpl, path: ./here.yaml }}\n        - {{ type: command, command: [./images.sh] }}\n        - {{ type: inline, images: [{{ name: app }}] }}\n    - name: empty\n"
+            "build:\n  phases:\n    - name: base\n      values:\n        - {{ type: inline, values: {{ a: 1 }} }}\n        - {{ type: gotmpl, path: ./here.yaml }}\n        - {{ type: file, path: /nowhere/x.yaml }}\n        - {{ type: url, url: https://x/v.yaml, sha256: {sha} }}\n        - {{ type: command, command: [./gen.sh, prod], env: {{ MODE: prod, N: \"1\" }} }}\n    - name: out\n      manifests:\n        - {{ type: helm, chart: metallb, repo: metallb, version: 0.16.1, values: metallb }}\n        - {{ type: helm, chart: oci://docker.io/envoyproxy/gateway-helm, version: 1.9.3 }}\n        - {{ type: command, command: [sh, -c, x] }}\n      images:\n        - {{ type: gotmpl, path: ./here.yaml }}\n        - {{ type: command, command: [./images.sh] }}\n        - {{ type: inline, images: [{{ name: app }}] }}\n    - name: empty\n"
         ));
         let plan = plan.unwrap();
         let root = absolute_root(dir.path());
@@ -860,10 +886,16 @@ mod tests {
         assert!(!plan.phases[0].values[2].present());
         assert_eq!(
             plan.phases[0].values[4],
-            Source::Command(vec![
-                root.join(".obelisk-k8s/gen.sh").display().to_string(),
-                "prod".into()
-            ])
+            Source::Command {
+                command: vec![
+                    root.join(".obelisk-k8s/gen.sh").display().to_string(),
+                    "prod".into()
+                ],
+                env: BTreeMap::from([
+                    ("MODE".to_owned(), "prod".to_owned()),
+                    ("N".to_owned(), "1".to_owned()),
+                ]),
+            }
         );
         assert_eq!(
             plan.phases[0].values[4].describe(dir.path()),
@@ -1107,6 +1139,31 @@ mod tests {
         ] {
             let e = source_error(key, source);
             assert!(e.starts_with(&format!("{SHOWN}: ")), "{source}: {e}");
+            assert!(e.contains(expected), "{source}: {e}");
+        }
+    }
+
+    #[test]
+    fn rejects_bad_command_env() {
+        for (source, expected) in [
+            (
+                "{ type: command, command: [gen], env: { N: 1 } }",
+                "`build.phases[0].values[0]`: invalid type: integer `1`, expected a string (quote it)",
+            ),
+            (
+                "{ type: command, command: [gen], env: { \"A=B\": x } }",
+                "`build.phases[0].values[0]`: `env`: `A=B` isn't a variable name",
+            ),
+            (
+                "{ type: command, command: [gen], env: { X: \"a\\0b\" } }",
+                "`build.phases[0].values[0]`: `env.X`: has a NUL",
+            ),
+            (
+                "{ type: command, command: [gen], env: [x] }",
+                "`build.phases[0].values[0]`: invalid type: sequence, expected a map",
+            ),
+        ] {
+            let e = source_error("values", source);
             assert!(e.contains(expected), "{source}: {e}");
         }
     }

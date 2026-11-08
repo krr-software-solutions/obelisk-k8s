@@ -439,10 +439,11 @@ impl TemplateCommand {
 
 #[derive(Debug, Subcommand)]
 enum ImagesCommand {
-    /// Build each image the selected units declare, once per tag: its `preBuild` (in its `cwd`),
-    /// then `docker build --file <dockerfile> --tag <name>:<version> <contextPath>`; then deliver it
-    /// to each selected target's cluster: `docker tag` + `docker push` to the `push.prefix` in the
-    /// cluster's `docker.yaml`, or `k3d image import` into a local k3d cluster without one
+    /// Build each image the selected units declare, once per tag: its `preBuild` (in its `cwd`, with
+    /// its `env`), then `docker build --file <dockerfile> --tag <name>:<version> <contextPath>`; then
+    /// deliver it to each selected target's cluster: `docker tag` + `docker push` to the
+    /// `push.prefix` in the cluster's `docker.yaml`, or `k3d image import` into a local k3d cluster
+    /// without one
     Build {
         /// The repo, by its name in the global `repos.yaml` [default: the one in the current directory]
         #[arg(long, help_heading = SPECIAL, value_name = "NAME")]
