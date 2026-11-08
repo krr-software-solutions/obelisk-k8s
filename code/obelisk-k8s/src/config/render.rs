@@ -5,7 +5,8 @@
 //!
 //! - `gotmpl`: rendered by Helm through a throwaway chart, with the values as `.Values` (so what's
 //!   at `unnestInput` must be a mapping).
-//! - `file`: the file, as it is.
+//! - `file`: the file, as it is (a values source reads it as YAML, or with `parse: false` as one
+//!   string: see `config::phases`).
 //! - `url`: fetched (`curl`), checked against `sha256` when it has one, and used as it is.
 //! - `helm`: `helm template` of the chart as the case's release (CRDs included), with what's at its
 //!   `unnestInput` (a mapping) as its values, or none without one.
@@ -71,7 +72,7 @@ pub(crate) fn text(
                 path: shown.to_owned(),
                 source,
             }),
-        SourceKind::Url { url, sha256 } => fetch(url, sha256.as_deref()),
+        SourceKind::Url { url, sha256, .. } => fetch(url, sha256.as_deref()),
         SourceKind::Helm(chart) => helm::template_chart(
             chart,
             inputs.release,
@@ -79,7 +80,9 @@ pub(crate) fn text(
             unnested.as_deref(),
             inputs.capabilities,
         ),
-        SourceKind::Command { command, env } => run(command, env, inputs.repo_root, values_yaml),
+        SourceKind::Command { command, env, .. } => {
+            run(command, env, inputs.repo_root, values_yaml)
+        }
     }
 }
 
@@ -243,6 +246,7 @@ mod tests {
         let source = Source::new(SourceKind::File {
             path: PathBuf::from("x.yaml"),
             found: true,
+            parse: true,
         });
         let values = values();
         let text = text(&source, Path::new("x.yaml"), &inputs(dir.path(), &values)).unwrap();
@@ -285,6 +289,7 @@ mod tests {
         let source = Source::new(SourceKind::Command {
             command: words,
             env: BTreeMap::from([("MODE".to_owned(), "fast".to_owned())]),
+            parse: true,
         });
         let text = text(&source, Path::new("-"), &inputs(dir.path(), &values)).unwrap();
         assert_eq!(text, "seen: 1\narg: prod\nmode: fast\n");
@@ -320,6 +325,7 @@ mod tests {
             ..Source::new(SourceKind::Command {
                 command: vec!["cat".to_owned()],
                 env: BTreeMap::new(),
+                parse: true,
             })
         };
         let text = |source: &Source| text(source, Path::new("-"), &inputs(dir.path(), &values));

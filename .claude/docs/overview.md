@@ -321,10 +321,16 @@ build file ─▶ build plan ─▶ phase 1 … phase n ─▶ values (+ agreed 
   - `{ type: inline, values }`: a values mapping, as it is. Values only.
   - `{ type: gotmpl, path }`: a Go template, rendered through a throwaway Helm chart (all of Helm's
     functions; `.Values` is the values).
-  - `{ type: file, path }`: used as it is (raw YAML; nothing in it is templated).
-  - `{ type: url, url, sha256? }`: fetched with `curl` every run (https only, redirects too; 2m
+  - `{ type: file, path, parse? }`: used as it is (nothing in it is templated). As a values source
+    it's read as YAML with `parse: true`, or as one string (the file's text, verbatim) with
+    `parse: false`, which needs a `nestOutput` to go under (e.g. a cert: `{ type: file, path:
+    ./tls.pem, nestOutput: tls.cert }`). Without `parse`, it's `true` for a `.yaml`, `.yml` or
+    `.json` (any case) and `false` otherwise, so a values file named otherwise needs `parse: true`.
+    Elsewhere `parse` is an error: a manifests source is used as it is, an images one read as YAML.
+  - `{ type: url, url, sha256?, parse? }`: fetched with `curl` every run (https only, redirects too; 2m
     timeout), checked against `sha256` when given (without one, a `WARN`, printed as soon as the plan
-    is built: before anything renders from it or installs), used as it is.
+    is built: before anything renders from it or installs), used as it is. `parse` as for a `file`,
+    by the extension of the URL's path (its query and fragment left off).
   - `{ type: helm, chart, repo?, version, unnestInput? }`: an upstream chart, `helm template`d as
     the case's release, CRDs included. `repo` is a URL or a name in `repo.yaml`'s `helmRepos`; an
     `oci://` chart takes none. Its values are the mapping at `unnestInput` (below), or none without
@@ -332,8 +338,9 @@ build file ─▶ build plan ─▶ phase 1 … phase n ─▶ values (+ agreed 
     cluster's capabilities (its Kubernetes and API versions, from `kubectl` on its context, so charts
     that check `.Capabilities` render what that cluster can take); `template` renders offline, with
     Helm's defaults.
-  - `{ type: command, command: [program, args…], env? }`: run from the repo root with the values
-    (YAML) on stdin; its stdout is the output. `env` (`{ NAME: value }`, strings only) is set over
+  - `{ type: command, command: [program, args…], env?, parse? }`: run from the repo root with the
+    values (YAML) on stdin; its stdout is the output (as a values source, read as YAML unless it
+    says `parse: false`, as for a `file`; there's no extension to go by). `env` (`{ NAME: value }`, strings only) is set over
     the environment it inherits. `./…` resolves from `.obelisk-k8s/`, an absolute path is used as
     it is, a bare name is looked up on `PATH` (anything else is an error). No timeout. Its
     `# Source:` names only the program (arguments may hold secrets).

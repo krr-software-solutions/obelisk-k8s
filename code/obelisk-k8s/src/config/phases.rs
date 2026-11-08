@@ -223,7 +223,14 @@ fn values_output(
         if let SourceKind::Url { sha256, .. } = &source.kind {
             ssm::check_pinned(&text, sha256.as_deref(), shown)?;
         }
-        yaml::parse_values_stream(&text, shown)?
+        if let SourceKind::File { parse: false, .. }
+        | SourceKind::Url { parse: false, .. }
+        | SourceKind::Command { parse: false, .. } = &source.kind
+        {
+            vec![Value::String(text)]
+        } else {
+            yaml::parse_values_stream(&text, shown)?
+        }
     };
     if documents.len() > 1 {
         return Err(ObeliskK8sError::Config {
@@ -619,6 +626,22 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert_eq!(error, "cat: `unnestInput: nope.x`: no `nope` in the values");
+    }
+
+    #[test]
+    fn a_file_read_as_text_is_one_string() {
+        let pem = "-----BEGIN CERTIFICATE-----\nMIIB\nabc+/def==\n-----END CERTIFICATE-----\n";
+        let dir = repo(&[("tls.pem", pem), ("v.yaml", "a: 1\n")]);
+        let out = run(
+            &dir,
+            "prod",
+            &phases(&["{ type: file, path: ./tls.pem, nestOutput: tls.cert }, { type: file, path: ./v.yaml, parse: false, nestOutput: raw }, { type: command, command: [printf, \"a: b\\nc\"], parse: false, nestOutput: out }, { type: command, command: [printf, \"x: 1\"], parse: true, nestOutput: parsed }"]),
+        )
+        .unwrap();
+        assert_eq!(out.values["out"], Value::String("a: b\nc".to_owned()));
+        assert_eq!(out.values["parsed"], serde_json::json!({ "x": 1 }));
+        assert_eq!(out.values["tls"]["cert"], Value::String(pem.to_owned()));
+        assert_eq!(out.values["raw"], Value::String("a: 1\n".to_owned()));
     }
 
     #[test]

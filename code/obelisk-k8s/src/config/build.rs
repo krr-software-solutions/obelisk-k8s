@@ -27,14 +27,17 @@
 //! - `{ type: inline, values }`: a values mapping, as it is (values only); `{ type: inline, images }`:
 //!   a list of image specs, as they are (images only).
 //! - `{ type: gotmpl, path }`: a Go template, rendered by Helm through a throwaway chart.
-//! - `{ type: file, path }`: used as it is.
-//! - `{ type: url, url, sha256? }`: fetched (https only), checked against `sha256` when given (not
-//!   images).
+//! - `{ type: file, path, parse? }`: used as it is; a values source is read as YAML, or with
+//!   `parse: false` as one string (under a `nestOutput`). `parse` defaults by the extension: `true`
+//!   for `.yaml`, `.yml` and `.json`, else `false`; it's only for a values source.
+//! - `{ type: url, url, sha256?, parse? }`: fetched (https only), checked against `sha256` when
+//!   given (not images); `parse` as for a `file`, by the URL path's extension.
 //! - `{ type: helm, chart, repo?, version }`: an upstream chart (manifests only); `repo` is a URL or
 //!   a name in `repo.yaml`'s `helmRepos`, and none for an `oci://` chart.
-//! - `{ type: command, command: [program, args…], env? }`: run with the values on stdin. The program
-//!   is `./…` (from `.obelisk-k8s/`), an absolute path, or a name on `PATH`. `env` (`{ NAME: value }`,
-//!   strings only) is set for it, over what it inherits.
+//! - `{ type: command, command: [program, args…], env?, parse? }`: run with the values on stdin. The
+//!   program is `./…` (from `.obelisk-k8s/`), an absolute path, or a name on `PATH`. `env`
+//!   (`{ NAME: value }`, strings only) is set for it, over what it inherits. `parse` as for a
+//!   `file`, but `true` without one.
 //!
 //! A `gotmpl`, `helm` or `command` source may take `unnestInput: a.b.c`: it sees only what's there,
 //! not all the values (a chart sees none without one). A values source of any type but `helm` may
@@ -127,20 +130,26 @@ pub enum SourceKind {
         path: PathBuf,
         found: bool,
     },
-    /// As [`SourceKind::Gotmpl`].
+    /// As [`SourceKind::Gotmpl`]; and whether a values source's text is read as YAML (else it's one
+    /// string). In `manifests:` it's used as text, and in `images:` always read as YAML.
     File {
         path: PathBuf,
         found: bool,
+        parse: bool,
     },
+    /// As [`SourceKind::File`]'s `parse`.
     Url {
         url: String,
         sha256: Option<String>,
+        parse: bool,
     },
     Helm(HelmChart),
     /// The program (`./…` made absolute), then its arguments; and what's set in its environment.
+    /// `parse` as [`SourceKind::File`]'s.
     Command {
         command: Vec<String>,
         env: BTreeMap<String, String>,
+        parse: bool,
     },
 }
 
@@ -461,12 +470,14 @@ enum RawSource {
     },
     File {
         path: String,
+        parse: Option<bool>,
         #[serde(rename = "nestOutput")]
         nest_output: Option<String>,
     },
     Url {
         url: String,
         sha256: Option<String>,
+        parse: Option<bool>,
         #[serde(rename = "nestOutput")]
         nest_output: Option<String>,
     },
@@ -481,6 +492,7 @@ enum RawSource {
         command: Vec<String>,
         #[serde(default)]
         env: BTreeMap<String, String>,
+        parse: Option<bool>,
         #[serde(rename = "unnestInput")]
         unnest_input: Option<String>,
         #[serde(rename = "nestOutput")]
@@ -489,6 +501,16 @@ enum RawSource {
 }
 
 impl RawSource {
+    /// Its `parse` (a `file`'s, `url`'s or `command`'s), taken out.
+    fn take_parse(&mut self) -> Option<bool> {
+        match self {
+            Self::File { parse, .. } | Self::Url { parse, .. } | Self::Command { parse, .. } => {
+                parse.take()
+            }
+            _ => None,
+        }
+    }
+
     /// Its `unnestInput` and `nestOutput` (as written), taken out.
     fn take_nesting(&mut self) -> (Option<String>, Option<String>) {
         match self {
@@ -683,8 +705,25 @@ impl Checker<'_> {
             }
             None => None,
         };
+        let written_parse = raw.take_parse();
+        let mut kind = self.kind(raw, at, list)?;
+        let nested = nest_output.is_some();
+        match &mut kind {
+            SourceKind::File { path, parse, .. } => {
+                let name = self.paths.shown(path).display().to_string();
+                *parse = check_parse(written_parse, Some(&name), list, nested)?;
+            }
+            SourceKind::Url { url, parse, .. } => {
+                let name = url.split(['?', '#']).next().unwrap_or(url).to_owned();
+                *parse = check_parse(written_parse, Some(&name), list, nested)?;
+            }
+            SourceKind::Command { parse, .. } => {
+                *parse = check_parse(written_parse, None, list, nested)?;
+            }
+            _ => {}
+        }
         Ok(Source {
-            kind: self.kind(raw, at, list)?,
+            kind,
             unnest_input,
             nest_output,
         })
@@ -726,11 +765,18 @@ impl Checker<'_> {
             }
             (RawSource::File { path, .. }, _) => {
                 let (path, found) = self.paths.file(&path)?;
-                Ok(SourceKind::File { path, found })
+                Ok(SourceKind::File {
+                    path,
+                    found,
+                    parse: true,
+                })
             }
             (RawSource::Url { url, sha256, .. }, _) => {
                 let source = check_url(url, sha256)?;
-                if let SourceKind::Url { url, sha256: None } = &source {
+                if let SourceKind::Url {
+                    url, sha256: None, ..
+                } = &source
+                {
                     self.warnings.push(format!(
                         "{}: url `{url}` has no `sha256`: what it fetches can change under you",
                         self.shown.display()
@@ -757,6 +803,7 @@ impl Checker<'_> {
             (RawSource::Command { command, env, .. }, _) => Ok(SourceKind::Command {
                 command: self.paths.command(command)?,
                 env: check_env(env)?,
+                parse: true,
             }),
         }
     }
@@ -886,7 +933,59 @@ fn check_url(url: String, sha256: Option<String>) -> Result<SourceKind, String> 
             "sha256 `{sha}` isn't a SHA-256: 64 lowercase hex digits"
         ));
     }
-    Ok(SourceKind::Url { url, sha256 })
+    Ok(SourceKind::Url {
+        url,
+        sha256,
+        parse: true,
+    })
+}
+
+/// The extensions a `file` or `url` values source is read as YAML by (JSON is YAML) without a
+/// `parse`.
+const PARSED_EXTENSIONS: [&str; 3] = ["yaml", "yml", "json"];
+
+/// Whether a source's text in `list` is read as YAML: as `written`, else for a `file` or `url`
+/// (named `name`: its path, or its URL without the query) by its extension, and for a `command`
+/// (no `name`) it is. Only a values source can be read as text, and then (it's a string) only under a
+/// `nestOutput`.
+fn check_parse(
+    written: Option<bool>,
+    name: Option<&str>,
+    list: List,
+    nested: bool,
+) -> Result<bool, String> {
+    if list != List::Values {
+        return match written {
+            Some(_) => Err(format!(
+                "`parse` is for a values source: what's in `{}:` is {}",
+                list.key(),
+                if list == List::Manifests {
+                    "used as it is"
+                } else {
+                    "always read as YAML"
+                }
+            )),
+            None => Ok(true),
+        };
+    }
+    let by_extension = |name: &str| {
+        Path::new(name)
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| PARSED_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
+    };
+    let parse = written.unwrap_or_else(|| name.is_none_or(by_extension));
+    if !parse && !nested {
+        let needs = "which needs a `nestOutput` to go under";
+        // Only a written `parse: false`, or a name's extension, reads it as text.
+        return Err(match name.filter(|_| written.is_none()) {
+            Some(name) => format!(
+                "`{name}` isn't `.yaml`, `.yml` or `.json`, so it's read as one string, {needs} (or say `parse: true`)"
+            ),
+            None => format!("`parse: false` reads it as one string, {needs}"),
+        });
+    }
+    Ok(parse)
 }
 
 /// A `type: helm`'s chart, with `repo` (as written) resolved: an `oci://` chart takes none; any
@@ -1007,7 +1106,8 @@ mod tests {
             plan.phases[0].values[2],
             Source::new(SourceKind::File {
                 path: "/nowhere/x.yaml".into(),
-                found: false
+                found: false,
+                parse: true
             })
         );
         assert!(!plan.phases[0].values[2].present());
@@ -1022,6 +1122,7 @@ mod tests {
                     ("MODE".to_owned(), "prod".to_owned()),
                     ("N".to_owned(), "1".to_owned()),
                 ]),
+                parse: true,
             })
         );
         assert_eq!(
@@ -1062,11 +1163,13 @@ mod tests {
             [
                 Source::new(SourceKind::File {
                     path: root.join(".obelisk-k8s/here.yaml"),
-                    found: true
+                    found: true,
+                    parse: true
                 }),
                 Source::new(SourceKind::File {
                     path: root.join(".obelisk-k8s/nope.yaml"),
-                    found: false
+                    found: false,
+                    parse: true
                 }),
             ]
         );
@@ -1203,7 +1306,7 @@ mod tests {
             (
                 "manifests",
                 "{ type: file, url: https://x }",
-                "`build.phases[0].manifests[0]`: unknown field `url`, expected `path`",
+                "`build.phases[0].manifests[0]`: unknown field `url`, expected one of `path`, `parse`, `nestOutput`",
             ),
             (
                 "manifests",
@@ -1342,6 +1445,86 @@ mod tests {
             let e = source_error(key, source);
             assert!(e.contains(expected), "{source}: {e}");
         }
+    }
+
+    #[test]
+    fn a_file_or_url_is_parsed_by_its_extension_unless_it_says() {
+        let parsed = |source: &str| -> Result<bool, String> {
+            let plan = parse(&format!(
+                "build:\n  phases:\n    - name: p\n      values: [{source}]\n"
+            ))
+            .map_err(|e| e.to_string())?;
+            match &plan.phases[0].values[0].kind {
+                SourceKind::File { parse, .. }
+                | SourceKind::Url { parse, .. }
+                | SourceKind::Command { parse, .. } => Ok(*parse),
+                other => unreachable!("{other:?}"),
+            }
+        };
+        for (source, expected) in [
+            ("{ type: file, path: ./a.yaml }", true),
+            ("{ type: file, path: ./a.YML }", true),
+            ("{ type: file, path: ./a.json }", true),
+            (
+                "{ type: file, path: ./tls.pem, nestOutput: tls.cert }",
+                false,
+            ),
+            ("{ type: file, path: ./tls.pem, parse: true }", true),
+            (
+                "{ type: file, path: ./a.yaml, parse: false, nestOutput: raw }",
+                false,
+            ),
+            (
+                "{ type: url, url: \"https://x/v.yaml?ref=main\", sha256: null }",
+                true,
+            ),
+            ("{ type: url, url: https://x/script, nestOutput: s }", false),
+            // A command's output is YAML unless it says.
+            ("{ type: command, command: [gen] }", true),
+            (
+                "{ type: command, command: [openssl], parse: false, nestOutput: o }",
+                false,
+            ),
+        ] {
+            assert_eq!(parsed(source), Ok(expected), "{source}");
+        }
+        // Read as one string, it needs somewhere to go.
+        let e = parsed("{ type: file, path: ./values }").unwrap_err();
+        assert!(
+            e.ends_with("`build.phases[0].values[0]`: `.obelisk-k8s/values` isn't `.yaml`, `.yml` or `.json`, so it's read as one string, which needs a `nestOutput` to go under (or say `parse: true`)"),
+            "{e}"
+        );
+        for source in [
+            "{ type: file, path: ./a.yaml, parse: false }",
+            "{ type: command, command: [gen], parse: false }",
+        ] {
+            let e = parsed(source).unwrap_err();
+            assert!(
+                e.ends_with(
+                    "`parse: false` reads it as one string, which needs a `nestOutput` to go under"
+                ),
+                "{e}"
+            );
+        }
+        // Outside `values:`, what's done with the text is fixed; and without `parse`, nothing changes.
+        assert!(
+            source_error("manifests", "{ type: file, path: ./x.pem, parse: false }").ends_with(
+                "`parse` is for a values source: what's in `manifests:` is used as it is"
+            )
+        );
+        assert!(
+            source_error("images", "{ type: file, path: ./x.yaml, parse: true }").ends_with(
+                "`parse` is for a values source: what's in `images:` is always read as YAML"
+            )
+        );
+        assert!(
+            parse("build:\n  phases:\n    - name: p\n      manifests: [{ type: file, path: ./x.pem }]\n")
+                .is_ok()
+        );
+        assert!(
+            source_error("values", "{ type: gotmpl, path: ./x, parse: true }")
+                .contains("unknown field `parse`")
+        );
     }
 
     #[test]
