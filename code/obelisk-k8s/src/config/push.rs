@@ -23,7 +23,7 @@ use crate::ObeliskK8sError;
 use crate::config::ephemeral::Ephemeral;
 use crate::config::global::docker::Push;
 use crate::config::global::{Cluster, GlobalConfig};
-use crate::config::images::{Cases, build_one, distinct};
+use crate::config::images::{Cases, Image, MAX_REPOSITORY, build_one, distinct};
 use crate::config::paths::Selection;
 use crate::config::repo::RepoConfig;
 use crate::docker::{PushAuth, UserDocker};
@@ -64,13 +64,24 @@ impl<'g> Destination<'g> {
         }
     }
 
-    /// The image `tag` (`<name>:<version>`) as it's delivered: as is into k3d, under the prefix to
-    /// a registry.
-    #[must_use]
-    pub fn image_ref(&self, tag: &str) -> String {
+    /// The repository image `name` is delivered as: as is into k3d (its name checked as docker
+    /// names it locally: see `config::images`), under the prefix to a registry.
+    ///
+    /// # Errors
+    ///
+    /// [`ObeliskK8sError::Usage`] if that's over docker's limit for a repository name.
+    pub fn repository(&self, name: &str) -> Result<String, ObeliskK8sError> {
         match self {
-            Self::K3d { .. } => tag.to_owned(),
-            Self::Registry { push, .. } => format!("{}/{tag}", push.prefix),
+            Self::K3d { .. } => Ok(name.to_owned()),
+            Self::Registry { cluster, push } => {
+                let repository = format!("{}/{name}", push.prefix);
+                if repository.len() > MAX_REPOSITORY {
+                    return Err(ObeliskK8sError::Usage(format!(
+                        "image `{name}` would push to cluster `{cluster}`'s registry as `{repository}`, over docker's {MAX_REPOSITORY} characters for a repository: shorten the name or `push.prefix`"
+                    )));
+                }
+                Ok(repository)
+            }
         }
     }
 
@@ -115,33 +126,38 @@ struct Delivery<'g, 'a> {
 }
 
 impl Delivery<'_, '_> {
-    /// Whether it's the same delivery as `other` (to `to`): the same image into the same k3d
-    /// cluster, or the same ref pushed with the same credentials.
-    fn same(&self, tag: &str, to: &Destination<'_>) -> bool {
+    /// Whether it's the same delivery as `tag` delivered as `image_ref` to `to`: the same image into
+    /// the same k3d cluster, or the same ref pushed with the same credentials.
+    fn same(&self, tag: &str, image_ref: &str, to: &Destination<'_>) -> bool {
         match (&self.to, to) {
             (Destination::K3d { cluster: a }, Destination::K3d { cluster: b }) => {
                 self.tag == tag && a == b
             }
             (Destination::Registry { push: a, .. }, Destination::Registry { push: b, .. }) => {
-                self.image_ref == to.image_ref(tag) && a.credentials == b.credentials
+                self.image_ref == image_ref && a.credentials == b.credentials
             }
             _ => false,
         }
     }
 }
 
-/// The deliveries for `builds` (`(tag, cases)`), each case's destination from `destination` (by
-/// target name): each once, in order.
+/// The deliveries for `builds` (`(image, cases)`), each case's destination from `destination`
+/// (by target name): each once, in order.
 fn plan<'g, 'a>(
-    builds: &[(String, Cases<'a>)],
+    builds: &[(&Image, Cases<'a>)],
     mut destination: impl FnMut(&str) -> Result<Destination<'g>, ObeliskK8sError>,
 ) -> Result<Vec<Delivery<'g, 'a>>, ObeliskK8sError> {
     let mut deliveries: Vec<Delivery<'g, 'a>> = Vec::new();
-    for (tag, cases) in builds {
+    for (image, cases) in builds {
+        let tag = image.tag();
         for &(target, unit) in cases {
             let to = destination(target)?;
             let cluster = to.cluster();
-            match deliveries.iter_mut().find(|d| d.same(tag, &to)) {
+            let image_ref = format!("{}:{}", to.repository(&image.name)?, image.version);
+            match deliveries
+                .iter_mut()
+                .find(|d| d.same(&tag, &image_ref, &to))
+            {
                 Some(delivery) => {
                     if !delivery.clusters.contains(&cluster) {
                         delivery.clusters.push(cluster);
@@ -150,7 +166,7 @@ fn plan<'g, 'a>(
                 }
                 None => deliveries.push(Delivery {
                     tag: tag.clone(),
-                    image_ref: to.image_ref(tag),
+                    image_ref,
                     to,
                     clusters: vec![cluster],
                     cases: vec![(target, unit)],
@@ -191,11 +207,11 @@ impl RepoConfig {
         let report =
             self.images_report(repo_root, selection, shown_root, ephemeral, global, warn)?;
         let builds = distinct(&report, only)?;
-        let tags: Vec<(String, Cases<'a>)> = builds
+        let images: Vec<(&Image, Cases<'a>)> = builds
             .iter()
-            .map(|(tag, _, cases)| (tag.clone(), cases.clone()))
+            .map(|(_, image, cases)| (*image, cases.clone()))
             .collect();
-        let deliveries = plan(&tags, |target| {
+        let deliveries = plan(&images, |target| {
             let cluster = self
                 .targets
                 .iter()
@@ -371,6 +387,7 @@ mod tests {
     use super::*;
     use crate::config::global::docker::{Credentials, Docker};
     use crate::config::global::{K8s, Location};
+    use crate::config::images::Dockerfile;
     use crate::config::test_support::{TARGET, global, helm_installed, write_repo, write_script};
 
     fn with_docker(mut cluster: Cluster, name: &str, prefix: &str, user: &str) -> Cluster {
@@ -397,12 +414,36 @@ mod tests {
             Destination::of(k3d).unwrap(),
             Destination::K3d { cluster: "c" }
         );
-        assert_eq!(Destination::of(k3d).unwrap().image_ref("app:1"), "app:1");
+        assert_eq!(
+            Destination::of(k3d).unwrap().repository("app").unwrap(),
+            "app"
+        );
 
         let registry = with_docker(k3d.clone(), "c", "reg.example.com/krrss", "u");
         let to = Destination::of(&registry).unwrap();
-        assert_eq!(to.image_ref("app:1"), "reg.example.com/krrss/app:1");
+        assert_eq!(to.repository("app").unwrap(), "reg.example.com/krrss/app");
         assert_eq!(to.cluster(), "c");
+        // A repository path keeps its layout, under the prefix or as is.
+        let name = "krrss-mc/auth/web-server";
+        assert_eq!(
+            Destination::of(k3d).unwrap().repository(name).unwrap(),
+            name
+        );
+        let registry = with_docker(k3d.clone(), "c", "reg.internal:5000/krrss", "u");
+        let to = Destination::of(&registry).unwrap();
+        assert_eq!(
+            to.repository(name).unwrap(),
+            "reg.internal:5000/krrss/krrss-mc/auth/web-server"
+        );
+        // Up to docker's limit, prefix included (`reg.internal:5000/krrss/`: 24).
+        assert!(to.repository(&"a".repeat(231)).is_ok());
+        let long = "a".repeat(232);
+        assert_eq!(
+            to.repository(&long).unwrap_err().to_string(),
+            format!(
+                "image `{long}` would push to cluster `c`'s registry as `reg.internal:5000/krrss/{long}`, over docker's 255 characters for a repository: shorten the name or `push.prefix`"
+            )
+        );
 
         let mut remote = k3d.clone();
         (remote.k8s, remote.location) = (K8s::Talos, Location::Remote);
@@ -420,8 +461,17 @@ mod tests {
         let prod = with_docker(base.clone(), "prod", "reg.example.com/krrss", "u");
         let other = with_docker(base.clone(), "other", "reg.example.com/krrss", "v");
         let clusters = [&dev, &prod, &other, &base];
+        let image = Image {
+            name: "app".to_owned(),
+            version: "1".to_owned(),
+            pre_build: None,
+            dockerfile: Dockerfile::File {
+                path: "/r/Dockerfile".into(),
+            },
+            context_path: "/r".into(),
+        };
         let builds = vec![(
-            "app:1".to_owned(),
+            &image,
             vec![
                 ("dev", "app"),
                 ("prod", "app"),

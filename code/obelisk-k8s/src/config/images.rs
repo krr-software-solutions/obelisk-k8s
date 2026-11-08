@@ -7,7 +7,7 @@
 //! An `inline` one lists them (`{ type: inline, images: [ … ] }`). A spec is:
 //!
 //! ```yaml
-//! name: my-image                                    # a valid name, unique in the case
+//! name: krrss-mc/web                                # a repository path (see below), unique in the case
 //! version: "1.2.3"                                  # a docker tag (no `+`): the template decides
 //! preBuild:                                         # optional: run before the image builds
 //!   type: file                                      # a script (or `type: command`, `command: [ … ]`)
@@ -20,10 +20,21 @@
 //! contextPath: ./..                                 # optional: the build context (default: the repo root)
 //! ```
 //!
+//! A `name` is a docker repository path, kept as is wherever the image goes (so it keeps its
+//! registry layout): `/`-separated path segments, each Docker's
+//! `[a-z0-9]+((\.|_|__|-+)[a-z0-9]+)*` (as a push prefix's are: see `config::global::docker`).
+//! With more than one, the first can't look like a registry host (have a `.`, or be `localhost`):
+//! docker would push it there, and pull it from there. Docker allows a repository 255 characters,
+//! registry host included: the name as docker names it locally (`docker.io/library/<name>`, or
+//! `docker.io/<name>` with a `/`) must fit, and `<push.prefix>/<name>` for a registry. Unlike the
+//! other names (targets, units, phases, …), it never names a file or a Helm release, so it needn't
+//! be a DNS label.
+//!
 //! Paths are written as in the build plan (absolute, or `./…` from `.obelisk-k8s/`), and kept and
 //! printed absolute and normalized; only messages show them relative to the repo root. The Dockerfile, a `preBuild` script, its `cwd` and the `contextPath` must exist. A
 //! phase's manifests see the images of earlier phases as
-//! `obelisk.images.<name>.{ref, repository, tag}` (see `config::manifests`). A unit with no images sources declares none, and its values phases don't run.
+//! `obelisk.images.<name>.{ref, repository, tag}` (see `config::manifests`; a name with a `-`, `.`
+//! or `/` is still one key: `index .Values.obelisk.images "krrss-mc/web"`). A unit with no images sources declares none, and its values phases don't run.
 //!
 //! `images build` builds each tag (`<name>:<version>`) once, however many cases declare it: its
 //! `preBuild`, then `docker build`. One tag declared two ways is an error. Without `--no-push`, it
@@ -40,13 +51,13 @@ use serde_json::{Map, Value};
 use crate::config::build::{BuildPlan, RepoPaths, Source, Warnings, check_env};
 use crate::config::ephemeral::Ephemeral;
 use crate::config::global::GlobalConfig;
+use crate::config::global::docker::bad_path_segment;
 use crate::config::paths::{Selection, write_yaml_cases};
 use crate::config::push::Destination;
 use crate::config::render;
 use crate::config::repo::{RepoConfig, Target, Unit};
 use crate::config::run::RunInputs;
 use crate::config::values::{Agreed, values_yaml, with_release};
-use crate::config::{NAME_RULE, is_valid_name};
 use crate::{ObeliskK8sError, yaml};
 
 /// An image spec, checked: what an image is called and tagged, and how it builds.
@@ -267,21 +278,25 @@ pub(crate) fn render_images(
 
 /// `obelisk.images`: for each of `images`, its `ref` as `to` delivers it, and that ref's
 /// `repository` and `tag`.
+///
+/// # Errors
+///
+/// [`ObeliskK8sError::Usage`] if a repository is too long (see [`Destination::repository`]).
 pub(crate) fn images_values<'i>(
     images: impl IntoIterator<Item = &'i Image>,
     to: &Destination<'_>,
-) -> Map<String, Value> {
+) -> Result<Map<String, Value>, ObeliskK8sError> {
     images
         .into_iter()
         .map(|image| {
-            let repository = to.image_ref(&image.name);
+            let repository = to.repository(&image.name)?;
             let image_ref = format!("{repository}:{}", image.version);
             let value = serde_json::json!({
                 "ref": image_ref,
                 "repository": repository,
                 "tag": image.version,
             });
-            (image.name.clone(), value)
+            Ok((image.name.clone(), value))
         })
         .collect()
 }
@@ -509,12 +524,7 @@ fn parse_image(document: &Value, paths: &RepoPaths) -> Result<Image, String> {
             format!("`{at}`: {message}{hint}")
         }
     })?;
-    if !is_valid_name(&raw.name) {
-        return Err(format!(
-            "`name`: `{}` isn't a valid name ({NAME_RULE})",
-            raw.name
-        ));
-    }
+    check_image_name(&raw.name).map_err(|message| format!("`name`: {message}"))?;
     if raw.version.is_empty() {
         return Err("`version`: is empty".to_owned());
     }
@@ -540,6 +550,46 @@ fn parse_image(document: &Value, paths: &RepoPaths) -> Result<Image, String> {
         dockerfile,
         context_path,
     })
+}
+
+/// Docker's limit for a repository name, its registry host included.
+pub(crate) const MAX_REPOSITORY: usize = 255;
+
+/// An image's name: a docker repository path (`<name>:<version>`, `<prefix>/<name>:<version>`),
+/// `/`-separated [`is_path_segment`](crate::config::global::docker::is_path_segment)s. With more than one, the first mustn't look like a registry
+/// host (docker would push it there, and pull it from there, whatever the destination); and as
+/// docker names it locally (see [`local_repository`]), it fits docker's limit.
+fn check_image_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("is empty".to_owned());
+    }
+    if let Some(problem) = bad_path_segment(name) {
+        return Err(format!("`{name}` {problem}"));
+    }
+    if let Some((first, _)) = name.split_once('/')
+        && (first.contains('.') || first == "localhost")
+    {
+        return Err(format!(
+            "`{name}`'s first path segment `{first}` is a registry host to docker (it has a `.`, or is `localhost`): the registry is the cluster's `push.prefix`"
+        ));
+    }
+    let local = local_repository(name);
+    if local.len() > MAX_REPOSITORY {
+        return Err(format!(
+            "`{name}` is too long: docker names it `{local}` locally, over its {MAX_REPOSITORY} characters for a repository"
+        ));
+    }
+    Ok(())
+}
+
+/// What docker calls image `name` locally (as it builds it, and imports it into k3d): on Docker
+/// Hub, under `library/` without a `/`.
+fn local_repository(name: &str) -> String {
+    if name.contains('/') {
+        format!("docker.io/{name}")
+    } else {
+        format!("docker.io/library/{name}")
+    }
 }
 
 const TAG_RULE: &str =
@@ -818,7 +868,7 @@ mod tests {
             ),
             (
                 format!("{{ name: Bad_Name, version: x, {DOCKERFILE} }}"),
-                "image spec 1: `name`: `Bad_Name` isn't a valid name",
+                "image spec 1: `name`: `Bad_Name` has path segment `Bad_Name`, which isn't a docker repository one",
             ),
             (
                 format!("{{ name: a, version: x, tag: y, {DOCKERFILE} }}"),
@@ -870,6 +920,71 @@ mod tests {
             assert!(e.starts_with(&format!("{source}: ")), "{specs}: {e}");
             assert!(e.contains(expected), "{specs}: {e}");
         }
+    }
+
+    #[test]
+    fn a_name_is_a_repository_path() {
+        for name in [
+            "a",
+            "krrss-mc/auth/web-server",
+            "a/b.c/e__f",
+            "a--b",
+            "0/1",
+            // One segment can't be a host.
+            "a.b",
+            "localhost",
+            // `docker.io/library/<name>`, `docker.io/<name>`: 255.
+            &"a".repeat(237),
+            &format!("{}/b", "a".repeat(243)),
+        ] {
+            assert_eq!(check_image_name(name), Ok(()), "{name}");
+        }
+        for name in [
+            "",
+            "/a",
+            "a/",
+            "a//b",
+            "A/b",
+            "a/-b",
+            "a-/b",
+            "a/.b",
+            "a..b",
+            "a___b",
+            "a_-b",
+            "a:b",
+            "a@b",
+            "a b",
+            "a.b/c",
+            "localhost/a",
+            &"a".repeat(238),
+            &format!("{}/b", "a".repeat(244)),
+        ] {
+            assert!(check_image_name(name).is_err(), "{name}");
+        }
+        assert_eq!(
+            check_image_name("a.b/c").unwrap_err(),
+            "`a.b/c`'s first path segment `a.b` is a registry host to docker (it has a `.`, or is `localhost`): the registry is the cluster's `push.prefix`"
+        );
+        let long = "a".repeat(238);
+        assert_eq!(
+            check_image_name(&long).unwrap_err(),
+            format!(
+                "`{long}` is too long: docker names it `docker.io/library/{long}` locally, over its 255 characters for a repository"
+            )
+        );
+        let found = images(
+            &repo(&[]),
+            &inline(&format!(
+                "{{ name: krrss-mc/auth/web-server, version: v1, {DOCKERFILE} }}"
+            )),
+        )
+        .unwrap();
+        assert_eq!(found[0].image.tag(), "krrss-mc/auth/web-server:v1");
+        assert!(
+            error(&inline(&format!("{{ name: a//b, version: v1, {DOCKERFILE} }}"))).contains(
+                "image spec 1: `name`: `a//b` has an empty path segment (a leading, trailing or doubled `/`)"
+            )
+        );
     }
 
     #[test]
@@ -1073,6 +1188,29 @@ mod tests {
     }
 
     #[test]
+    fn a_repository_path_is_one_name_to_pick_and_build() {
+        let pair = |t: &str, u: &str| (t.to_owned(), u.to_owned());
+        let slashed = report(
+            &[
+                ("prod", "app", &[("krrss-mc/web", "1"), ("krrss-mc", "1")]),
+                (
+                    "dev",
+                    "app",
+                    &[("krrss-mc/web", "1"), ("krrss-mc/api", "1")],
+                ),
+            ],
+            "/r/Dockerfile",
+        );
+        assert_eq!(
+            tags(&distinct(&slashed, &["krrss-mc/web".to_owned()]).unwrap()),
+            [(
+                "krrss-mc/web:1".to_owned(),
+                vec![pair("prod", "app"), pair("dev", "app")]
+            )]
+        );
+    }
+
+    #[test]
     fn refuses_an_unknown_image_or_one_tag_two_ways() {
         let one = report(&[("prod", "app", &[("a", "1")])], "/r/Dockerfile");
         assert_eq!(
@@ -1108,12 +1246,21 @@ mod tests {
             },
             context_path: "/r".into(),
         };
-        let images = [image("web", "1.2.3"), image("worker", "v2")];
+        let images = [
+            image("web", "1.2.3"),
+            image("worker", "v2"),
+            image("krrss-mc/auth/web-server", "v1"),
+        ];
         assert_eq!(
-            Value::Object(images_values(&images, &Destination::K3d { cluster: "c" })),
+            Value::Object(images_values(&images, &Destination::K3d { cluster: "c" }).unwrap()),
             serde_json::json!({
                 "web": { "ref": "web:1.2.3", "repository": "web", "tag": "1.2.3" },
                 "worker": { "ref": "worker:v2", "repository": "worker", "tag": "v2" },
+                "krrss-mc/auth/web-server": {
+                    "ref": "krrss-mc/auth/web-server:v1",
+                    "repository": "krrss-mc/auth/web-server",
+                    "tag": "v1",
+                },
             })
         );
         let push = crate::config::global::docker::Push {
@@ -1125,12 +1272,30 @@ mod tests {
             push: &push,
         };
         assert_eq!(
-            Value::Object(images_values(&images[..1], &to)),
+            Value::Object(images_values(&images[..1], &to).unwrap()),
             serde_json::json!({
                 "web": {
                     "ref": "reg.example.com/krrss/web:1.2.3",
                     "repository": "reg.example.com/krrss/web",
                     "tag": "1.2.3",
+                },
+            })
+        );
+        let push = crate::config::global::docker::Push {
+            prefix: "reg.internal:5000/krrss".to_owned(),
+            credentials: None,
+        };
+        let to = Destination::Registry {
+            cluster: "c",
+            push: &push,
+        };
+        assert_eq!(
+            Value::Object(images_values(&images[2..], &to).unwrap()),
+            serde_json::json!({
+                "krrss-mc/auth/web-server": {
+                    "ref": "reg.internal:5000/krrss/krrss-mc/auth/web-server:v1",
+                    "repository": "reg.internal:5000/krrss/krrss-mc/auth/web-server",
+                    "tag": "v1",
                 },
             })
         );

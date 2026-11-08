@@ -188,7 +188,7 @@ ip-allocator.
   naming the source and phase (`images build` builds them). A spec:
 
   ```yaml
-  name: my-image                    # a valid name, unique in the unit
+  name: krrss-mc/web                # a repository path, unique in the unit
   version: "1.2.3"                  # a docker tag (no `+`): the template decides (e.g. obelisk.release.version)
   preBuild:                         # optional: { type: file, path } or { type: command, command }
     type: file
@@ -199,13 +199,22 @@ ip-allocator.
   contextPath: ./units/my-app       # optional: the build context, default the repo root
   ```
 
+  A `name` is a docker repository path, kept as is wherever the image goes (so images keep their
+  registry layout, e.g. `krrss-mc/auth/web-server`, instead of being flattened): `/`-separated path
+  segments, each Docker's `[a-z0-9]+((\.|_|__|-+)[a-z0-9]+)*` (lowercase letters and digits,
+  separated by single `.`s or `_`s, `__`, or runs of `-`, as in a push prefix). With more than one,
+  the first can't look like a registry host (have a `.`, or be `localhost`): docker would push it
+  there. Docker allows a repository 255 characters, host included, so the name as docker builds it
+  (`docker.io/library/<name>`, or `docker.io/<name>` with a `/`) must fit, and so must
+  `<push.prefix>/<name>` (checked by `images build` and `template manifests`). Not a DNS label like
+  the other names: it never names a file or a Helm release.
   The Dockerfile, a `preBuild` script, its `cwd` and the `contextPath` must exist. A phase's
   manifests see the images declared in earlier phases (never their own) as
   `obelisk.images.<name>.{ref, repository, tag}`: `ref` is `<push.prefix>/<name>:<version>` on a
   cluster with a `docker.yaml`, `<name>:<version>` on a local k3d cluster without one (`k3d image
   import`ed); any other cluster is an error, as for `images build`. So
-  `image: {{ .Values.obelisk.images.web.ref }}` (a name with a `-`:
-  `{{ (index .Values.obelisk.images "my-app").ref }}`). Values sources don't see them: images render
+  `image: {{ .Values.obelisk.images.web.ref }}` (a name with a `-`, `.` or `/` is still one key:
+  `{{ (index .Values.obelisk.images "krrss-mc/web").ref }}`). Values sources don't see them: images render
   with the agreed release, which is only known after every values phase. So `template manifests`,
   `apply` and `diff` render (and check) the images sources of the phases before the last manifests
   phase.

@@ -450,7 +450,7 @@ enum ImagesCommand {
         repo: Option<String>,
         #[command(flatten)]
         args: TemplateArgs,
-        /// Only these images, by name (repeatable; default: all)
+        /// Only these images, by name, e.g. `krrss-mc/web` (repeatable; default: all)
         #[arg(short, long = "image", value_name = "IMAGE")]
         images: Vec<String>,
         /// Only build: don't push or import anything

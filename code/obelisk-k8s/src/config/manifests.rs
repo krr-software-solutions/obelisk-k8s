@@ -13,8 +13,10 @@
 //! The images declared in phases before k (see `config::images`) are added too, as
 //! `obelisk.images.<name>.{ref, repository, tag}`: the ref the image is delivered as to the target's
 //! cluster (`<push.prefix>/<name>:<version>` with a `docker.yaml`, `<name>:<version>` on a local k3d
-//! cluster without one; any other cluster is an error). Only the images phases before the last
-//! manifests phase render (their specs checked).
+//! cluster without one; any other cluster is an error; a repository over docker's 255 characters is
+//! one too). Only the images phases before the last manifests phase render (their specs checked).
+//! An image's name may hold `-`s, `.`s and `/`s (a repository path): it's still one key, which a
+//! template reaches with `index`, e.g. `{{ (index .Values.obelisk.images "krrss-mc/web").ref }}`.
 //!
 //! What Helm prints is kept as is: documents separated by `---`, each under a `# Source:` comment
 //! naming the template file; a `file`, `url` or `command` source's output goes under one `# Source:`
@@ -171,7 +173,7 @@ impl RepoConfig {
                 {
                     obelisk.insert(
                         "images".to_owned(),
-                        Value::Object(images_values(earlier, to)),
+                        Value::Object(images_values(earlier, to)?),
                     );
                 }
                 let values_yaml = values_yaml(&values, target, unit)?;
@@ -379,6 +381,18 @@ mod tests {
         let (text, _) = case_on(&dir, &output, None, &global).unwrap();
         assert_eq!(text, "---\n# Source: sh\nkind: Two\nseen: 1\n");
 
+        // A repository path keeps its layout under the prefix.
+        let slashed = format!(
+            "build:\n  phases:\n    - name: one\n      images: [{}]\n    - name: two\n      manifests: [{}]\n",
+            image("krrss-mc/auth/web-server"),
+            counts(
+                "Two",
+                "^      ref: reg.internal:5000/krrss/krrss-mc/auth/web-server:v1$"
+            )
+        );
+        let (text, _) = case_on(&dir, &slashed, None, &global).unwrap();
+        assert_eq!(text, "---\n# Source: sh\nkind: Two\nseen: 1\n");
+
         // A cluster with nowhere to push: no ref would mean the right image.
         global.clusters[0].docker = None;
         (global.clusters[0].k8s, global.clusters[0].location) = (K8s::Talos, Location::Remote);
@@ -396,6 +410,27 @@ mod tests {
         );
         let (text, _) = case_on(&dir, &plain, None, &global).unwrap();
         assert_eq!(text, "---\n# Source: sh\nkind: One\nseen: 0\n");
+    }
+
+    #[test]
+    fn a_template_indexes_a_slashed_image_name() {
+        if !helm_installed() {
+            return;
+        }
+        let dir = repo(&[
+            ("app/Dockerfile", "FROM scratch\n"),
+            (
+                "cm.gotmpl",
+                "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: a\ndata:\n  image: {{ (index .Values.obelisk.images \"krrss-mc/web\").ref | quote }}\n",
+            ),
+        ]);
+        let output = format!(
+            "build:\n  phases:\n    - name: one\n      images: [{}]\n    - name: two\n      manifests: [{{ type: gotmpl, path: ./cm.gotmpl }}]\n",
+            image("krrss-mc/web"),
+        );
+        // Cluster `c` is a local k3d one: imported as is.
+        let text = manifests(&dir, &output).unwrap();
+        assert!(text.contains("  image: \"krrss-mc/web:v1\"\n"), "{text}");
     }
 
     #[test]

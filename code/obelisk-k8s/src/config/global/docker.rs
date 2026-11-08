@@ -207,16 +207,33 @@ pub(crate) fn check_prefix(prefix: &str) -> Result<(), String> {
             "`{prefix}` has a tag or digest: the image's own `<name>:<version>` follows it"
         ));
     }
-    if let Some(bad) = path.split('/').find(|segment| !is_path_segment(segment)) {
-        return Err(format!(
-            "`{prefix}`'s path segment `{bad}` isn't a docker repository one: lowercase letters and digits, separated by single `.`/`_`/`-` (or `__`)"
-        ));
+    if let Some(problem) = bad_path_segment(path) {
+        return Err(format!("`{prefix}` {problem}"));
     }
     Ok(())
 }
 
-/// A docker repository path segment: `[a-z0-9]+((\.|_|__|-+)[a-z0-9]+)*`.
-fn is_path_segment(segment: &str) -> bool {
+/// What [`is_path_segment`] checks, for messages.
+pub(crate) const PATH_SEGMENT_RULE: &str =
+    "lowercase letters and digits, separated by single `.`s or `_`s, `__`, or runs of `-`";
+
+/// What's wrong with `path`'s first bad `/`-separated segment, if one isn't an
+/// [`is_path_segment`]: as the rest of a message about `path` (`` `a//b` `` + `has an empty path
+/// segment …`).
+pub(crate) fn bad_path_segment(path: &str) -> Option<String> {
+    let bad = path.split('/').find(|segment| !is_path_segment(segment))?;
+    Some(if bad.is_empty() {
+        "has an empty path segment (a leading, trailing or doubled `/`)".to_owned()
+    } else {
+        format!(
+            "has path segment `{bad}`, which isn't a docker repository one ({PATH_SEGMENT_RULE})"
+        )
+    })
+}
+
+/// A docker repository path segment: `[a-z0-9]+((\.|_|__|-+)[a-z0-9]+)*`. A push prefix's path is
+/// made of them, and so is an image's name (see `config::images`).
+pub(crate) fn is_path_segment(segment: &str) -> bool {
     let alnum = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit();
     let mut parts = segment.split(|c: char| !alnum(c));
     let separators: Vec<&str> = segment.split(alnum).filter(|s| !s.is_empty()).collect();
@@ -353,15 +370,15 @@ mod tests {
             ),
             (
                 "docker:\n  push: { prefix: \"reg.io//x\" }\n",
-                "`docker.push.prefix`: `reg.io//x`'s path segment `` isn't a docker repository one",
+                "`docker.push.prefix`: `reg.io//x` has an empty path segment (a leading, trailing or doubled `/`)",
             ),
             (
                 "docker:\n  push: { prefix: \"reg.io/X\" }\n",
-                "`docker.push.prefix`: `reg.io/X`'s path segment `X` isn't a docker repository one",
+                "`docker.push.prefix`: `reg.io/X` has path segment `X`, which isn't a docker repository one",
             ),
             (
                 "docker:\n  push: { prefix: \"reg.io/a--\" }\n",
-                "path segment `a--` isn't a docker repository one",
+                "path segment `a--`, which isn't a docker repository one",
             ),
             (
                 "docker:\n  push: { prefix: reg.io, username: u, password: \"\" }\n",

@@ -42,7 +42,8 @@ defines the CLI (the clap types, `--help` headings, completions) and dispatches 
 - `config/manifests.rs`: the rendered resources (`template manifests`): each phase's manifests
   sources, rendered with the values before it.
 - `config/images.rs`: the image specs (`template images`): each phase's images sources, rendered
-  with the values before it, and checked; and `images build --no-push`, each tag once.
+  with the values before it, and checked (an image's name is a repository path, `a/b/c`, not a DNS
+  label); and `images build --no-push`, each tag once.
 - `config/pull_secret.rs`: `images pull-secret`: the `docker-pull` Secret and `default`
   ServiceAccount, server-side applied in a namespace on a cluster.
 - `config/push.rs`: `images build`'s delivery: each image to each target's cluster (registry push
