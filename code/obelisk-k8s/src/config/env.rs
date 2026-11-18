@@ -116,6 +116,18 @@ fn load_env(path: &Path, file: PathBuf, name: &str) -> Result<Env, ObeliskK8sErr
     })
 }
 
+/// What a unit rendered as part of an env sees of it: `obelisk.env: { name, blueprint, repo }` and
+/// `obelisk.paths.blueprint` (the directory holding `blueprint.yaml`, in the env's checkout).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnvInstance {
+    pub name: String,
+    pub blueprint: String,
+    /// The repo the blueprint is in.
+    pub repo: String,
+    /// Absolute.
+    pub blueprint_dir: PathBuf,
+}
+
 /// A ref chain pinned to a commit, and where that commit is checked out.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pinned {
@@ -379,6 +391,20 @@ impl EnvPlan {
             .chain(self.units.iter().map(|u| &u.at))
             .map(|at| at.checkout.clone())
             .collect()
+    }
+
+    /// What its units see of it (see [`EnvInstance`]).
+    #[must_use]
+    pub fn instance(&self) -> EnvInstance {
+        EnvInstance {
+            name: self.env.name.clone(),
+            blueprint: self.blueprint.name.clone(),
+            repo: self.env.repo.clone(),
+            blueprint_dir: self
+                .blueprint_at
+                .checkout
+                .join(self.blueprint.file.parent().unwrap_or(Path::new(""))),
+        }
     }
 }
 
@@ -720,6 +746,54 @@ mod tests {
         run(&bps, &["remote", "set-head", "origin", "-d"]);
         let (config, rev) = RepoConfig::load_from_git(&bps).unwrap();
         assert_eq!((rev, config.name.as_str()), ("HEAD", "bps"));
+    }
+
+    #[test]
+    fn units_see_the_env_and_the_blueprint_dir() {
+        use crate::config::env::EnvInstance;
+        use crate::config::ephemeral::{Ephemeral, Instance};
+        use crate::config::run::RunInputs;
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let (app, bps) = fixture(d);
+        let env = "env:\n  repo: bps\n  blueprint: bp\n  ref: main\n  ephemeral: x\n";
+        let global = global(d, &[&app, &bps], &[("e1", env)]);
+        let plan = global
+            .resolve_env("e1", &mut Fetcher::new(false), &mut |_| {})
+            .unwrap();
+        let unit = &plan.units[0];
+        let config = &plan.configs[&unit.at.checkout];
+        let selection = config.select_one(&unit.id.target, &unit.id.unit).unwrap();
+        let (target, repo_unit) = selection.cases[0];
+        let copy = Ephemeral::without_values("x".to_owned(), "env".into());
+        let block = |env: Option<&EnvInstance>| {
+            let instance = Instance {
+                ephemeral: Some(&copy),
+                env,
+            };
+            let inputs =
+                RunInputs::new(&unit.at.checkout, &selection, instance, &global, None).unwrap();
+            config.obelisk_values(target, repo_unit, &inputs).unwrap()["obelisk"].clone()
+        };
+        let instance = plan.instance();
+        let in_env = block(Some(&instance));
+        assert_eq!(
+            in_env["env"],
+            serde_json::json!({ "name": "e1", "blueprint": "bp", "repo": "bps" })
+        );
+        let blueprint_dir = plan
+            .blueprint_at
+            .checkout
+            .join(".obelisk-k8s/blueprints/bp");
+        assert_eq!(
+            in_env["paths"]["blueprint"],
+            serde_json::json!(blueprint_dir.to_str().unwrap())
+        );
+        assert!(blueprint_dir.join("blueprint.yaml").is_file());
+        // Outside an env, both are null (and still there).
+        let outside = block(None);
+        assert_eq!(outside["env"], serde_json::Value::Null);
+        assert_eq!(outside["paths"]["blueprint"], serde_json::Value::Null);
     }
 
     #[test]

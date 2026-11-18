@@ -20,7 +20,7 @@ use std::path::Path;
 use serde_json::Value;
 
 use crate::ObeliskK8sError;
-use crate::config::ephemeral::Ephemeral;
+use crate::config::ephemeral::Instance;
 use crate::config::global::docker::Push;
 use crate::config::global::{Cluster, GlobalConfig};
 use crate::config::images::{Cases, Image, MAX_REPOSITORY, build_one, distinct};
@@ -197,7 +197,7 @@ impl RepoConfig {
         repo_root: &Path,
         selection: &Selection<'a>,
         shown_root: Option<&Path>,
-        ephemeral: Option<&Ephemeral>,
+        instance: Instance<'_>,
         global: &'g GlobalConfig,
         only: &[String],
         ssm: &Ssm,
@@ -205,7 +205,7 @@ impl RepoConfig {
         mut step: impl FnMut(&str),
     ) -> Result<PushedImages<'a>, ObeliskK8sError> {
         let report =
-            self.images_report(repo_root, selection, shown_root, ephemeral, global, warn)?;
+            self.images_report(repo_root, selection, shown_root, instance, global, warn)?;
         let builds = distinct(&report, only)?;
         let images: Vec<(&Image, Cases<'a>)> = builds
             .iter()
@@ -534,7 +534,7 @@ mod tests {
                 dir.path(),
                 &selection,
                 None,
-                None,
+                Instance::default(),
                 &global,
                 &[],
                 &ssm,

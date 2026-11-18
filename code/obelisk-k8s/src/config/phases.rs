@@ -34,7 +34,7 @@ use crate::ObeliskK8sError;
 use crate::config::build::{
     BuildPlan, RENDER_NAMESPACE, RENDER_RELEASE, Source, SourceKind, Warnings,
 };
-use crate::config::ephemeral::Ephemeral;
+use crate::config::ephemeral::Instance;
 use crate::config::global::GlobalConfig;
 use crate::config::paths::Selection;
 use crate::config::render;
@@ -80,12 +80,12 @@ impl RepoConfig {
         repo_root: &Path,
         selection: &Selection<'a>,
         shown_root: Option<&Path>,
-        ephemeral: Option<&Ephemeral>,
+        instance: Instance<'_>,
         global: &GlobalConfig,
         ssm: Option<&Ssm>,
         warn: impl FnMut(&str),
     ) -> Result<ValuesReport<'a>, ObeliskK8sError> {
-        let inputs = RunInputs::new(repo_root, selection, ephemeral, global, ssm)?;
+        let inputs = RunInputs::new(repo_root, selection, instance, global, ssm)?;
         let mut cases = Vec::new();
         let mut warnings = Warnings::new(warn);
         for (target, unit) in &selection.cases {
@@ -422,7 +422,7 @@ fn check_release(agreed: &Agreed, target: &Target, unit: &Unit) -> Result<(), Ob
 mod tests {
     use super::*;
     use crate::config::build::parse_plan;
-    use crate::config::ephemeral::EphemeralValues;
+    use crate::config::ephemeral::{Ephemeral, EphemeralValues};
     use crate::config::test_support::{TARGET, global, helm_installed, write_repo};
     use std::fmt::Write as _;
 
@@ -466,7 +466,7 @@ mod tests {
             .select(&[target.to_owned()], &["app".to_owned()])
             .unwrap();
         let global = global();
-        let inputs = RunInputs::new(dir.path(), &selection, ephemeral, &global, ssm)?;
+        let inputs = RunInputs::new(dir.path(), &selection, ephemeral.into(), &global, ssm)?;
         let (target, unit) = selection.cases[0];
         let shown = Path::new(".obelisk-k8s/build.gotmpl");
         let plan = parse_plan(output, shown, shown, &config.helm_repos, dir.path())?;
@@ -497,7 +497,7 @@ mod tests {
 
     /// The `obelisk:` block for unit `app` on `prod` (no git, no ephemeral, cluster `c`), with the
     /// release.
-    const OBELISK_PROD: &str = "obelisk:\n  repo: r\n  target: prod\n  unit: app\n  cluster:\n    name: c\n    context: k3d-c\n    supernet: null\n    subnet: null\n  ephemeral: null\n  git: null\n  paths:\n    repo:\n      root: <repo>\n      obelisk: <repo>/.obelisk-k8s\n    global:\n      obelisk: /home/me/.obelisk-k8s\n    unit: <repo>/.obelisk-k8s/units/app\n    target: <repo>/.obelisk-k8s/targets/prod\n  release:\n    name: app\n    namespace: prod\n    version: \"1.0.0\"\n";
+    const OBELISK_PROD: &str = "obelisk:\n  repo: r\n  target: prod\n  unit: app\n  cluster:\n    name: c\n    context: k3d-c\n    supernet: null\n    subnet: null\n  ephemeral: null\n  git: null\n  env: null\n  paths:\n    repo:\n      root: <repo>\n      obelisk: <repo>/.obelisk-k8s\n    global:\n      obelisk: /home/me/.obelisk-k8s\n    unit: <repo>/.obelisk-k8s/units/app\n    target: <repo>/.obelisk-k8s/targets/prod\n    blueprint: null\n  release:\n    name: app\n    namespace: prod\n    version: \"1.0.0\"\n";
 
     #[test]
     fn the_obelisk_block_alone_without_phases() {
@@ -677,7 +677,8 @@ mod tests {
         let config = RepoConfig::load(dir.path()).unwrap();
         let selection = config.select(&["prod".into()], &["app".into()]).unwrap();
         let global = global();
-        let inputs = RunInputs::new(dir.path(), &selection, None, &global, None).unwrap();
+        let inputs =
+            RunInputs::new(dir.path(), &selection, Instance::default(), &global, None).unwrap();
         let (target, unit) = selection.cases[0];
         let error = |source: &str| {
             let plan = parse_plan(
@@ -992,7 +993,15 @@ mod tests {
         let targets: Vec<String> = targets.iter().map(|t| (*t).to_owned()).collect();
         let selection = config.select(&targets, &[]).unwrap();
         let text = config
-            .values_report(dir.path(), &selection, None, None, &global(), None, |_| {})?
+            .values_report(
+                dir.path(),
+                &selection,
+                None,
+                Instance::default(),
+                &global(),
+                None,
+                |_| {},
+            )?
             .to_string();
         Ok(anstream::adapter::strip_str(&text)
             .to_string()

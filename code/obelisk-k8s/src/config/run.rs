@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::config::ephemeral::{Ephemeral, check_selection};
+use crate::config::env::EnvInstance;
+use crate::config::ephemeral::{Ephemeral, Instance, check_selection};
 use crate::config::global::{Cluster, GlobalConfig, normalize};
 use crate::config::paths::Selection;
 use crate::config::repo::{REPO_CONFIG_DIR, Target};
@@ -22,6 +23,8 @@ pub(crate) struct RunInputs<'a> {
     /// The repo root, absolute and normalized (`paths.repo.root`).
     pub(crate) repo_root: PathBuf,
     pub(crate) ephemeral: Option<&'a Ephemeral>,
+    /// The env the run is part of: `obelisk.env` and `obelisk.paths.blueprint` (both `null` without).
+    pub(crate) env: Option<&'a EnvInstance>,
     /// `None`: refs are only checked, and left as written.
     pub(crate) ssm: Option<&'a Ssm>,
     global: &'a GlobalConfig,
@@ -39,10 +42,11 @@ impl<'a> RunInputs<'a> {
     pub(crate) fn new(
         repo_root: &Path,
         selection: &Selection<'_>,
-        ephemeral: Option<&'a Ephemeral>,
+        instance: Instance<'a>,
         global: &'a GlobalConfig,
         ssm: Option<&'a Ssm>,
     ) -> Result<Self, ObeliskK8sError> {
+        let Instance { ephemeral, env } = instance;
         check_selection(selection, ephemeral)?;
         let repo_root_absolute =
             std::path::absolute(repo_root).map_err(|source| ObeliskK8sError::Io {
@@ -61,6 +65,7 @@ impl<'a> RunInputs<'a> {
             }),
             repo_root: repo_root_absolute,
             ephemeral,
+            env,
             ssm,
             global,
         };
@@ -123,7 +128,7 @@ mod tests {
         let inputs = RunInputs::new(
             Path::new("some/./repo/../repo"),
             &selection,
-            None,
+            Instance::default(),
             &global,
             None,
         )

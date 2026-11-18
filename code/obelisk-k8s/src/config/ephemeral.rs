@@ -62,12 +62,39 @@ impl Ephemeral {
         })
     }
 
+    /// A copy named `name` with no values, for an env (whose values come from its blueprint);
+    /// `shown` names it in messages.
+    #[must_use]
+    pub fn without_values(name: String, shown: PathBuf) -> Self {
+        Self {
+            name,
+            values: Value::Null,
+            shown,
+        }
+    }
+
     pub(crate) fn values(&self) -> &Value {
         &self.values
     }
 
     pub(crate) fn shown(&self) -> &Path {
         &self.shown
+    }
+}
+
+/// What a run renders as: an ephemeral target's copy (if any), and the env it's part of (if any).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Instance<'a> {
+    pub ephemeral: Option<&'a Ephemeral>,
+    pub env: Option<&'a crate::config::env::EnvInstance>,
+}
+
+impl<'a> From<Option<&'a Ephemeral>> for Instance<'a> {
+    fn from(ephemeral: Option<&'a Ephemeral>) -> Self {
+        Self {
+            ephemeral,
+            env: None,
+        }
     }
 }
 

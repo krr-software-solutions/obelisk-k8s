@@ -66,7 +66,7 @@ use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Value};
 
 use crate::ObeliskK8sError;
-use crate::config::ephemeral::Ephemeral;
+use crate::config::ephemeral::Instance;
 use crate::config::global::{GlobalConfig, normalize};
 use crate::config::key_path::KeyPath;
 use crate::config::paths::{Selection, from_repo_config, write_yaml_cases};
@@ -305,11 +305,11 @@ impl RepoConfig {
         repo_root: &Path,
         selection: &Selection<'a>,
         shown_root: Option<&Path>,
-        ephemeral: Option<&Ephemeral>,
+        instance: Instance<'_>,
         global: &GlobalConfig,
         warn: impl FnMut(&str),
     ) -> Result<BuildReport<'a>, ObeliskK8sError> {
-        let inputs = RunInputs::new(repo_root, selection, ephemeral, global, None)?;
+        let inputs = RunInputs::new(repo_root, selection, instance, global, None)?;
         let mut cases = Vec::new();
         let mut warnings = Warnings::new(warn);
         for (target, unit) in &selection.cases {
@@ -1606,7 +1606,14 @@ mod tests {
         let targets: Vec<String> = targets.iter().map(|t| (*t).to_owned()).collect();
         let selection = config.select(&targets, &[]).unwrap();
         let text = config
-            .build_report(dir.path(), &selection, None, None, &global(), |_| {})?
+            .build_report(
+                dir.path(),
+                &selection,
+                None,
+                Instance::default(),
+                &global(),
+                |_| {},
+            )?
             .to_string();
         Ok(anstream::adapter::strip_str(&text).to_string())
     }
@@ -1698,9 +1705,16 @@ mod tests {
             .unwrap();
         let mut warnings = Vec::new();
         // `dev` and `qa` warn the same (once), then `prod`'s build file fails: the warning's out.
-        let result = config.build_report(dir.path(), &selection, None, None, &global(), |w| {
-            warnings.push(w.to_owned());
-        });
+        let result = config.build_report(
+            dir.path(),
+            &selection,
+            None,
+            Instance::default(),
+            &global(),
+            |w| {
+                warnings.push(w.to_owned());
+            },
+        );
         assert!(result.is_err());
         assert_eq!(
             warnings,

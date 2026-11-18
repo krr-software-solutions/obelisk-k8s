@@ -23,7 +23,7 @@ use std::path::Path;
 
 use crate::ObeliskK8sError;
 use crate::config::build::{SourceKind, Warnings};
-use crate::config::ephemeral::Ephemeral;
+use crate::config::ephemeral::Instance;
 use crate::config::global::{Cluster, GlobalConfig, Location};
 use crate::config::manifests::ManifestsCase;
 use crate::config::paths::Selection;
@@ -95,7 +95,7 @@ impl RepoConfig {
         repo_root: &Path,
         selection: &Selection<'a>,
         shown_root: Option<&Path>,
-        ephemeral: Option<&Ephemeral>,
+        instance: Instance<'_>,
         global: &GlobalConfig,
         remote_ok: bool,
         takeover: Takeover,
@@ -104,7 +104,7 @@ impl RepoConfig {
         mut progress: impl FnMut(&str),
     ) -> Result<ApplyReport<'a>, ObeliskK8sError> {
         let plan = self.plan(
-            repo_root, selection, shown_root, ephemeral, global, remote_ok, ssm, warn,
+            repo_root, selection, shown_root, instance, global, remote_ok, ssm, warn,
         )?;
         let mut applied = Vec::new();
         for Planned { case, context } in plan {
@@ -142,13 +142,13 @@ impl RepoConfig {
         repo_root: &Path,
         selection: &Selection<'a>,
         shown_root: Option<&Path>,
-        ephemeral: Option<&Ephemeral>,
+        instance: Instance<'_>,
         global: &GlobalConfig,
         remote_ok: bool,
         ssm: &Ssm,
         warn: impl FnMut(&str),
     ) -> Result<Vec<Planned<'a>>, ObeliskK8sError> {
-        let inputs = RunInputs::new(repo_root, selection, ephemeral, global, Some(ssm))?;
+        let inputs = RunInputs::new(repo_root, selection, instance, global, Some(ssm))?;
         let mut contexts = Vec::new();
         for (target, _) in &selection.cases {
             let cluster = inputs.cluster(target)?;
@@ -353,7 +353,7 @@ mod tests {
             dir.path(),
             &selection,
             None,
-            None,
+            Instance::default(),
             global,
             remote_ok,
             &ssm,
@@ -491,7 +491,7 @@ mod tests {
                 dir.path(),
                 &selection,
                 None,
-                None,
+                Instance::default(),
                 &global,
                 false,
                 Takeover::default(),

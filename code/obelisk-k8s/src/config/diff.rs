@@ -13,7 +13,7 @@ use std::path::Path;
 
 use crate::ObeliskK8sError;
 use crate::config::apply::{Planned, Takeover, takeover_hint};
-use crate::config::ephemeral::Ephemeral;
+use crate::config::ephemeral::Instance;
 use crate::config::global::GlobalConfig;
 use crate::config::paths::{CASE_HEADER, Selection};
 use crate::config::repo::RepoConfig;
@@ -101,7 +101,7 @@ impl RepoConfig {
         repo_root: &Path,
         selection: &Selection<'a>,
         shown_root: Option<&Path>,
-        ephemeral: Option<&Ephemeral>,
+        instance: Instance<'_>,
         global: &GlobalConfig,
         options: DiffOptions,
         ssm: &Ssm,
@@ -111,7 +111,7 @@ impl RepoConfig {
         helm::check_diff_plugin()?;
         // It only reads, so a remote cluster needs no `--yes`.
         let plan = self.plan(
-            repo_root, selection, shown_root, ephemeral, global, true, ssm, warn,
+            repo_root, selection, shown_root, instance, global, true, ssm, warn,
         )?;
         let mut diffs = Vec::new();
         for Planned { case, context } in plan {

@@ -49,7 +49,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::config::build::{BuildPlan, RepoPaths, Source, SourceKind, Warnings, check_env};
-use crate::config::ephemeral::Ephemeral;
+use crate::config::ephemeral::Instance;
 use crate::config::global::GlobalConfig;
 use crate::config::global::docker::bad_path_segment;
 use crate::config::paths::{Selection, write_yaml_cases};
@@ -154,12 +154,12 @@ impl RepoConfig {
         repo_root: &Path,
         selection: &Selection<'a>,
         shown_root: Option<&Path>,
-        ephemeral: Option<&Ephemeral>,
+        instance: Instance<'_>,
         global: &GlobalConfig,
         warn: impl FnMut(&str),
     ) -> Result<ImagesReport<'a>, ObeliskK8sError> {
         // Nothing in an image spec is resolved: the values' SSM refs are only checked.
-        let inputs = RunInputs::new(repo_root, selection, ephemeral, global, None)?;
+        let inputs = RunInputs::new(repo_root, selection, instance, global, None)?;
         let mut cases = Vec::new();
         let mut yaml = Vec::new();
         let mut warnings = Warnings::new(warn);
@@ -368,14 +368,14 @@ impl RepoConfig {
         repo_root: &Path,
         selection: &Selection<'a>,
         shown_root: Option<&Path>,
-        ephemeral: Option<&Ephemeral>,
+        instance: Instance<'_>,
         global: &GlobalConfig,
         only: &[String],
         warn: impl FnMut(&str),
         mut step: impl FnMut(&str),
     ) -> Result<BuiltImages<'a>, ObeliskK8sError> {
         let report =
-            self.images_report(repo_root, selection, shown_root, ephemeral, global, warn)?;
+            self.images_report(repo_root, selection, shown_root, instance, global, warn)?;
         let mut images = Vec::new();
         for (tag, image, cases) in distinct(&report, only)? {
             build_one(&tag, image, repo_root, &mut step)?;
@@ -720,7 +720,7 @@ mod tests {
             .select(&["prod".to_owned()], &["app".to_owned()])
             .unwrap();
         let global = global();
-        let inputs = RunInputs::new(dir.path(), &selection, None, &global, None)?;
+        let inputs = RunInputs::new(dir.path(), &selection, Instance::default(), &global, None)?;
         let (target, unit) = selection.cases[0];
         let shown = Path::new(".obelisk-k8s/build.gotmpl");
         let plan = parse_plan(output, shown, shown, &config.helm_repos, dir.path())?;
@@ -1070,7 +1070,14 @@ mod tests {
             return;
         }
         let report = config
-            .images_report(dir.path(), &selection, None, None, &global(), |_| {})
+            .images_report(
+                dir.path(),
+                &selection,
+                None,
+                Instance::default(),
+                &global(),
+                |_| {},
+            )
             .unwrap();
         assert_eq!(
             report.to_string(),

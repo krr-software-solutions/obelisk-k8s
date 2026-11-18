@@ -91,6 +91,15 @@ impl RepoConfig {
         Ok(Selection { cases, single })
     }
 
+    /// The one case of `unit` on `target` (as [`RepoConfig::select`] with one of each).
+    ///
+    /// # Errors
+    ///
+    /// As [`RepoConfig::select`].
+    pub fn select_one(&self, target: &str, unit: &str) -> Result<Selection<'_>, ObeliskK8sError> {
+        self.select(&[target.to_owned()], &[unit.to_owned()])
+    }
+
     /// `config repo paths`: the build file of every case in `selection`.
     ///
     /// # Errors

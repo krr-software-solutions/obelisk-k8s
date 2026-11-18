@@ -435,7 +435,7 @@ fn run_apply_with(
         &repo_root,
         &selection,
         shown_root.as_deref(),
-        ephemeral.as_ref(),
+        ephemeral.as_ref().into(),
         &global,
         yes,
         takeover,
@@ -494,7 +494,14 @@ fn run_images_build(
     let step = |step: &str| eprintln!("{step}");
     if no_push {
         let built = config.images_build(
-            &repo_root, &selection, shown_root, ephemeral, &global, images, warn_one, step,
+            &repo_root,
+            &selection,
+            shown_root,
+            ephemeral.into(),
+            &global,
+            images,
+            warn_one,
+            step,
         )?;
         print!("{built}");
         return Ok(());
@@ -503,7 +510,15 @@ fn run_images_build(
     let ssm = Ssm::from_env();
     let pushed = config
         .images_push(
-            &repo_root, &selection, shown_root, ephemeral, &global, images, &ssm, warn_one, step,
+            &repo_root,
+            &selection,
+            shown_root,
+            ephemeral.into(),
+            &global,
+            images,
+            &ssm,
+            warn_one,
+            step,
         )
         .map_err(|e| ssm.redact_error(e))?;
     print!("{}", ssm.redact(&pushed.to_string()));
@@ -576,7 +591,7 @@ fn run_diff_with(
         &repo_root,
         &selection,
         shown_root.as_deref(),
-        ephemeral.as_ref(),
+        ephemeral.as_ref().into(),
         &global,
         options,
         ssm,
@@ -627,23 +642,45 @@ fn template_report(
         // Nothing in a build plan is resolved: `--resolve` has nothing to do there.
         TemplateCommand::Build(_) => config
             .build_report(
-                &repo_root, &selection, shown_root, ephemeral, &global, warn_one,
+                &repo_root,
+                &selection,
+                shown_root,
+                ephemeral.into(),
+                &global,
+                warn_one,
             )?
             .to_string(),
         TemplateCommand::Values(_) => config
             .values_report(
-                &repo_root, &selection, shown_root, ephemeral, &global, ssm, warn_one,
+                &repo_root,
+                &selection,
+                shown_root,
+                ephemeral.into(),
+                &global,
+                ssm,
+                warn_one,
             )?
             .to_string(),
         TemplateCommand::Manifests(_) => config
             .manifests_report(
-                &repo_root, &selection, shown_root, ephemeral, &global, ssm, warn_one,
+                &repo_root,
+                &selection,
+                shown_root,
+                ephemeral.into(),
+                &global,
+                ssm,
+                warn_one,
             )?
             .to_string(),
         // Nothing in an image spec is resolved, as in a build plan.
         TemplateCommand::Images(_) => config
             .images_report(
-                &repo_root, &selection, shown_root, ephemeral, &global, warn_one,
+                &repo_root,
+                &selection,
+                shown_root,
+                ephemeral.into(),
+                &global,
+                warn_one,
             )?
             .to_string(),
     })

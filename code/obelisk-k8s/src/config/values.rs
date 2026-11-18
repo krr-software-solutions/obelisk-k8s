@@ -72,8 +72,9 @@ pub struct ValuesReport<'a> {
 
 impl RepoConfig {
     /// What the tool knows about the case, as values: just `obelisk: { repo, target, unit, cluster,
-    /// ephemeral, git, paths }`, `paths` with the case's `unit` and `target` directories (the release
-    /// goes in once it's agreed). What the build file renders with, and what the phases start from (with the ephemeral values over it). Made once per case.
+    /// ephemeral, git, env, paths }`, `paths` with the case's `unit` and `target` directories and, in
+    /// an env, its `blueprint` directory (`env` and `paths.blueprint` are `null` outside one; the
+    /// release goes in once it's agreed). What the build file renders with, and what the phases start from (with the ephemeral values over it). Made once per case.
     pub(crate) fn obelisk_values(
         &self,
         target: &Target,
@@ -91,7 +92,20 @@ impl RepoConfig {
             ephemeral.map_or(Value::Null, |e| Value::String(e.name.clone())),
         );
         block.insert("git".to_owned(), inputs.git.clone());
-        let paths = case_paths(&inputs.paths, &inputs.repo_root, target, unit)?;
+        block.insert(
+            "env".to_owned(),
+            inputs.env.map_or(Value::Null, |env| {
+                serde_json::json!({ "name": env.name, "blueprint": env.blueprint, "repo": env.repo })
+            }),
+        );
+        let mut paths = case_paths(&inputs.paths, &inputs.repo_root, target, unit)?;
+        let blueprint = match inputs.env {
+            Some(env) => Value::String(utf8(&env.blueprint_dir)?.to_owned()),
+            None => Value::Null,
+        };
+        if let Value::Object(paths) = &mut paths {
+            paths.insert("blueprint".to_owned(), blueprint);
+        }
         block.insert("paths".to_owned(), paths);
         let mut values = Map::new();
         values.insert(OBELISK_KEY.to_owned(), Value::Object(block));

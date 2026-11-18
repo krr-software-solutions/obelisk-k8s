@@ -33,7 +33,7 @@ use serde_json::{Map, Value};
 
 use crate::ObeliskK8sError;
 use crate::config::build::{BuildPlan, Phase, Source, SourceKind, Warnings};
-use crate::config::ephemeral::Ephemeral;
+use crate::config::ephemeral::Instance;
 use crate::config::global::GlobalConfig;
 use crate::config::images::{images_values, render_images};
 use crate::config::paths::{Selection, write_yaml_cases};
@@ -80,12 +80,12 @@ impl RepoConfig {
         repo_root: &Path,
         selection: &Selection<'a>,
         shown_root: Option<&Path>,
-        ephemeral: Option<&Ephemeral>,
+        instance: Instance<'_>,
         global: &GlobalConfig,
         ssm: Option<&Ssm>,
         warn: impl FnMut(&str),
     ) -> Result<ManifestsReport<'a>, ObeliskK8sError> {
-        let inputs = RunInputs::new(repo_root, selection, ephemeral, global, ssm)?;
+        let inputs = RunInputs::new(repo_root, selection, instance, global, ssm)?;
         let mut cases = Vec::new();
         let mut warnings = Warnings::new(warn);
         for (target, unit) in &selection.cases {
@@ -292,7 +292,7 @@ mod tests {
         let selection = config
             .select(&["prod".to_owned()], &["app".to_owned()])
             .unwrap();
-        let inputs = RunInputs::new(dir.path(), &selection, None, global, ssm)?;
+        let inputs = RunInputs::new(dir.path(), &selection, Instance::default(), global, ssm)?;
         let (target, unit) = selection.cases[0];
         let shown = Path::new(".obelisk-k8s/build.gotmpl");
         let plan = parse_plan(output, shown, shown, &config.helm_repos, dir.path())?;
@@ -524,7 +524,15 @@ mod tests {
         let targets: Vec<String> = targets.iter().map(|t| (*t).to_owned()).collect();
         let selection = config.select(&targets, &["app".to_owned()]).unwrap();
         let text = config
-            .manifests_report(dir.path(), &selection, None, None, &global(), None, |_| {})?
+            .manifests_report(
+                dir.path(),
+                &selection,
+                None,
+                Instance::default(),
+                &global(),
+                None,
+                |_| {},
+            )?
             .to_string();
         Ok(anstream::adapter::strip_str(&text).to_string())
     }
