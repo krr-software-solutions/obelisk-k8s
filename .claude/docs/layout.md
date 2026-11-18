@@ -29,7 +29,7 @@ defines the CLI (the clap types, `--help` headings, completions) and dispatches 
   `config global show`.
 - `config/global/edit.rs`: changing the global config (`init`, `cluster add` / `remove`, `repo add` /
   `remove`). A child of `global.rs`, so it uses its private helpers.
-- `config/repo.rs`: `RepoConfig`, a repo's `.obelisk-k8s/` (repo, targets, units, build paths), loaded
+- `config/repo.rs`: `RepoConfig`, a repo's `.obelisk-k8s/` (repo, targets, units, blueprints, build paths; a bare repo's through `load_bare`), loaded
   and checked. Behind `config repo show`.
 - `config/build.rs`: a case's build plan (`template build`): its build file rendered, and its output
   checked into phases of values and manifests sources.
@@ -58,6 +58,17 @@ defines the CLI (the clap types, `--help` headings, completions) and dispatches 
   a selection needs one exactly when it has an ephemeral target.
 - `config/run.rs`: `RunInputs`, what every case in a run shares: the git facts, the ephemeral copy,
   the global config its targets' clusters come from (each must be in it), and `obelisk.paths`.
+- `config/blueprint.rs`: a repo's blueprints (`blueprints/<name>/blueprint.yaml`): units, refs,
+  `dependsOn` and their order. Loaded with the repo's config.
+- `config/env.rs`: envs (`<global root>/envs/<name>.yaml`), and resolving one (`env show`): every
+  commit pinned and checked out, every unit checked against its repo there; removing an env's
+  checkouts (`remove_checkouts_except`).
+- `config/env_run.rs`: running a resolved env: `env template` / `diff` / `apply` (each unit planned
+  from its checkout with the env's `Instance`: `obelisk.env`, `obelisk.paths.blueprint`, the copy;
+  ownership checked, pruned per env, images built) and `env down`.
+- `checkout.rs`: ref chains (`a|b|c`) resolved to commits (local first; a remote's candidates after
+  fetching the repo, once per run); the detached worktrees at `envs/target/<env>/<repo>/<sha>/`; and
+  a bare repo's config read at `origin/HEAD` (else `HEAD`) through `git archive`.
 - `cluster.rs`: `cluster status` / `up` / `down` / `destroy` for managed clusters (local k3d only).
 - `base.rs`: a managed cluster's base (obeliskd gateway ip and names, MetalLB, Envoy Gateway).
 - `export.rs`: `export`: a values subtree to the file the values name, or a temp file (its path

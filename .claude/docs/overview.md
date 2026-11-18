@@ -71,6 +71,72 @@ ip-allocator.
   needed. A remote cluster needs `--yes`; `--dry-run` prints them (SSM refs as written, other
   passwords masked unless they're just one SSM ref; `stringData`, for reading: the apply writes
   `data`), and needs neither `--yes` nor a kubectl context.
+- **Blueprints** (`.obelisk-k8s/blueprints/<name>/blueprint.yaml`, in any repo; `config repo show`
+  lists them): a reusable batch of units across repos, for one cluster. `blueprint: { ephemeral,
+  defaults: { ref }, units: [{ repo, target, unit, ref?, dependsOn? }] }`. `ephemeral` (missing:
+  false) is the whole blueprint's: every unit's target must agree. A unit is named `repo/target/unit`
+  (distinct within the blueprint); `dependsOn` names others that way, and mustn't loop (units are
+  ordered dependencies first, ties in written order). Each unit needs a ref, its own `ref` or
+  `defaults.ref`.
+- **Refs** are chains, `a|b|c`: the first candidate that names a commit wins. A candidate starting
+  with one of the repo's remotes (`origin/…`) is looked up only after fetching the repo (`git fetch
+  --all --prune`): at most once per repo per run, shared by the env's ref and every unit's, and only
+  if some chain reaches a remote candidate (`--no-fetch` uses it as it is); any other (a local
+  branch, tag or sha) is looked up locally, without the network. So code must be committed, and only pushed for a remote candidate.
+  Note `origin/HEAD` only exists where something set it (`git remote set-head origin -a`).
+- **Envs** (`<global root>/envs/<name>.yaml`, listed by `config global show`): a machine-local
+  instance of a blueprint. `env: { repo, blueprint, ref, ephemeral }`: the repo the blueprint is in,
+  its name, the ref (chain) of that repo to read it at, and the copy's name (required if the
+  blueprint is ephemeral, else not allowed). An env file that won't load is a `WARN` (it's left
+  out), and an error only when that env is asked for.
+- `obelisk-k8s env show <NAME> [--no-fetch]`: resolves an env: pins the blueprint repo's ref, checks
+  it out, loads the blueprint there, then pins and checks out each unit's repo, and checks the unit
+  against its repo's config at that commit (target and unit exist, the unit deploys to the target,
+  the target is ephemeral exactly when the blueprint is, every target deploys to one cluster, which
+  is in the global config). Prints the plan, dependencies first; fetches and new checkouts on stderr.
+  Every commit is checked out as a detached worktree of its registered repo at
+  `<global root>/envs/target/<env>/<repo>/<full sha>/` (the blueprint repo's own commit too): each
+  env has its own, reused while it resolves to that commit (one that's there but isn't that commit
+  is an error saying how to remove it). Resolving (`env show` / `template` / `diff`) only adds
+  checkouts; `env apply` removes, once it has applied, every checkout under the env's directory it
+  no longer pins (`git worktree remove --force`, so anything generated in it goes too), and
+  `env down` removes them all.
+- `obelisk-k8s env template <build|values|manifests> <NAME>`, `env diff <NAME> [--reveal]
+  [--exit-code]`, `env apply <NAME> [--yes] [--prune | --no-prune]` (all `[--no-fetch]`): resolve the
+  env as `env show` does, then render / diff / apply each unit from its checkout, exactly as
+  `template` / `diff` / `apply` would there, dependencies first. What the env adds:
+  `obelisk.env: { name, blueprint, repo }` and `obelisk.paths.blueprint` (the directory holding
+  `blueprint.yaml`, in the env's checkout; both `null` outside an env), so a build file can list
+  values files in the blueprint repo (missing ones are skipped, as ever); for an ephemeral
+  blueprint the copy is `env.ephemeral`, with **no** ephemeral values (tentative); and the release
+  labels `obelisk-k8s/env` and `obelisk-k8s/blueprint`. `diff` and `apply` plan every unit before
+  touching the cluster (two units that would be the same release are an error). `apply` then, in
+  order: checks release ownership (**Release ownership**, below); finds the env's releases whose
+  unit left the blueprint (labelled `obelisk-k8s/env=<NAME>` on any local cluster, but not in the
+  plan, so a blueprint that's emptied or moved cluster still finds them; a cluster it can't look on
+  is a `WARN`), which need `--prune` or `--no-prune` (an error now, before anything builds; remote
+  clusters aren't looked on, for now: an env on one is a `WARN`); builds and delivers every unit's images (as
+  `images build` does, from each checkout; a tag already in the local docker daemon isn't rebuilt,
+  still delivered. TODO (fast-follow): that trusts the tag to name its contents, fine for
+  `0.0.0-<sha>`, stale for a fixed version, and k3d still re-imports what it already has);
+  uninstalls what it prunes; installs, dependencies first; and removes the checkouts it no longer
+  pins.
+- `obelisk-k8s env down <NAME>`: takes an env down, even one whose file is gone: uninstalls every
+  release labelled `obelisk-k8s/env=<NAME>` on each local cluster with a kubectl context (one it
+  can't look on, e.g. stopped, is a `WARN`; remote clusters aren't looked on, for now, which is a
+  `WARN` naming them), then removes `envs/target/<NAME>/` (each checkout through
+  `git worktree remove`). The env's file stays, so `env apply` brings it back.
+- **Repos not checked out** in `repos.yaml`: a bare repo (a checkout holding only `.git`, or a
+  `<name>.git` dir), or a checkout of a branch without `.obelisk-k8s/`, is a repo like any other:
+  its `.obelisk-k8s/` is read from git at `origin/HEAD` (what the remote's default branch was at the
+  last fetch), else `HEAD`, through a throwaway `git archive | tar` (no worktree), so `config global
+  show` lists its targets, units and blueprints and `config repo show --repo <name>` prints them.
+  There are no files to render from, so `template` / `diff` / `apply` / `images` `--repo <name>`
+  refuse it: it deploys through an env (which checks it out). A repo whose config is only on an
+  unmerged branch isn't found this way (register a checkout of that branch instead). A repo name
+  listed in more than one place (e.g. a bare repo and a stale clone of it, or two worktrees under
+  one `/*`) loads, with a `WARN`, but using it (`--repo`, an env) is an error naming every place:
+  picking one could deploy from the wrong place.
 - `obelisk-k8s config global init`: creates the global root, an empty `repos.yaml` and `clusters/`
   (whichever are missing), then loads it.
 - `obelisk-k8s cluster up|down|destroy <NAME>`: create (or start, if stopped) / stop (keeping its
@@ -127,10 +193,12 @@ ip-allocator.
   `--resolve`. Quoted strings stay as written; plain scalars come out parsed, the YAML 1.1 way where
   it matters (`0755` is `493`), with known limits listed in `config/values.rs`. Replaces the old
   `values` (config files only) and `generated-values`.
-- `obelisk.paths: { repo: { root, obelisk }, global: { obelisk }, unit, target }`: the repo root, the
-  repo's `.obelisk-k8s/`, the global config's directory on this machine, and the case's unit and
-  target directories (where its `unit.yaml` / `target.yaml` are), absolute and normalized (`.` and
-  `..` resolved; symlinks kept); an error if any isn't UTF-8. Machine-specific, so rendered output
+- `obelisk.paths: { repo: { root, obelisk }, global: { obelisk }, unit, target, blueprint }`: the repo
+  root, the repo's `.obelisk-k8s/`, the global config's directory on this machine, the case's unit
+  and target directories (where its `unit.yaml` / `target.yaml` are), and, as part of an env, the
+  directory holding its `blueprint.yaml` in the env's checkout (`null` otherwise); absolute and
+  normalized (`.` and `..` resolved; symlinks kept); an error if any isn't UTF-8. Alongside it,
+  `obelisk.env: { name, blueprint, repo }` is the env (`null` outside one). Machine-specific, so rendered output
   that uses it differs between machines (a source path under the repo root is shown relative to it,
   though: see **The design**).
 - `obelisk.cluster: { name, context, supernet, subnet }` is the target's cluster, from the global
@@ -235,7 +303,7 @@ ip-allocator.
   stderr; stdout lists what was built, pushed or imported. One tag declared two different ways is
   an error. `apply` doesn't build or push. A push `prefix` must start with a registry host (a `.`
   or `:`, or `localhost`), not Docker Hub.
-- `obelisk-k8s apply [-t …]… [-u …]… [--ephemeral-*] [--yes] [--take-ownership] [--force-conflicts]`: installs what `template manifests`
+- `obelisk-k8s apply [-t …]… [-u …]… [--ephemeral-*] [--yes] [--take-ownership] [--force-conflicts] [--prune | --no-prune]`: installs what `template manifests`
   renders, one Helm release per unit on a target: its agreed release name, into its agreed namespace
   (created if missing), at its agreed version, via a throwaway chart that ships the rendered
   manifests as-is (`{{ .Files.Get }}`, no second templating), with `helm upgrade --install
@@ -254,6 +322,36 @@ ip-allocator.
   `--force-conflicts` forces server-side apply (which the release then keeps) and takes fields
   another field manager owns (left on, it fights what the cluster manages). A refusal either would
   get past (without it already on) says which.
+- **Release labels:** `apply` puts `obelisk-k8s/repo`, `obelisk-k8s/target`, `obelisk-k8s/unit`,
+  `obelisk-k8s/ephemeral` (the copy's name) and `obelisk-k8s/sha` (`obelisk.git.sha.value`) on every
+  release (Helm's `--labels`, on its release record, merged over the ones there). `ephemeral` and
+  `sha` are removed (`null`) when there's none, on an upgrade; a first install leaves them out (it
+  would keep `null` as text). Find them with `helm list -A -l obelisk-k8s/unit=app`, read them with
+  `helm get metadata` (`helm list` never prints them). `env apply` adds `obelisk-k8s/env` and
+  `obelisk-k8s/blueprint` (removed, likewise, outside an env).
+- **Release ownership:** before installing anything, `apply` and `env apply` read the labels of
+  every release they'd install over, and refuse to take one from its owner: a plain `apply` never
+  installs over an env's release (`obelisk-k8s/env` set), and an env installs only over its own,
+  never another env's nor one applied outside an env. A release without labels (from before them)
+  is anyone's.
+- **Units that are gone:** a release labelled with this repo and a selected target (and the same
+  ephemeral copy, or none), applied outside an env (an env prunes its own), whose unit isn't in the
+  repo for that target any more (deleted, or no longer deploying there). `apply` looks for them on
+  each selected target's context (`-t`, else every target; a target with no units left counts, so
+  `apply` with nothing left to install only prunes), as the selected ephemeral copy on an ephemeral
+  target (`helm list -A -l …,obelisk-k8s/unit!=<each unit>`); a release the plan installs anyway
+  (same name, namespace, context) isn't one. If there are any, `apply` needs `--prune` (uninstall each,
+  waiting up to 5m, before installing anything) or `--no-prune` (leave them, without looking);
+  without either it's an error listing them. Unlabelled releases (from before labels) aren't seen.
+  `--prune` refuses a `-u` that leaves out a unit of a selected target (with a subset, a release
+  another unit now installs, e.g. a renamed unit keeping its release name, could look gone), and
+  refuses while the repo skips any `targets/` or `units/` entry (a unit whose `unit.yaml` is
+  missing would look gone). On an ephemeral target, `--ephemeral-name` picks the copy to look at,
+  even when the target has no units left. A cluster it can't look on is an error for a target
+  something installs on, or with `--prune`; otherwise a `WARN`.
+  For now all of this is only for local clusters: remote targets aren't looked at (with `--prune`
+  or `--no-prune`, each selected one is a `WARN` saying so; without, nothing is said, as for CI on
+  a remote cluster), so the flags only ever act on local ones.
 - `obelisk-k8s diff [-t …]… [-u …]… [--ephemeral-*] [--take-ownership] [--reveal] [--exit-code]`:
   what `apply` would change, without changing anything. Planned exactly as `apply` plans (the same
   checks and errors, charts rendered for the cluster's capabilities), remote clusters included
@@ -401,7 +499,7 @@ build file ─▶ build plan ─▶ phase 1 … phase n ─▶ values (+ agreed 
 | v1   | a render-only `template` command for prod/dev targets, diffed against obelisk-local on mission-control. Home lab is a layout check (raw YAML, URL YAML, Helm charts) |
 | v1.1 | ephemeral instances on local k3d clusters, the first real use |
 | v1.2 | up/down hooks: setup, database/topic creation, seeding test data |
-| v1.3 | a whole-cluster spec across repos/apps |
+| v1.3 | a whole-cluster spec across repos/apps: blueprints and envs (`env show` / `template` / `diff` / `apply` / `down`) |
 
 Design the layout format on paper against v1.3, but build only the current phase.
 
@@ -464,5 +562,7 @@ Nothing below is decided. Don't silently pick an answer in code; raise it.
   (with `nestOutput`); not decided.
 - ~~Is apply part of v1, or only `template`?~~ Decided: it is (`obelisk-k8s apply`, above).
 - Does the tool own instance identity for clean up/down (v1.1)? Hook shape (v1.2)?
+- Blueprints/envs: env applies pass no ephemeral values (tentative); reusing local images only when
+  they're really the same (TODO above); `env down` only looks on local clusters.
 
 These are tracked in the Aletheia knowledge graph, project OBLSK (start at OBLSK/I-102).
