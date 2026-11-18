@@ -6,6 +6,8 @@
 //!                                 a trailing `/*` means every repo in a dir)
 //!   clusters/<dir>/cluster.yaml   cluster: { name, k8s, location, managed, obeliskd, kubectlCluster, kubectlContext }
 //!   clusters/<dir>/docker.yaml    optional: docker: { push: { prefix, … }, pull: { auths } } (see `docker`)
+//!   envs/<name>.yaml              env: { repo, blueprint, ref, ephemeral } (see `env`)
+//!   envs/target/<env>/<repo>/<sha>/  the detached checkouts each env renders from (see `env`)
 //! ```
 //!
 //! A repo's name comes from its own `repo.yaml` (a bare repo's, at its `origin/HEAD`, else `HEAD`);
@@ -18,6 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ObeliskK8sError;
 use crate::checkout;
+use crate::config::env::{Env, load_envs};
 use crate::config::repo::RepoConfig;
 use crate::config::repo::{REPO_CONFIG_DIR, REPO_FILE};
 use crate::config::{check_unique, config_error, name_or_dir, read_entries};
@@ -46,6 +49,8 @@ pub struct GlobalConfig {
     pub repos: Vec<Repo>,
     /// Sorted by name.
     pub clusters: Vec<Cluster>,
+    /// Sorted by name.
+    pub envs: Vec<Env>,
     /// Things that look wrong but don't stop the load (e.g. a listed repo that won't load).
     pub warnings: Vec<String>,
 }
@@ -194,6 +199,7 @@ impl GlobalConfig {
         let mut warnings = Vec::new();
         let mut repos = load_repos(root, &shown, home, &mut warnings)?;
         let mut clusters = load_clusters(root, &shown, &mut warnings)?;
+        let envs = load_envs(root, &shown, &mut warnings)?;
         for repo in &repos {
             for target in repo
                 .targets
@@ -216,6 +222,7 @@ impl GlobalConfig {
             dir: root.clone(),
             repos,
             clusters,
+            envs,
             warnings,
         })
     }
@@ -400,6 +407,23 @@ impl fmt::Display for GlobalConfig {
                 )?;
                 let hosts: Vec<String> = docker.pull_auths.iter().map(|a| a.host.clone()).collect();
                 writeln!(f, "    images pull auths: {}", list(&hosts))?;
+            }
+        }
+
+        writeln!(
+            f,
+            "\nenvs:{}",
+            if self.envs.is_empty() { " (none)" } else { "" }
+        )?;
+        for env in &self.envs {
+            writeln!(f, "  {}:  ({})", env.name, env.file.display())?;
+            writeln!(
+                f,
+                "    blueprint: {}/{} at {}",
+                env.repo, env.blueprint, env.git_ref
+            )?;
+            if let Some(copy) = &env.ephemeral {
+                writeln!(f, "    ephemeral: {copy}")?;
             }
         }
         Ok(())
@@ -842,7 +866,8 @@ mod tests {
             format!(
                 "global root: ~/.obelisk-k8s\n\
                  \nrepos:\n  one:  ({path})\n    from: ~/dev/one\n    targets: t1 (c1), t2 (nope)\n    units: app\n\
-                 \nclusters:\n  c1:  (~/.obelisk-k8s/clusters/c1/cluster.yaml)\n    k3d, local, managed\n    obeliskd: supernet s, subnet n\n    kubectl cluster: (not set)\n    kubectl context: (not set)\n"
+                 \nclusters:\n  c1:  (~/.obelisk-k8s/clusters/c1/cluster.yaml)\n    k3d, local, managed\n    obeliskd: supernet s, subnet n\n    kubectl cluster: (not set)\n    kubectl context: (not set)\n\
+                 \nenvs: (none)\n"
             )
         );
     }

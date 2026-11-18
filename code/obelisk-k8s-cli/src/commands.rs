@@ -4,13 +4,12 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use obelisk_k8s::checkout::Fetcher;
 use obelisk_k8s::config::apply::Takeover;
 use obelisk_k8s::config::diff::DiffOptions;
 use obelisk_k8s::config::ephemeral::{Ephemeral, EphemeralValues};
 use obelisk_k8s::config::global::edit::{self as global_edit, Change};
-use obelisk_k8s::config::global::{
-    GLOBAL_ROOT_ENV, GlobalConfig, Repo, default_global_root, tilde,
-};
+use obelisk_k8s::config::global::{GLOBAL_ROOT_ENV, GlobalConfig, default_global_root, tilde};
 use obelisk_k8s::config::pull_secret::PullSecretOptions;
 use obelisk_k8s::config::repo::RepoConfig;
 use obelisk_k8s::export::ExportFormat;
@@ -18,7 +17,7 @@ use obelisk_k8s::ssm::Ssm;
 use obelisk_k8s::{ObeliskK8sError, cluster};
 
 use crate::{
-    ClusterCommand, DockerCommand, DockerPullCommand, DockerPushCommand, EphemeralArgs,
+    ClusterCommand, DockerCommand, DockerPullCommand, DockerPushCommand, EnvCommand, EphemeralArgs,
     GlobalCommand, GlobalRepoCommand, ImagesCommand, ManagedClusterCommand, TemplateArgs,
     TemplateCommand,
 };
@@ -52,18 +51,6 @@ fn repo_root(
     find_repo(name, &config, home.as_deref())
 }
 
-/// Repo `name` in `config`.
-fn registered<'a>(name: &str, config: &'a GlobalConfig) -> Result<&'a Repo, ObeliskK8sError> {
-    config.repos.iter().find(|r| r.name == name).ok_or_else(|| {
-        let known: Vec<_> = config.repos.iter().map(|r| r.name.as_str()).collect();
-        let known = if known.is_empty() { "none".to_owned() } else { known.join(", ") };
-        ObeliskK8sError::Usage(format!(
-            "no repo `{name}` in {} (repos: {known}; `config global show` lists any that didn't load)",
-            config.root.join("repos.yaml").display()
-        ))
-    })
-}
-
 /// Repo `name` in `config`, and where it is as the user should see it. A bare repo has no files to
 /// render from, so it's refused: it's deployed through an env.
 fn find_repo(
@@ -71,7 +58,7 @@ fn find_repo(
     config: &GlobalConfig,
     home: Option<&Path>,
 ) -> Result<(PathBuf, Option<PathBuf>), ObeliskK8sError> {
-    let found = registered(name, config)?;
+    let found = config.repo(name)?;
     if found.from_git {
         return Err(ObeliskK8sError::Usage(format!(
             "repo `{name}` has no `.obelisk-k8s/` checked out at {} (a bare repo, or a checkout of another branch): deploy it through an env (`obelisk-k8s env …`), or check it out",
@@ -93,7 +80,7 @@ pub fn run_config_repo_show(
     };
     let (root, home) = global_root(global_root_arg)?;
     let global = GlobalConfig::load(&root, home.as_deref())?;
-    let found = registered(name, &global)?;
+    let found = global.repo(name)?;
     if found.from_git {
         let (config, rev) = RepoConfig::load_from_git(&found.path)?;
         warn(&config.warnings);
@@ -387,6 +374,20 @@ pub fn run_cluster(
         ManagedClusterCommand::Destroy { name } => report(cluster::destroy(&config, name)?),
     }
     Ok(())
+}
+
+/// `env …`.
+pub fn run_env(root: Option<PathBuf>, command: &EnvCommand) -> Result<ExitCode, ObeliskK8sError> {
+    let (root, home) = global_root(root)?;
+    let config = GlobalConfig::load(&root, home.as_deref())?;
+    warn(&config.warnings);
+    let resolve = |name: &str, no_fetch: bool| {
+        let mut fetcher = Fetcher::new(!no_fetch);
+        config.resolve_env(name, &mut fetcher, &mut |step| eprintln!("{step}"))
+    };
+    let EnvCommand::Show { name, no_fetch } = command;
+    print!("{}", resolve(name, *no_fetch)?);
+    Ok(ExitCode::SUCCESS)
 }
 
 /// The global config (its warnings printed), and the repo to work on: the one named `repo` in it,

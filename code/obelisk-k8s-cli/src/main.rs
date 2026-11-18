@@ -103,6 +103,12 @@ enum Command {
         #[command(subcommand)]
         command: ImagesCommand,
     },
+    /// Envs: instances of blueprints (`envs/<name>.yaml` in the global config), each unit pinned to
+    /// a commit and checked out
+    Env {
+        #[command(subcommand)]
+        command: EnvCommand,
+    },
     /// Bring managed clusters up, down, and away (local k3d only, so far)
     Cluster {
         #[command(subcommand)]
@@ -127,6 +133,21 @@ enum Command {
     Completions {
         /// The shell to complete for
         shell: Shell,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum EnvCommand {
+    /// Resolve an env: pin its blueprint's and units' refs to commits (fetching each repo at most
+    /// once, before a remote candidate in it), check each commit out under
+    /// `envs/target/<env>/<repo>/<sha>/` (adding, never removing), check the units against their
+    /// repos at those commits, and print the plan, dependencies first
+    Show {
+        /// The env, by its file name in `envs/` (without `.yaml`)
+        name: String,
+        /// Don't fetch: look remote candidates (`origin/…`) up as they are, possibly stale
+        #[arg(long)]
+        no_fetch: bool,
     },
 }
 
@@ -692,6 +713,7 @@ fn main_impl() -> Result<ExitCode, ObeliskK8sError> {
         }
         Command::Images { command } => commands::run_images(cli.global_root, &command),
         Command::Cluster { command } => commands::run_cluster(cli.global_root, &command),
+        Command::Env { command } => return commands::run_env(cli.global_root, &command),
         Command::Export {
             in_values_path,
             out_values_path,

@@ -11,6 +11,7 @@ pub mod apply;
 pub mod blueprint;
 pub mod build;
 pub mod diff;
+pub mod env;
 pub mod ephemeral;
 pub mod global;
 pub mod images;
@@ -260,6 +261,7 @@ pub(crate) mod test_support {
                     }),
                 ),
             ],
+            envs: Vec::new(),
             warnings: Vec::new(),
         }
     }
