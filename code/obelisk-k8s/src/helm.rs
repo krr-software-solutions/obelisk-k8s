@@ -291,6 +291,9 @@ pub(crate) struct Install<'a> {
     pub(crate) context: &'a str,
     /// What it may take over from what's already in the cluster.
     pub(crate) takeover: Takeover,
+    /// Release labels (`--labels`, on Helm's release record: `helm list -l`), merged over the ones
+    /// it has; a `None` value removes one (and is left out of a first install).
+    pub(crate) labels: &'a [(String, Option<String>)],
 }
 
 /// What an install may take over from what's already in the cluster.
@@ -369,6 +372,21 @@ fn upgrade_args(install: &Install<'_>, status: Option<&str>) -> Vec<String> {
     }
     args.extend(["--namespace", install.namespace, "--create-namespace"]);
     args.extend(["--kube-context", install.context]);
+    // `null` removes a label on an upgrade, but a first install would store it as the text "null":
+    // there, a label without a value is just left out.
+    let labels = install
+        .labels
+        .iter()
+        .filter_map(|(k, v)| match (v, status) {
+            (Some(v), _) => Some(format!("{k}={v}")),
+            (None, Some(_)) => Some(format!("{k}=null")),
+            (None, None) => None,
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    if !labels.is_empty() {
+        args.extend(["--labels", &labels]);
+    }
     args.push("--wait");
     if install.takeover.take_ownership {
         args.push("--take-ownership");
@@ -424,6 +442,7 @@ fn status(install: &Install<'_>) -> Result<Option<String>, ObeliskK8sError> {
 /// # Errors
 ///
 /// As [`upgrade_install`]; [`ObeliskK8sError::Io`] if the chart can't be written.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn install_manifests(
     release: &str,
     version: &str,
@@ -431,6 +450,7 @@ pub(crate) fn install_manifests(
     namespace: &str,
     context: &str,
     takeover: Takeover,
+    labels: &[(String, Option<String>)],
 ) -> Result<(), ObeliskK8sError> {
     let chart = manifests_chart(release, version, manifests)?;
     upgrade_install(&Install {
@@ -440,6 +460,7 @@ pub(crate) fn install_manifests(
         namespace,
         context,
         takeover,
+        labels,
     })
 }
 
@@ -616,6 +637,137 @@ fn run(args: &[&str]) -> Result<std::process::Output, ObeliskK8sError> {
     })
 }
 
+/// A release, as `helm list` names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Listed {
+    pub(crate) name: String,
+    pub(crate) namespace: String,
+}
+
+/// Every release on `context`, in any namespace, whose labels match `selector` (`k=v`, `k!=v`,
+/// `!k`, comma-separated): deployed, failed, pending or uninstalling ones (each release once, at
+/// its latest revision).
+///
+/// # Errors
+///
+/// [`ObeliskK8sError::Helm`] if `helm` can't run or fails, or its output isn't what it should be.
+pub(crate) fn list_releases(context: &str, selector: &str) -> Result<Vec<Listed>, ObeliskK8sError> {
+    let output = run(&[
+        "list",
+        "--all-namespaces",
+        "--deployed",
+        "--failed",
+        "--pending",
+        "--uninstalling",
+        "--max",
+        "10000",
+        "--selector",
+        selector,
+        "--kube-context",
+        context,
+        "--output",
+        "json",
+    ])?;
+    if !output.status.success() {
+        return Err(ObeliskK8sError::Helm(format!(
+            "can't list releases on `{context}`: {}",
+            helm_message(&String::from_utf8_lossy(&output.stderr))
+        )));
+    }
+    let listed: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).map_err(|e| {
+        ObeliskK8sError::Helm(format!(
+            "`helm list` on `{context}` printed something odd: {e}"
+        ))
+    })?;
+    Ok(listed
+        .iter()
+        .filter_map(|r| {
+            Some(Listed {
+                name: r["name"].as_str()?.to_owned(),
+                namespace: r["namespace"].as_str()?.to_owned(),
+            })
+        })
+        .collect())
+}
+
+/// Release `release`'s labels (from `helm get metadata`); `None` if there's no such release.
+///
+/// # Errors
+///
+/// [`ObeliskK8sError::Helm`] if `helm` can't run, or fails other than by not finding it.
+pub(crate) fn release_labels(
+    context: &str,
+    release: &Listed,
+) -> Result<Option<serde_json::Map<String, serde_json::Value>>, ObeliskK8sError> {
+    let output = run(&[
+        "get",
+        "metadata",
+        &release.name,
+        "--namespace",
+        &release.namespace,
+        "--kube-context",
+        context,
+        "--output",
+        "json",
+    ])?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("release: not found") {
+            return Ok(None);
+        }
+        return Err(ObeliskK8sError::Helm(format!(
+            "can't read release `{}` in `{}` on `{context}`: {}",
+            release.name,
+            release.namespace,
+            helm_message(&stderr)
+        )));
+    }
+    // What's here decides who may install over the release: anything odd is an error, never "no
+    // labels" (which would let anyone take it).
+    let odd = |what: &str| {
+        ObeliskK8sError::Helm(format!(
+            "`helm get metadata` for release `{}` in `{}` on `{context}` printed {what}",
+            release.name, release.namespace
+        ))
+    };
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&output.stdout).map_err(|e| odd(&format!("something odd: {e}")))?;
+    match &metadata["labels"] {
+        serde_json::Value::Object(labels) => Ok(Some(labels.clone())),
+        serde_json::Value::Null => Ok(Some(serde_json::Map::new())),
+        _ => Err(odd("labels that aren't a mapping")),
+    }
+}
+
+/// `helm uninstall`s `release` from `context`, waiting for its resources to go (up to 5m).
+///
+/// # Errors
+///
+/// [`ObeliskK8sError::Helm`] if `helm` can't run or fails.
+pub(crate) fn uninstall(context: &str, release: &Listed) -> Result<(), ObeliskK8sError> {
+    let output = run(&[
+        "uninstall",
+        &release.name,
+        "--namespace",
+        &release.namespace,
+        "--kube-context",
+        context,
+        "--wait",
+        "--timeout",
+        "5m",
+    ])?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(ObeliskK8sError::Helm(format!(
+            "can't uninstall release `{}` in `{}` on `{context}`: {}",
+            release.name,
+            release.namespace,
+            helm_message(&String::from_utf8_lossy(&output.stderr))
+        )))
+    }
+}
+
 /// What Helm said, without its own framing: an `Error: ` prefix, a hint about `--debug`, and the
 /// line it adds when a plugin (helm-diff) fails.
 fn helm_message(stderr: &str) -> String {
@@ -651,6 +803,7 @@ mod tests {
                 namespace: "metallb-system",
                 context: "k3d-c",
                 takeover: Takeover::default(),
+                labels: &[],
             },
             Some("deployed"),
         );
@@ -668,12 +821,47 @@ mod tests {
                 namespace: "ns",
                 context: "k3d-c",
                 takeover: Takeover::default(),
+                labels: &[],
             },
             None,
         );
         assert!(
             args.join(" ")
                 .starts_with("upgrade --install base /tmp/chart --namespace ns ")
+        );
+    }
+
+    #[test]
+    fn labels_the_release_and_unsets_a_missing_one() {
+        let labels = [
+            ("obelisk-k8s/unit".to_owned(), Some("app".to_owned())),
+            ("obelisk-k8s/sha".to_owned(), None),
+        ];
+        let args = |status| {
+            upgrade_args(
+                &Install {
+                    release: "r",
+                    chart: Chart::Dir(Path::new("/tmp/chart")),
+                    version: None,
+                    namespace: "ns",
+                    context: "c",
+                    takeover: Takeover::default(),
+                    labels: &labels,
+                },
+                status,
+            )
+            .join(" ")
+        };
+        let upgrade = args(Some("deployed"));
+        assert!(
+            upgrade.contains(" --labels obelisk-k8s/unit=app,obelisk-k8s/sha=null --wait"),
+            "{upgrade}"
+        );
+        // A first install would keep "null" as the value: it's left out.
+        let install = args(None);
+        assert!(
+            install.contains(" --labels obelisk-k8s/unit=app --wait"),
+            "{install}"
         );
     }
 
@@ -692,6 +880,7 @@ mod tests {
                     namespace: "ns",
                     context: "c",
                     takeover,
+                    labels: &[],
                 },
                 Some("deployed"),
             )

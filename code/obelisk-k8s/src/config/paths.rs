@@ -64,9 +64,33 @@ impl RepoConfig {
         targets: &[String],
         units: &[String],
     ) -> Result<Selection<'_>, ObeliskK8sError> {
+        self.select_cases(targets, units, false)
+    }
+
+    /// As [`RepoConfig::select`], but a selection with no cases is fine: `apply`, whose selected
+    /// targets may hold only releases of units that are gone (to prune).
+    ///
+    /// # Errors
+    ///
+    /// As [`RepoConfig::select`], except for having no cases.
+    pub fn select_for_apply(
+        &self,
+        targets: &[String],
+        units: &[String],
+    ) -> Result<Selection<'_>, ObeliskK8sError> {
+        self.select_cases(targets, units, true)
+    }
+
+    fn select_cases(
+        &self,
+        targets: &[String],
+        units: &[String],
+        none_ok: bool,
+    ) -> Result<Selection<'_>, ObeliskK8sError> {
         let targets = pick(targets, &self.targets, |n| self.target(n))?;
         let units = pick(units, &self.units, |n| self.unit(n))?;
         if let ([target], [unit]) = (targets.as_slice(), units.as_slice())
+            && !none_ok
             && !self.deploys(target, unit)
         {
             return Err(ObeliskK8sError::Usage(format!(
@@ -82,13 +106,23 @@ impl RepoConfig {
             .flat_map(|t| units.iter().map(move |u| (*t, *u)))
             .filter(|(t, u)| self.deploys(t, u))
             .collect();
-        if cases.is_empty() {
-            return Err(ObeliskK8sError::Usage(
-                "nothing to show: none of the selected units deploy to the selected targets"
-                    .to_owned(),
-            ));
+        if cases.is_empty() && !none_ok {
+            return Err(ObeliskK8sError::Usage(NOTHING_SELECTED.to_owned()));
         }
-        Ok(Selection { cases, single })
+        // Only `apply` cares about a selected target without cases (it may hold releases to prune).
+        let targets = if none_ok {
+            targets
+        } else {
+            targets
+                .into_iter()
+                .filter(|t| cases.iter().any(|(c, _)| c.name == t.name))
+                .collect()
+        };
+        Ok(Selection {
+            targets,
+            cases,
+            single,
+        })
     }
 
     /// The one case of `unit` on `target` (as [`RepoConfig::select`] with one of each).
@@ -221,10 +255,17 @@ fn pick<'a, T>(
 /// Which (target, unit) cases to show; see [`RepoConfig::select`].
 #[derive(Debug)]
 pub struct Selection<'a> {
+    /// The targets selected: for `apply` ([`RepoConfig::select_for_apply`]), every one (`-t`, else
+    /// all of them), whether or not a selected unit deploys to it (it may hold releases to prune);
+    /// otherwise, only those with a case.
+    pub targets: Vec<&'a Target>,
     pub cases: Vec<(&'a Target, &'a Unit)>,
     /// Exactly one target and one unit: shown without a case header.
     pub single: bool,
 }
+
+pub(crate) const NOTHING_SELECTED: &str =
+    "nothing to show: none of the selected units deploy to the selected targets";
 
 /// One (target, unit) case's build file.
 #[derive(Debug)]

@@ -122,6 +122,7 @@ mod tests {
     fn the_paths_are_absolute_and_normalized() {
         let global = global();
         let selection = Selection {
+            targets: Vec::new(),
             cases: Vec::new(),
             single: false,
         };

@@ -99,11 +99,13 @@ impl<'a> From<Option<&'a Ephemeral>> for Instance<'a> {
 }
 
 /// `ephemeral` is needed exactly when a target being rendered (one with a case in `selection`) is
-/// ephemeral.
+/// ephemeral; it may also be given for a selected ephemeral target with no cases (`apply`, pruning
+/// that copy's releases there).
 ///
 /// # Errors
 ///
-/// [`ObeliskK8sError::Usage`] if one is, without `ephemeral`; or `ephemeral` is given and none is.
+/// [`ObeliskK8sError::Usage`] if one is, without `ephemeral`; or `ephemeral` is given and no
+/// selected target is.
 pub(crate) fn check_selection(
     selection: &Selection<'_>,
     ephemeral: Option<&Ephemeral>,
@@ -130,6 +132,7 @@ pub(crate) fn check_selection(
                 "target{s} {names} {is} ephemeral: pass `--ephemeral-name`, and `--ephemeral-values` or `--ephemeral-values-path`; or pick other targets with `-t`"
             )))
         }
+        (Some(_), []) if selection.targets.iter().any(|t| t.ephemeral) => Ok(()),
         (Some(ephemeral), []) => Err(ObeliskK8sError::Usage(format!(
             "ephemeral `{}` given, but none of the targets being rendered is ephemeral (`ephemeral: true`)",
             ephemeral.name

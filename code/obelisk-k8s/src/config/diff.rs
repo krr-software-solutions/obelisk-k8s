@@ -114,7 +114,7 @@ impl RepoConfig {
             repo_root, selection, shown_root, instance, global, true, ssm, warn,
         )?;
         let mut diffs = Vec::new();
-        for Planned { case, context } in plan {
+        for Planned { case, context, .. } in plan {
             let diff = match &case.release {
                 Some(release) => {
                     progress(&format!(

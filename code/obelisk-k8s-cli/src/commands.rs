@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use obelisk_k8s::checkout::Fetcher;
-use obelisk_k8s::config::apply::Takeover;
+use obelisk_k8s::config::apply::{Prune, Takeover};
 use obelisk_k8s::config::diff::DiffOptions;
 use obelisk_k8s::config::ephemeral::{Ephemeral, EphemeralValues};
 use obelisk_k8s::config::global::edit::{self as global_edit, Change};
@@ -413,9 +413,10 @@ pub fn run_apply(
     args: &TemplateArgs,
     yes: bool,
     takeover: Takeover,
+    prune: Prune,
 ) -> Result<(), ObeliskK8sError> {
     let ssm = Ssm::from_env();
-    run_apply_with(repo, global_root_arg, args, yes, takeover, &ssm)
+    run_apply_with(repo, global_root_arg, args, yes, takeover, prune, &ssm)
         .map_err(|e| ssm.redact_error(e))
 }
 
@@ -425,11 +426,12 @@ fn run_apply_with(
     args: &TemplateArgs,
     yes: bool,
     takeover: Takeover,
+    prune: Prune,
     ssm: &Ssm,
 ) -> Result<(), ObeliskK8sError> {
     let (global, repo_root, shown_root) = global_and_repo(repo, global_root_arg)?;
     let config = load_repo_config(&repo_root)?;
-    let selection = config.select(&args.targets, &args.units)?;
+    let selection = config.select_for_apply(&args.targets, &args.units)?;
     let ephemeral = ephemeral(&args.ephemeral)?;
     let report = config.apply(
         &repo_root,
@@ -440,6 +442,7 @@ fn run_apply_with(
         yes,
         takeover,
         ssm,
+        prune,
         warn_one,
         |step| eprintln!("{step}"),
     )?;

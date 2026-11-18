@@ -105,6 +105,7 @@ pub(crate) fn install(name: &str, subnet: &Obeliskd) -> Result<Base, ObeliskK8sE
             namespace,
             context: &context,
             takeover: Takeover::default(),
+            labels: &[],
         })
     };
     install("metallb", METALLB, Some(METALLB_VERSION), METALLB_NAMESPACE)?;
@@ -125,6 +126,7 @@ pub(crate) fn install(name: &str, subnet: &Obeliskd) -> Result<Base, ObeliskK8sE
             GATEWAY_NAMESPACE,
             &context,
             Takeover::default(),
+            &[],
         ) {
             Err(ObeliskK8sError::Helm(message))
                 if message.contains("webhook") && tries < WEBHOOK_RETRIES =>

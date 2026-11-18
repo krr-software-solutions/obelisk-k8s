@@ -53,6 +53,10 @@ pub struct RepoConfig {
     pub units: Vec<Unit>,
     /// Sorted by name.
     pub blueprints: Vec<Blueprint>,
+    /// The entries of `targets/` and `units/` skipped (a stray file, a directory without its
+    /// `.yaml`), as warnings: a unit skipped this way isn't in the repo, so `apply --prune` would
+    /// take its releases for gone, and refuses while there are any.
+    pub skipped: Vec<String>,
     /// Things that look wrong but don't stop the load (e.g. a stray file in `units/`), in path order.
     pub warnings: Vec<String>,
 }
@@ -139,6 +143,7 @@ impl RepoConfig {
         let helm_repos = repo.helm_repos.unwrap_or_default();
         let build = check_build(repo_file, repo.build)?;
 
+        let before = warnings.len();
         let mut targets = Vec::new();
         for entry in read_entries(&dir, shown, "targets", "target.yaml", &mut warnings)? {
             let TargetFile { target } = yaml::read_file(&entry.path, &entry.file)?;
@@ -190,6 +195,7 @@ impl RepoConfig {
             });
         }
 
+        let skipped = warnings[before..].to_vec();
         let blueprints = read_entries(&dir, shown, "blueprints", "blueprint.yaml", &mut warnings)?
             .iter()
             .map(Blueprint::load)
@@ -204,6 +210,7 @@ impl RepoConfig {
             targets,
             units,
             blueprints,
+            skipped,
             warnings,
         })
     }

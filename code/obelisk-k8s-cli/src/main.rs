@@ -6,7 +6,7 @@ use clap::error::ErrorKind;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 use obelisk_k8s::ObeliskK8sError;
-use obelisk_k8s::config::apply::Takeover;
+use obelisk_k8s::config::apply::{Prune, Takeover};
 use obelisk_k8s::config::diff::DiffOptions;
 use obelisk_k8s::config::global::edit::NewCluster;
 use obelisk_k8s::config::global::{GLOBAL_ROOT_ENV, K8s, Location, Obeliskd};
@@ -76,6 +76,14 @@ enum Command {
         /// keeps); a one-off: it fights what the cluster manages, like an HPA's replicas
         #[arg(long)]
         force_conflicts: bool,
+        /// Uninstall the releases of units that are gone (labelled with this repo and a selected
+        /// target, and its ephemeral copy, but no longer in the repo for it) before applying;
+        /// needed, or `--no-prune`, whenever there are any. Local clusters only, for now
+        #[arg(long, conflicts_with = "no_prune")]
+        prune: bool,
+        /// Leave the releases of units that are gone (see `--prune`)
+        #[arg(long)]
+        no_prune: bool,
     },
     /// Show what `apply` would change, per unit on each target, against what's live on its
     /// cluster (with the helm-diff plugin); changes nothing
@@ -682,6 +690,8 @@ fn main_impl() -> Result<ExitCode, ObeliskK8sError> {
             yes,
             take_ownership,
             force_conflicts,
+            prune,
+            no_prune,
         } => commands::run_apply(
             repo.as_deref(),
             cli.global_root,
@@ -691,6 +701,7 @@ fn main_impl() -> Result<ExitCode, ObeliskK8sError> {
                 take_ownership,
                 force_conflicts,
             },
+            Prune::from_flags(prune, no_prune),
         ),
         // The one command whose exit code says more than whether it failed.
         Command::Diff {
