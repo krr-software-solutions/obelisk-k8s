@@ -109,18 +109,21 @@ ip-allocator.
   `blueprint.yaml`, in the env's checkout; both `null` outside an env), so a build file can list
   values files in the blueprint repo (missing ones are skipped, as ever); for an ephemeral
   blueprint the copy is `env.ephemeral`, with **no** ephemeral values (tentative); and the release
-  labels `obelisk-k8s/env` and `obelisk-k8s/blueprint`. `diff` and `apply` plan every unit before
-  touching the cluster (two units that would be the same release are an error). `apply` then, in
-  order: checks release ownership (**Release ownership**, below); finds the env's releases whose
-  unit left the blueprint (labelled `obelisk-k8s/env=<NAME>` on any local cluster, but not in the
-  plan, so a blueprint that's emptied or moved cluster still finds them; a cluster it can't look on
-  is a `WARN`), which need `--prune` or `--no-prune` (an error now, before anything builds; remote
-  clusters aren't looked on, for now: an env on one is a `WARN`); builds and delivers every unit's images (as
-  `images build` does, from each checkout; a tag already in the local docker daemon isn't rebuilt,
-  still delivered. TODO (fast-follow): that trusts the tag to name its contents, fine for
-  `0.0.0-<sha>`, stale for a fixed version, and k3d still re-imports what it already has);
-  uninstalls what it prunes; installs, dependencies first; and removes the checkouts it no longer
-  pins.
+  labels `obelisk-k8s/env` and `obelisk-k8s/blueprint`. `diff` plans every unit before touching the
+  cluster (two units that would be the same release are an error), so a unit whose build needs
+  another installed (e.g. an app token from its API) can't be diffed on a fresh copy. `apply`
+  first finds the env's releases whose unit left the blueprint (labelled `obelisk-k8s/env=<NAME>`
+  on any local cluster, with `repo/target/unit` labels naming no unit of it, so a blueprint that's
+  emptied or moved cluster still finds them; a cluster it can't look on is a `WARN`), which need
+  `--prune` or `--no-prune` (an error now, before anything changes; remote clusters aren't looked
+  on, for now: an env on one is a `WARN`), and uninstalls what it prunes. Then it goes **unit by
+  unit, dependencies first, planning each only once what it depends on is installed**: plan, check
+  no earlier unit is the same release, check release ownership (**Release ownership**, below),
+  build and deliver its images (as `images build` does, from its checkout; a tag already in the
+  local docker daemon isn't rebuilt, still delivered. TODO (fast-follow): that trusts the tag to
+  name its contents, fine for `0.0.0-<sha>`, stale for a fixed version, and k3d still re-imports
+  what it already has), install. A unit that fails stops it, with the units before it installed.
+  Last, it removes the checkouts it no longer pins.
 - `obelisk-k8s env down <NAME>`: takes an env down, even one whose file is gone: uninstalls every
   release labelled `obelisk-k8s/env=<NAME>` on each local cluster with a kubectl context (one it
   can't look on, e.g. stopped, is a `WARN`; remote clusters aren't looked on, for now, which is a

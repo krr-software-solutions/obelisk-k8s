@@ -1021,16 +1021,10 @@ mod tests {
             .resolve_env("e1", &mut Fetcher::new(false), &mut |_| {})
             .unwrap();
         let ssm = crate::ssm::Ssm::with_fetch(Box::new(|_| panic!("no refs here")));
-        // It fails while planning, before anything looks at a cluster.
+        // As `env diff` plans: every unit before any is installed, so it fails before a cluster.
+        let rendering = plan.rendering();
         let error = plan
-            .apply(
-                &global,
-                false,
-                &ssm,
-                crate::config::apply::Prune::Unset,
-                |_| {},
-                |_| {},
-            )
+            .plan_all(&rendering, &global, false, &ssm, &mut |_| {})
             .unwrap_err()
             .to_string();
         assert!(

@@ -11,15 +11,17 @@
 //!   values come from the blueprint repo);
 //! - the release labels `obelisk-k8s/env` and `obelisk-k8s/blueprint`.
 //!
-//! `diff` and `apply` plan every unit before touching a cluster (two units that would be the same
-//! release are an error). `apply` then, before building or changing anything, checks that no
-//! release it would install belongs to someone else (another env, or a plain `apply`), and finds
-//! the env's releases whose unit left its blueprint (labelled with the env, on any local cluster,
-//! but not in the plan: they need `--prune` or `--no-prune`; remote clusters aren't looked on, for
-//! now, which is a warning). Then it builds and delivers every unit's images (TODO, fast-follow: a
-//! tag already built locally isn't rebuilt, which trusts the tag to name its contents; see
-//! `images_push`), uninstalls what it prunes, installs unit by unit, dependencies first, and
-//! removes the checkouts it no longer pins.
+//! `diff` plans every unit before touching a cluster (two units that would be the same release
+//! are an error). `apply` first finds the env's releases whose unit left its blueprint (labelled
+//! with the env, on any local cluster, but whose `repo/target/unit` labels name no unit of it: they
+//! need `--prune` or `--no-prune`, decided before anything changes; remote clusters aren't looked
+//! on, for now, which is a warning) and uninstalls what it prunes. Then it goes unit by unit,
+//! dependencies first, planning each only once what it depends on is installed (a unit's build may
+//! call another's API, e.g. for an app token): plan, check no other unit is the same release, check
+//! no release it'd install belongs to someone else (another env, or a plain `apply`), build and
+//! deliver its images (TODO, fast-follow: a tag already built locally isn't rebuilt, which trusts
+//! the tag to name its contents; see `images_push`), install. Last, it removes the checkouts it no
+//! longer pins. So a unit that fails to render stops `apply` after the units before it are in.
 //!
 //! `env down` undoes an env, even one whose file is gone: it uninstalls every release labelled
 //! with it (on the local clusters, for now) and removes its checkouts. The env's file stays.
@@ -32,7 +34,7 @@ use std::path::PathBuf;
 use crate::ObeliskK8sError;
 use crate::config::apply::{
     self, ApplyReport, ENV, Orphan, Planned, Prune, Takeover, check_owners, check_unique,
-    decide_prune, installs, is_local, not_installed,
+    decide_prune, is_local,
 };
 use crate::config::diff::{self, DiffOptions, DiffReport};
 use crate::config::env::{EnvInstance, EnvPlan, EnvUnit};
@@ -53,7 +55,7 @@ pub enum EnvTemplate {
 
 /// What an env's units render with: the env as they see it, and its copy (its `ephemeral` name,
 /// without values).
-struct Rendering {
+pub(crate) struct Rendering {
     env: EnvInstance,
     copy: Option<Ephemeral>,
 }
@@ -68,7 +70,7 @@ impl Rendering {
 }
 
 impl EnvPlan {
-    fn rendering(&self) -> Rendering {
+    pub(crate) fn rendering(&self) -> Rendering {
         Rendering {
             env: self.instance(),
             copy: self.env.ephemeral.as_ref().map(|name| {
@@ -86,9 +88,9 @@ impl EnvPlan {
         Ok((config, config.select_one(&unit.id.target, &unit.id.unit)?))
     }
 
-    /// Every unit planned (rendered and checked, as `apply` plans), dependencies first; two
-    /// units that would be the same release are an error.
-    fn plan_all<'a>(
+    /// Every unit planned (rendered and checked, as `apply` plans), dependencies first, before any
+    /// is installed (`diff`); two units that would be the same release are an error.
+    pub(crate) fn plan_all<'a>(
         &'a self,
         rendering: &Rendering,
         global: &GlobalConfig,
@@ -206,20 +208,52 @@ impl EnvPlan {
                 self.env.name
             ));
         }
-        let rendering = self.rendering();
-        let plan = self.plan_all(&rendering, global, remote_ok, ssm, &mut warn)?;
-        check_owners(&plan, Some(&self.env.name))?;
+        // Decided before anything changes: what's left of units that left the blueprint.
         // `--no-prune` leaves them, so there's no need to look.
         let orphans = if prune == Prune::Keep {
             Vec::new()
         } else {
-            env_orphans(&self.env.name, global, &plan, &mut warn)?
+            let ids: HashSet<String> = self.units.iter().map(|u| u.id.to_string()).collect();
+            env_orphans(&self.env.name, global, &ids, &mut warn)?
         };
         let whose = format!("units that left env `{}`'s blueprint", self.env.name);
         let doomed = decide_prune(orphans, prune, &whose)?;
+        let pruned = apply::uninstall(doomed, &mut progress)?;
 
+        // Unit by unit, dependencies first: each planned only once what it depends on is
+        // installed (its build may call it: e.g. an app token from another unit's API).
+        let rendering = self.rendering();
+        let mut releases: HashSet<(String, String, String)> = HashSet::new();
+        let mut applied = Vec::new();
         for unit in &self.units {
             let (config, selection) = self.case_of(unit)?;
+            progress(&format!("planning unit `{}`...", unit.id));
+            let plan = config.plan(
+                &unit.at.checkout,
+                &selection,
+                None,
+                rendering.instance(),
+                global,
+                remote_ok,
+                ssm,
+                &mut warn,
+            )?;
+            for p in &plan {
+                if let Some(r) = &p.case.release {
+                    let key = (
+                        p.context.clone(),
+                        r.release_name.clone(),
+                        r.namespace.clone(),
+                    );
+                    if !releases.insert(key) {
+                        return Err(ObeliskK8sError::Usage(format!(
+                            "unit `{}` would be release `{}` in namespace `{}` on `{}`, which an earlier unit of env `{}` already is: give them different release names or namespaces",
+                            unit.id, r.release_name, r.namespace, p.context, self.env.name
+                        )));
+                    }
+                }
+            }
+            check_owners(&plan, Some(&self.env.name))?;
             config.images_push(
                 &unit.at.checkout,
                 &selection,
@@ -232,30 +266,40 @@ impl EnvPlan {
                 &mut warn,
                 &mut progress,
             )?;
+            applied.extend(apply::install(plan, Takeover::default(), &mut progress)?);
         }
-        let pruned = apply::uninstall(doomed, &mut progress)?;
-        let applied = apply::install(plan, Takeover::default(), &mut progress)?;
         global.remove_checkouts_except(&self.env.name, &self.checkouts(), &mut progress)?;
         Ok(ApplyReport { pruned, applied })
     }
 }
 
-/// Env `env`'s releases (labelled with it) on every local cluster that `plan` doesn't install:
-/// their units left its blueprint (or it moved cluster). A cluster it can't look on (e.g. stopped)
-/// is a warning.
+/// Env `env`'s releases (labelled with it) on every local cluster whose unit (its
+/// `obelisk-k8s/{repo,target,unit}` labels) isn't one of `units` (as `repo/target/unit`): it left
+/// the blueprint. A cluster it can't look on (e.g. stopped) is a warning.
 fn env_orphans(
     env: &str,
     global: &GlobalConfig,
-    plan: &[Planned<'_>],
+    units: &HashSet<String>,
     warn: &mut dyn FnMut(&str),
 ) -> Result<Vec<Orphan>, ObeliskK8sError> {
-    let installs = installs(plan);
     let mut orphans = Vec::new();
-    for (context, listed) in not_installed(env_releases(env, global, warn), &installs) {
+    for (context, listed) in env_releases(env, global, warn) {
         let labels = helm::release_labels(&context, &listed)?;
-        orphans.push(Orphan::of(listed, labels.as_ref(), &context));
+        let orphan = Orphan::of(listed, labels.as_ref(), &context);
+        if left_blueprint(&orphan, units) {
+            orphans.push(orphan);
+        }
     }
     Ok(orphans)
+}
+
+/// Whether `release`'s unit (from its labels) isn't one of `units`; one whose labels don't say is
+/// taken as gone (it's the env's, but no unit of it now).
+fn left_blueprint(release: &Orphan, units: &HashSet<String>) -> bool {
+    !units.contains(&format!(
+        "{}/{}/{}",
+        release.repo, release.target, release.unit
+    ))
 }
 
 /// Every release labelled with env `env` on each local cluster with a kubectl context, with that
@@ -369,5 +413,34 @@ impl GlobalConfig {
             })?;
         }
         Ok(report)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn release(repo: &str, target: &str, unit: &str) -> Orphan {
+        Orphan {
+            repo: repo.to_owned(),
+            target: target.to_owned(),
+            unit: unit.to_owned(),
+            release: unit.to_owned(),
+            namespace: "ns".to_owned(),
+            context: "k3d-c".to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_release_is_gone_when_its_unit_left_the_blueprint() {
+        let units: HashSet<String> = ["app/local/a".to_owned()].into();
+        assert!(!left_blueprint(&release("app", "local", "a"), &units));
+        assert!(left_blueprint(&release("app", "local", "b"), &units));
+        assert!(
+            left_blueprint(&release("app", "other", "a"), &units),
+            "moved target"
+        );
+        // Labels that don't say which unit: the env's, but no unit of it now.
+        assert!(left_blueprint(&release("?", "?", "?"), &units));
     }
 }
