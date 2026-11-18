@@ -8,6 +8,7 @@ use crate::error::LineCol;
 use crate::yaml::Spanned;
 
 pub mod apply;
+pub mod blueprint;
 pub mod build;
 pub mod diff;
 pub mod ephemeral;

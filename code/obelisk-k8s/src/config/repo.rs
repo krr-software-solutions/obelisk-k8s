@@ -5,6 +5,7 @@
 //!   repo.yaml                 repo: { name, helmRepos, build }
 //!   targets/<name>/target.yaml target: { cluster, release: { name, namespace, version }, ephemeral }
 //!   units/<name>/unit.yaml     unit: { targets, release: { name, namespace, version }, build }
+//!   blueprints/<name>/blueprint.yaml   blueprint: { ephemeral, defaults: { ref }, units } (see `blueprint`)
 //! ```
 //!
 //! `build` is the path to a unit's build file: a Go template that renders, per target, the phases that
@@ -27,6 +28,7 @@ use serde::Deserialize;
 use serde::de::IgnoredAny;
 
 use crate::ObeliskK8sError;
+use crate::config::blueprint::Blueprint;
 use crate::config::{check_name, config_error, dir_name, read_entries};
 use crate::interp::{InterpString, StringPart, Var};
 use crate::yaml::{self, Spanned};
@@ -49,6 +51,8 @@ pub struct RepoConfig {
     pub targets: Vec<Target>,
     /// Sorted by name.
     pub units: Vec<Unit>,
+    /// Sorted by name.
+    pub blueprints: Vec<Blueprint>,
     /// Things that look wrong but don't stop the load (e.g. a stray file in `units/`), in path order.
     pub warnings: Vec<String>,
 }
@@ -186,6 +190,11 @@ impl RepoConfig {
             });
         }
 
+        let blueprints = read_entries(&dir, shown, "blueprints", "blueprint.yaml", &mut warnings)?
+            .iter()
+            .map(Blueprint::load)
+            .collect::<Result<Vec<_>, _>>()?;
+
         targets.sort_by(|a, b| a.name.cmp(&b.name));
         units.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(Self {
@@ -194,8 +203,32 @@ impl RepoConfig {
             build,
             targets,
             units,
+            blueprints,
             warnings,
         })
+    }
+
+    /// The blueprint named `name`.
+    ///
+    /// # Errors
+    ///
+    /// [`ObeliskK8sError::Usage`] if there's none, naming the ones there are.
+    pub fn blueprint(&self, name: &str) -> Result<&Blueprint, ObeliskK8sError> {
+        self.blueprints
+            .iter()
+            .find(|b| b.name == name)
+            .ok_or_else(|| {
+                let known: Vec<_> = self.blueprints.iter().map(|b| b.name.as_str()).collect();
+                let known = if known.is_empty() {
+                    "none".to_owned()
+                } else {
+                    known.join(", ")
+                };
+                ObeliskK8sError::Usage(format!(
+                    "repo `{}` has no blueprint `{name}` (it has: {known})",
+                    self.name
+                ))
+            })
     }
 
     /// The targets `unit` deploys to, in the repo's target order.
@@ -263,6 +296,11 @@ impl fmt::Display for RepoConfig {
                 "  (the repo's)"
             };
             writeln!(f, "    build: {build}{whose}")?;
+        }
+
+        writeln!(f, "\nblueprints:{}", none_if(self.blueprints.is_empty()))?;
+        for blueprint in &self.blueprints {
+            write!(f, "{blueprint}")?;
         }
         Ok(())
     }
@@ -1000,7 +1038,8 @@ mod tests {
             "repo: repo-1\nhelm repos: (none)\nbuild: ./build.yaml.gotmpl\n\
              \ntargets:\n  prod:  (.obelisk-k8s/targets/prod/target.yaml)\n    cluster: homelab-1\n\
              \nunits:\n  app:  (.obelisk-k8s/units/app/unit.yaml)\n    targets: all: prod\n    build: ./build.yaml.gotmpl  (the repo's)\n\
-             \x20 web:  (.obelisk-k8s/units/web/unit.yaml)\n    targets: all: prod\n    build: ${{obelisk:path:unit}}/build.yaml.gotmpl\n"
+             \x20 web:  (.obelisk-k8s/units/web/unit.yaml)\n    targets: all: prod\n    build: ${{obelisk:path:unit}}/build.yaml.gotmpl\n\
+             \nblueprints: (none)\n"
         );
     }
 }

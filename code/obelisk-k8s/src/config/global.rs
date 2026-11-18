@@ -58,6 +58,7 @@ pub struct Repo {
     pub from: String,
     pub targets: Vec<RepoTarget>,
     pub units: Vec<String>,
+    pub blueprints: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -248,6 +249,7 @@ fn load_repos(
                 from: entry.value.clone(),
                 targets: targets.collect(),
                 units: config.units.into_iter().map(|u| u.name).collect(),
+                blueprints: config.blueprints.into_iter().map(|b| b.name).collect(),
                 path,
             });
         }
@@ -330,6 +332,9 @@ impl fmt::Display for GlobalConfig {
                 .collect();
             writeln!(f, "    targets: {}", list(&targets))?;
             writeln!(f, "    units: {}", list(&repo.units))?;
+            if !repo.blueprints.is_empty() {
+                writeln!(f, "    blueprints: {}", list(&repo.blueprints))?;
+            }
         }
 
         writeln!(
