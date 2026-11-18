@@ -12,6 +12,7 @@ pub mod blueprint;
 pub mod build;
 pub mod diff;
 pub mod env;
+pub mod env_run;
 pub mod ephemeral;
 pub mod global;
 pub mod images;

@@ -16,7 +16,9 @@
 //! blueprint is, and they all deploy to one cluster, which is in the global config.
 //!
 //! Each env has its own checkouts, `envs/target/<env>/<repo>/<sha>/`, so what's there is what it
-//! has pinned. Resolving only adds them.
+//! has pinned. Resolving only adds them; `env apply` removes the ones it no longer pins (after it
+//! applies), and `env down` all of them. So `env show` / `template` / `diff` never delete one, and
+//! can't pull a checkout out from under an `env apply` building from it.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -321,6 +323,50 @@ impl GlobalConfig {
         })
     }
 
+    /// Removes every checkout under env `env`'s directory that isn't in `keep`, and any repo
+    /// directory left empty: what `env apply` no longer pins, or (with nothing kept) all of them,
+    /// for `env down`.
+    pub(crate) fn remove_checkouts_except(
+        &self,
+        env: &str,
+        keep: &HashSet<PathBuf>,
+        progress: &mut dyn FnMut(&str),
+    ) -> Result<Vec<PathBuf>, ObeliskK8sError> {
+        let mut pruned = Vec::new();
+        for repo_dir in read_dir(&checkout::env_dir(&self.dir, env))? {
+            let Some(repo) = repo_dir.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if repo.starts_with('.') || !repo_dir.is_dir() {
+                continue;
+            }
+            let git_dir = self
+                .repos
+                .iter()
+                .find(|r| r.name == repo)
+                .map(|r| r.path.as_path());
+            for sha_dir in read_dir(&repo_dir)? {
+                let is_checkout = sha_dir
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(checkout::is_full_sha);
+                if !is_checkout || keep.contains(&sha_dir) {
+                    continue;
+                }
+                checkout::remove_checkout(git_dir, &sha_dir)?;
+                progress(&format!("removing checkout {}...", sha_dir.display()));
+                pruned.push(sha_dir);
+            }
+            if read_dir(&repo_dir)?.is_empty() {
+                std::fs::remove_dir(&repo_dir).map_err(|source| ObeliskK8sError::Io {
+                    path: repo_dir.clone(),
+                    source,
+                })?;
+            }
+        }
+        Ok(pruned)
+    }
+
     /// Resolves `git_ref` in repo `repo`, and checks the commit out.
     fn pin(
         &self,
@@ -347,6 +393,24 @@ impl GlobalConfig {
             new,
         })
     }
+}
+
+/// The entries of `dir`, sorted (none if it's missing).
+pub(crate) fn read_dir(dir: &Path) -> Result<Vec<PathBuf>, ObeliskK8sError> {
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let io = |source| ObeliskK8sError::Io {
+        path: dir.to_owned(),
+        source,
+    };
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map_err(io)?
+        .map(|e| e.map(|e| e.path()))
+        .collect::<Result<_, _>>()
+        .map_err(io)?;
+    paths.sort();
+    Ok(paths)
 }
 
 /// The config of repo `repo` at `at`'s checkout (loaded once), which must call itself `repo`.
@@ -689,6 +753,41 @@ mod tests {
         assert_ne!(moved.units[0].at.checkout, old);
         // Resolving (`env show` / `template` / `diff`) never removes one.
         assert!(old.is_dir());
+        // `env apply` removes what it no longer pins, once it's applied.
+        let removed = global
+            .remove_checkouts_except("e1", &moved.checkouts(), &mut |_| {})
+            .unwrap();
+        assert_eq!(removed, std::slice::from_ref(&old));
+        assert!(!old.exists());
+        assert!(e2.is_dir(), "another env's checkout is left alone");
+        // Its repo forgot the worktree.
+        let listed = run(&app, &["worktree", "list", "--porcelain"]);
+        assert!(!listed.contains(old.to_str().unwrap()), "{listed}");
+    }
+
+    #[test]
+    fn down_removes_the_checkouts_even_without_the_env_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let (app, bps) = fixture(d);
+        let env = "env:\n  repo: bps\n  blueprint: bp\n  ref: main\n  ephemeral: x\n";
+        let global = global(d, &[&app, &bps], &[("e1", env)]);
+        let plan = global
+            .resolve_env("e1", &mut Fetcher::new(false), &mut |_| {})
+            .unwrap();
+        let checkout = plan.units[0].at.checkout.clone();
+        std::fs::remove_file(global.dir.join("envs/e1.yaml")).unwrap();
+        let mut gone = GlobalConfig::load(&global.dir, None).unwrap();
+        // No clusters, so no `helm` runs: this only takes the checkouts down.
+        gone.clusters.clear();
+        let report = gone.env_down("e1", &mut |_| {}).unwrap();
+        assert!(report.uninstalled.is_empty(), "{:?}", report.uninstalled);
+        assert_eq!(report.removed.len(), 2, "{:?}", report.removed);
+        assert!(!checkout.exists());
+        assert!(!gone.dir.join("envs/target/e1").exists());
+        let listed = run(&app, &["worktree", "list", "--porcelain"]);
+        assert!(!listed.contains(checkout.to_str().unwrap()), "{listed}");
+        assert!(gone.env_down("Nope", &mut |_| {}).is_err());
     }
 
     #[test]
@@ -879,6 +978,65 @@ mod tests {
             "{error}"
         );
         assert!(error.contains(work.to_str().unwrap()), "{error}");
+    }
+
+    #[test]
+    fn env_template_renders_each_unit_with_the_env() {
+        if !crate::config::test_support::helm_installed() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let (app, bps) = fixture(d);
+        let env = "env:\n  repo: bps\n  blueprint: bp\n  ref: main\n  ephemeral: x\n";
+        let global = global(d, &[&app, &bps], &[("e1", env)]);
+        let plan = global
+            .resolve_env("e1", &mut Fetcher::new(false), &mut |_| {})
+            .unwrap();
+        let text = plan
+            .template(
+                &global,
+                crate::config::env_run::EnvTemplate::Manifests,
+                |_| {},
+            )
+            .unwrap();
+        // Dependencies first: `a` before `b`, each from its checkout, seeing the env.
+        let a = text.find("unit=app/local/a").expect(&text);
+        let b = text.find("unit=app/local/b").expect(&text);
+        assert!(a < b, "{text}");
+        assert_eq!(text.matches("env: \"e1\"").count(), 2, "{text}");
+    }
+
+    #[test]
+    fn two_units_of_an_env_cant_be_one_release() {
+        if !crate::config::test_support::helm_installed() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let (app, bps) = fixture(d);
+        let env = "env:\n  repo: bps\n  blueprint: dup\n  ref: main\n  ephemeral: x\n";
+        let global = global(d, &[&app, &bps], &[("e1", env)]);
+        let plan = global
+            .resolve_env("e1", &mut Fetcher::new(false), &mut |_| {})
+            .unwrap();
+        let ssm = crate::ssm::Ssm::with_fetch(Box::new(|_| panic!("no refs here")));
+        // It fails while planning, before anything looks at a cluster.
+        let error = plan
+            .apply(
+                &global,
+                false,
+                &ssm,
+                crate::config::apply::Prune::Unset,
+                |_| {},
+                |_| {},
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("would both be release `x` in namespace `ns`"),
+            "{error}"
+        );
     }
 
     #[test]

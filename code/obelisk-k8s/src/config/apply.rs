@@ -151,6 +151,13 @@ pub(crate) fn decide_prune(
     }
 }
 
+/// Whether cluster `name` is in `global` and local.
+pub(crate) fn is_local(global: &GlobalConfig, name: &str) -> bool {
+    global
+        .cluster(name)
+        .is_ok_and(|c| c.location == Location::Local)
+}
+
 /// Why installing over an existing release (its labels: `None` if there's none) would take it
 /// from its owner, if it would: as part of env `env` (`None`: a plain `apply`). A plain `apply`
 /// never takes an env's release; an env only takes its own (not one applied outside it, nor

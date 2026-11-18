@@ -148,8 +148,8 @@ enum Command {
 enum EnvCommand {
     /// Resolve an env: pin its blueprint's and units' refs to commits (fetching each repo at most
     /// once, before a remote candidate in it), check each commit out under
-    /// `envs/target/<env>/<repo>/<sha>/` (adding, never removing), check the units against their
-    /// repos at those commits, and print the plan, dependencies first
+    /// `envs/target/<env>/<repo>/<sha>/` (adding, never removing: `env apply` and `env down` do),
+    /// check the units against their repos at those commits, and print the plan, dependencies first
     Show {
         /// The env, by its file name in `envs/` (without `.yaml`)
         name: String,
@@ -157,6 +157,68 @@ enum EnvCommand {
         #[arg(long)]
         no_fetch: bool,
     },
+    /// Render a stage of every unit of an env (resolved as `env show` does), each from its
+    /// checkout, with `obelisk.env` and `obelisk.paths.blueprint` set, dependencies first
+    Template {
+        /// The stage: `build`, `values` or `manifests` (as `template …`)
+        #[arg(value_enum)]
+        stage: EnvStageArg,
+        /// The env, by its file name in `envs/` (without `.yaml`)
+        name: String,
+        /// Don't fetch (see `env show`)
+        #[arg(long)]
+        no_fetch: bool,
+    },
+    /// Show what `env apply` would change, unit by unit (with the helm-diff plugin); changes nothing
+    Diff {
+        /// The env, by its file name in `envs/` (without `.yaml`)
+        name: String,
+        /// Don't fetch (see `env show`)
+        #[arg(long)]
+        no_fetch: bool,
+        /// Print resolved SSM values, and Secrets' data, in plaintext, not masked
+        #[arg(long)]
+        reveal: bool,
+        /// Exit with 2 if anything would change (0 if nothing would; errors exit with 1)
+        #[arg(long)]
+        exit_code: bool,
+    },
+    /// Apply every unit of an env (resolved as `env show` does), each from its checkout,
+    /// dependencies first, after planning them all; releases are labelled `obelisk-k8s/env` and
+    /// `obelisk-k8s/blueprint` too
+    Apply {
+        /// The env, by its file name in `envs/` (without `.yaml`)
+        name: String,
+        /// Don't fetch (see `env show`)
+        #[arg(long)]
+        no_fetch: bool,
+        /// Apply to a remote cluster (without it, a remote one is an error)
+        #[arg(long)]
+        yes: bool,
+        /// Uninstall the releases of units that left the env's blueprint (labelled with the env, but
+        /// not in its plan) before applying; needed, or `--no-prune`, whenever there are any.
+        /// Local clusters only, for now
+        #[arg(long, conflicts_with = "no_prune")]
+        prune: bool,
+        /// Leave the releases of units that left the env's blueprint (see `--prune`)
+        #[arg(long)]
+        no_prune: bool,
+    },
+    /// Take an env down, even one whose file is gone: uninstall every release labelled with it (on
+    /// the local clusters, for now), and remove its checkouts. Its file stays: `env apply` brings
+    /// it back
+    Down {
+        /// The env's name (its file name in `envs/`, without `.yaml`, if it still has one)
+        name: String,
+    },
+}
+
+/// A stage for `env template`.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum EnvStageArg {
+    Build,
+    Values,
+    Manifests,
 }
 
 #[derive(Debug, Subcommand)]

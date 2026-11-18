@@ -7,6 +7,7 @@ use std::process::ExitCode;
 use obelisk_k8s::checkout::Fetcher;
 use obelisk_k8s::config::apply::{Prune, Takeover};
 use obelisk_k8s::config::diff::DiffOptions;
+use obelisk_k8s::config::env_run::EnvTemplate;
 use obelisk_k8s::config::ephemeral::{Ephemeral, EphemeralValues};
 use obelisk_k8s::config::global::edit::{self as global_edit, Change};
 use obelisk_k8s::config::global::{GLOBAL_ROOT_ENV, GlobalConfig, default_global_root, tilde};
@@ -17,9 +18,9 @@ use obelisk_k8s::ssm::Ssm;
 use obelisk_k8s::{ObeliskK8sError, cluster};
 
 use crate::{
-    ClusterCommand, DockerCommand, DockerPullCommand, DockerPushCommand, EnvCommand, EphemeralArgs,
-    GlobalCommand, GlobalRepoCommand, ImagesCommand, ManagedClusterCommand, TemplateArgs,
-    TemplateCommand,
+    ClusterCommand, DockerCommand, DockerPullCommand, DockerPushCommand, EnvCommand, EnvStageArg,
+    EphemeralArgs, GlobalCommand, GlobalRepoCommand, ImagesCommand, ManagedClusterCommand,
+    TemplateArgs, TemplateCommand,
 };
 
 fn cwd() -> Result<PathBuf, ObeliskK8sError> {
@@ -385,8 +386,70 @@ pub fn run_env(root: Option<PathBuf>, command: &EnvCommand) -> Result<ExitCode, 
         let mut fetcher = Fetcher::new(!no_fetch);
         config.resolve_env(name, &mut fetcher, &mut |step| eprintln!("{step}"))
     };
-    let EnvCommand::Show { name, no_fetch } = command;
-    print!("{}", resolve(name, *no_fetch)?);
+    match command {
+        EnvCommand::Show { name, no_fetch } => print!("{}", resolve(name, *no_fetch)?),
+        EnvCommand::Template {
+            stage,
+            name,
+            no_fetch,
+        } => {
+            let stage = match stage {
+                EnvStageArg::Build => EnvTemplate::Build,
+                EnvStageArg::Values => EnvTemplate::Values,
+                EnvStageArg::Manifests => EnvTemplate::Manifests,
+            };
+            let text = resolve(name, *no_fetch)?.template(&config, stage, warn_one)?;
+            anstream::print!("{text}");
+        }
+        EnvCommand::Diff {
+            name,
+            no_fetch,
+            reveal,
+            exit_code,
+        } => {
+            let plan = resolve(name, *no_fetch)?;
+            let ssm = Ssm::from_env();
+            if *reveal {
+                eprintln!(
+                    "WARN - --reveal: resolved SSM values and Secrets' data are printed in plaintext"
+                );
+            }
+            let options = DiffOptions {
+                take_ownership: false,
+                show_secrets: *reveal,
+            };
+            let report = plan
+                .diff(&config, options, &ssm, warn_one, |step| eprintln!("{step}"))
+                .map_err(|e| if *reveal { e } else { ssm.redact_error(e) })?;
+            let text = report.to_string();
+            anstream::print!("{}", if *reveal { text } else { ssm.redact(&text) });
+            if *exit_code && report.changed() {
+                return Ok(ExitCode::from(2));
+            }
+        }
+        EnvCommand::Apply {
+            name,
+            no_fetch,
+            yes,
+            prune,
+            no_prune,
+        } => {
+            let plan = resolve(name, *no_fetch)?;
+            let ssm = Ssm::from_env();
+            let prune = Prune::from_flags(*prune, *no_prune);
+            let report = plan
+                .apply(&config, *yes, &ssm, prune, warn_one, |step| {
+                    eprintln!("{step}");
+                })
+                .map_err(|e| ssm.redact_error(e))?;
+            print!("{}", ssm.redact(&report.to_string()));
+        }
+        EnvCommand::Down { name } => {
+            let report = config.env_down(name, &mut |step| eprintln!("{step}"))?;
+            warn(&report.warnings);
+            print!("{report}");
+        }
+    }
     Ok(ExitCode::SUCCESS)
 }
 
@@ -520,6 +583,7 @@ fn run_images_build(
             &global,
             images,
             &ssm,
+            false,
             warn_one,
             step,
         )

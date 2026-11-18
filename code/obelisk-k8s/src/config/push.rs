@@ -179,7 +179,8 @@ fn plan<'g, 'a>(
 
 impl RepoConfig {
     /// Builds and delivers the images of every case in `selection` (only those named `only`, if
-    /// any) to each case's target's cluster. `ssm` resolves push credentials' refs; `shown_root`,
+    /// any) to each case's target's cluster; with `skip_built`, a tag already in the local docker
+    /// daemon isn't built again (it's still delivered). `ssm` resolves push credentials' refs; `shown_root`,
     /// `warn` and `step` are as for [`RepoConfig::images_build`].
     ///
     /// Everything that can fail without building is checked first: every case's destination, and
@@ -201,6 +202,7 @@ impl RepoConfig {
         global: &'g GlobalConfig,
         only: &[String],
         ssm: &Ssm,
+        skip_built: bool,
         warn: impl FnMut(&str),
         mut step: impl FnMut(&str),
     ) -> Result<PushedImages<'a>, ObeliskK8sError> {
@@ -230,6 +232,16 @@ impl RepoConfig {
         let mut user = None;
 
         for (tag, image, _) in &builds {
+            // TODO: a tag that's already built is trusted as it is: right when its version names
+            // the commit (e.g. `0.0.0-<sha>`), stale when it doesn't (a fixed `0.0.1`). Telling
+            // those apart (e.g. a label with the commit, checked here) is a fast-follow; so is not
+            // importing into k3d what the cluster already has.
+            if skip_built && crate::docker::exists_locally(tag) {
+                step(&format!(
+                    "Image `{tag}` is already built locally: not rebuilding it"
+                ));
+                continue;
+            }
             build_one(tag, image, repo_root, &mut step)?;
         }
 
@@ -538,6 +550,7 @@ mod tests {
                 &global,
                 &[],
                 &ssm,
+                false,
                 |_| {},
                 |_| {},
             )

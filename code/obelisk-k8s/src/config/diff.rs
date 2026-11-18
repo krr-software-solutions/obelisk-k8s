@@ -113,35 +113,45 @@ impl RepoConfig {
         let plan = self.plan(
             repo_root, selection, shown_root, instance, global, true, ssm, warn,
         )?;
-        let mut diffs = Vec::new();
-        for Planned { case, context, .. } in plan {
-            let diff = match &case.release {
-                Some(release) => {
-                    progress(&format!(
-                        "diffing unit `{}` on target `{}` against `{context}`...",
-                        case.unit, case.target
-                    ));
-                    // A refusal `apply` would hit too: point at the flag that gets past it (diff
-                    // has no `--force-conflicts`).
-                    let takeover = Takeover {
-                        take_ownership: options.take_ownership,
-                        force_conflicts: true,
-                    };
-                    diff_case(release, &case.manifests, &context, options)
-                        .map_err(|error| takeover_hint(takeover, error))?
-                }
-                None => String::new(),
-            };
-            diffs.push(Diffed {
-                target: case.target,
-                unit: case.unit,
-                release: case.release,
-                context,
-                diff,
-            });
-        }
+        let diffs = diff_planned(plan, options, &mut progress)?;
         Ok(DiffReport { diffs })
     }
+}
+
+/// Diffs each case of `plan` against what's live, in order.
+pub(crate) fn diff_planned<'a>(
+    plan: Vec<Planned<'a>>,
+    options: DiffOptions,
+    progress: &mut dyn FnMut(&str),
+) -> Result<Vec<Diffed<'a>>, ObeliskK8sError> {
+    let mut diffs = Vec::new();
+    for Planned { case, context, .. } in plan {
+        let diff = match &case.release {
+            Some(release) => {
+                progress(&format!(
+                    "diffing unit `{}` on target `{}` against `{context}`...",
+                    case.unit, case.target
+                ));
+                // A refusal `apply` would hit too: point at the flag that gets past it (diff
+                // has no `--force-conflicts`).
+                let takeover = Takeover {
+                    take_ownership: options.take_ownership,
+                    force_conflicts: true,
+                };
+                diff_case(release, &case.manifests, &context, options)
+                    .map_err(|error| takeover_hint(takeover, error))?
+            }
+            None => String::new(),
+        };
+        diffs.push(Diffed {
+            target: case.target,
+            unit: case.unit,
+            release: case.release,
+            context,
+            diff,
+        });
+    }
+    Ok(diffs)
 }
 
 /// Diffs `manifests` as `release` on `context`, through the chart `apply` would install.

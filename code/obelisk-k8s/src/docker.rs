@@ -195,6 +195,18 @@ pub(crate) fn push(
     )
 }
 
+/// Whether image `tag` is already in the local docker daemon (`docker image inspect`; anything
+/// that stops it looking, e.g. no daemon, counts as no, and the build says what's wrong).
+pub(crate) fn exists_locally(tag: &str) -> bool {
+    Command::new("docker")
+        .args(["image", "inspect", "--format", "{{.Id}}", tag])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
 /// Loads local image `tag` into k3d cluster `cluster`'s nodes.
 pub(crate) fn k3d_import(cluster: &str, tag: &str) -> Result<(), ObeliskK8sError> {
     run(
