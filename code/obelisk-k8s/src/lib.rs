@@ -1,4 +1,5 @@
 mod base;
+pub mod checkout;
 pub mod cluster;
 pub mod config;
 mod docker;

@@ -21,6 +21,10 @@ pub enum ObeliskK8sError {
     #[error("{0}")]
     Render(String),
 
+    /// Running `git` failed: a ref that doesn't resolve, a fetch or checkout that fails.
+    #[error("{0}")]
+    Git(String),
+
     /// Running `kubectl` failed, or what it waited for didn't happen.
     #[error("{0}")]
     Kubectl(String),
