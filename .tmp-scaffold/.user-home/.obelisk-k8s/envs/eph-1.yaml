@@ -1,0 +1,6 @@
+
+env:
+  repo: repo-1
+  blueprint: "bp-1"
+  ref: origin/envs/abc-bp-1
+  ephemeral: "eph-1" # null/omit if `blueprint.ephemeral = false`, required if true

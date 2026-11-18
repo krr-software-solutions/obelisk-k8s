@@ -1,0 +1,20 @@
+
+blueprint:
+  ephemeral: true # all units must be either ephemeral or not ephemeral
+  defaults:
+    ref: feature/abc|origin/feature/abc|origin/HEAD
+  units:
+    - repo: repo-1
+      target: local-ephemeral
+      unit: my-app-1 # DNE - example TODO
+      # dependsOn: []
+      # inherits: feature/abc|origin/feature/abc|origin/HEAD
+    - repo: repo-1
+      target: local-ephemeral
+      unit: my-app-2 # DNE - example TODO
+      ref: a1b2cde # sha
+    - repo: repo-1
+      target: local-ephemeral
+      unit: my-app-3 # DNE - example TODO
+      dependsOn:
+        - "repo-1/local-ephemeral/my-app-1" # repo/target/unit must be distinct within a given blueprint
