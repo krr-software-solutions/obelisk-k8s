@@ -177,15 +177,24 @@ impl GlobalConfig {
     ///
     /// # Errors
     ///
-    /// [`ObeliskK8sError::Usage`] if there's none, naming the ones there are.
+    /// [`ObeliskK8sError::Usage`] if there's none, naming the ones there are, or it's in more than
+    /// one place (picking one could deploy from the wrong place).
     pub fn repo(&self, name: &str) -> Result<&Repo, ObeliskK8sError> {
-        self.repos.iter().find(|r| r.name == name).ok_or_else(|| {
+        let repo = self.repos.iter().find(|r| r.name == name).ok_or_else(|| {
             ObeliskK8sError::Usage(format!(
                 "no repo `{name}` in {} (repos: {}; `config global show` lists any that didn't load)",
                 self.root.join("repos.yaml").display(),
                 known(self.repos.iter().map(|r| r.name.as_str()))
             ))
-        })
+        })?;
+        if !repo.also_at.is_empty() {
+            return Err(ObeliskK8sError::Usage(format!(
+                "repo `{name}` is in more than one place ({}): unlist all but one in {} (or narrow a `/*` entry)",
+                crate::config::global::places(repo, None),
+                self.root.join("repos.yaml").display()
+            )));
+        }
+        Ok(repo)
     }
 
     /// Resolves env `name`: pins and checks out the blueprint repo, loads the blueprint, then pins,
@@ -774,6 +783,28 @@ mod tests {
                 .to_string()
                 .starts_with("no env `nope`")
         );
+    }
+
+    #[test]
+    fn an_env_refuses_a_repo_name_in_two_places() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let (app, bps) = fixture(d);
+        // A bare repo and a stale clone of it: which one an env would resolve and check out from
+        // isn't the tool's to guess.
+        let work = d.join("work");
+        run(d, &["clone", "-q", app.to_str().unwrap(), "work"]);
+        let env = "env:\n  repo: bps\n  blueprint: bp\n  ref: main\n  ephemeral: x\n";
+        let global = global(d, &[&app, &bps, &work], &[("e1", env)]);
+        let error = global
+            .resolve_env("e1", &mut Fetcher::new(false), &mut |_| {})
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with("repo `app` is in more than one place"),
+            "{error}"
+        );
+        assert!(error.contains(work.to_str().unwrap()), "{error}");
     }
 
     #[test]

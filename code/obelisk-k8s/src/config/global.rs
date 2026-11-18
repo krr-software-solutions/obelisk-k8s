@@ -66,6 +66,9 @@ pub struct Repo {
     pub targets: Vec<RepoTarget>,
     pub units: Vec<String>,
     pub blueprints: Vec<String>,
+    /// Other places listed with the same name: then the name is ambiguous, and using it is an
+    /// error (see `GlobalConfig::repo`).
+    pub also_at: Vec<PathBuf>,
     /// Its `.obelisk-k8s/` isn't checked out (a bare repo, or a checkout of a branch without it), so
     /// it's read from git at `origin/HEAD` (else `HEAD`), and the repo is deployed through envs
     /// (checkouts), never `template` / `apply` `--repo`.
@@ -269,18 +272,46 @@ fn load_repos(
                 targets: targets.collect(),
                 units: config.units.into_iter().map(|u| u.name).collect(),
                 blueprints: config.blueprints.into_iter().map(|b| b.name).collect(),
+                also_at: Vec::new(),
                 from_git,
                 path,
             });
         }
     }
-    let repo_files: Vec<PathBuf> = repos
-        .iter()
-        .map(|r| tilde(&r.path, home).join(REPO_CONFIG_DIR).join("repo.yaml"))
-        .collect();
-    let names = repos.iter().map(|r| r.name.as_str());
-    check_unique(names.zip(repo_files.iter().map(PathBuf::as_path)), "repo")?;
-    Ok(repos)
+    Ok(one_per_name(repos, home, warnings))
+}
+
+/// `repos` with each name once. Two places with the same name (e.g. a bare repo and a checkout of
+/// it, or two worktrees under one `/*`) keep the first listed, with the others in its `also_at`:
+/// a warning now, and an error wherever the name is used (`--repo`, an env), naming them all, since
+/// picking one could deploy from the wrong place. Never an error at load, so one stray entry can't
+/// stop every command.
+fn one_per_name(repos: Vec<Repo>, home: Option<&Path>, warnings: &mut Vec<String>) -> Vec<Repo> {
+    let mut kept: Vec<Repo> = Vec::new();
+    for repo in repos {
+        match kept.iter_mut().find(|k| k.name == repo.name) {
+            Some(first) => first.also_at.push(repo.path),
+            None => kept.push(repo),
+        }
+    }
+    for repo in kept.iter().filter(|r| !r.also_at.is_empty()) {
+        warnings.push(format!(
+            "repo `{}` is in more than one place ({}): `--repo {}` and envs using it refuse it until all but one are unlisted",
+            repo.name,
+            places(repo, home),
+            repo.name
+        ));
+    }
+    kept
+}
+
+/// Where `repo` is, and every other place with its name, as the user should see them.
+pub(crate) fn places(repo: &Repo, home: Option<&Path>) -> String {
+    std::iter::once(&repo.path)
+        .chain(&repo.also_at)
+        .map(|p| tilde(p, home).display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Every `clusters/<dir>/cluster.yaml`.
@@ -345,6 +376,13 @@ impl fmt::Display for GlobalConfig {
         for repo in &self.repos {
             writeln!(f, "  {}:  ({})", repo.name, repo.path.display())?;
             writeln!(f, "    from: {}", repo.from)?;
+            for other in &repo.also_at {
+                writeln!(
+                    f,
+                    "    ambiguous: also at {} (unlist all but one)",
+                    other.display()
+                )?;
+            }
             if repo.from_git {
                 writeln!(
                     f,
@@ -768,15 +806,29 @@ mod tests {
     }
 
     #[test]
-    fn rejects_duplicate_repo_names() {
-        let error = Home::new()
+    fn a_name_in_two_places_loads_but_is_ambiguous() {
+        let config = Home::new()
             .repo("a", "same")
             .repo("b", "same")
             .file(".obelisk-k8s/repos.yaml", "repos: [~/a, ~/b]\n")
-            .error();
-        assert_eq!(
-            error,
-            "~/b/.obelisk-k8s/repo.yaml: repo name `same` is already used by ~/a/.obelisk-k8s/repo.yaml"
+            .load()
+            .unwrap();
+        let [repo] = &config.repos[..] else {
+            panic!("{:?}", config.repos)
+        };
+        assert_eq!(repo.also_at.len(), 1);
+        assert!(
+            config
+                .warnings
+                .iter()
+                .any(|w| w.starts_with("repo `same` is in more than one place (~/a, ~/b)")),
+            "{:?}",
+            config.warnings
+        );
+        let error = config.repo("same").unwrap_err().to_string();
+        assert!(
+            error.starts_with("repo `same` is in more than one place"),
+            "{error}"
         );
     }
 

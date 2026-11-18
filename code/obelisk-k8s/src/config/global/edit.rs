@@ -745,20 +745,20 @@ mod tests {
     }
 
     #[test]
-    fn puts_the_file_back_if_the_result_wont_load() {
+    fn a_repo_whose_name_is_taken_is_added_but_ambiguous() {
         let (home, root) = setup();
         repo(home.path(), "a", "same");
         repo(home.path(), "b", "same");
         add_repo(&root, Some(home.path()), "~/a").unwrap();
-        let before = repos_yaml(&root);
-        let error = add_repo(&root, Some(home.path()), "~/b")
-            .unwrap_err()
-            .to_string();
+        let change = add_repo(&root, Some(home.path()), "~/b").unwrap();
         assert!(
-            error.contains("repo name `same` is already used"),
-            "{error}"
+            change
+                .warnings
+                .iter()
+                .any(|w| w.starts_with("repo `same` is in more than one place")),
+            "{:?}",
+            change.warnings
         );
-        assert_eq!(repos_yaml(&root), before);
     }
 
     #[test]
