@@ -208,6 +208,29 @@ impl RepoConfig {
         })
     }
 
+    /// Loads a repo's `.obelisk-k8s/` from git (`git_dir`: a bare repo, or a checkout without it) at
+    /// its config ref (`origin/HEAD`, else `HEAD`), through a throwaway extract: no worktree. Also
+    /// returns the ref.
+    /// Its paths are as for a repo root (`.obelisk-k8s/…`), but there are no files behind them.
+    ///
+    /// # Errors
+    ///
+    /// [`ObeliskK8sError::NoRepoConfig`] if there's no `.obelisk-k8s/` at that ref; else as
+    /// [`RepoConfig::load`].
+    pub fn load_from_git(git_dir: &Path) -> Result<(Self, &'static str), ObeliskK8sError> {
+        let rev = crate::checkout::config_ref(git_dir);
+        let dir = tempfile::tempdir().map_err(|source| ObeliskK8sError::Io {
+            path: git_dir.to_owned(),
+            source,
+        })?;
+        if crate::checkout::show(git_dir, rev, REPO_FILE).is_err() {
+            return Err(ObeliskK8sError::NoRepoConfig);
+        }
+        crate::checkout::extract(git_dir, rev, REPO_CONFIG_DIR, dir.path())
+            .map_err(|e| ObeliskK8sError::Git(format!("{}: {e}", git_dir.display())))?;
+        Ok((Self::load(dir.path())?, rev))
+    }
+
     /// The blueprint named `name`.
     ///
     /// # Errors

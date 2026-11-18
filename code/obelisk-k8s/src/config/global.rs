@@ -8,7 +8,8 @@
 //!   clusters/<dir>/docker.yaml    optional: docker: { push: { prefix, … }, pull: { auths } } (see `docker`)
 //! ```
 //!
-//! A repo's name comes from its own `repo.yaml`; a cluster's defaults to its directory's name.
+//! A repo's name comes from its own `repo.yaml` (a bare repo's, at its `origin/HEAD`, else `HEAD`);
+//! a cluster's defaults to its directory's name.
 
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
@@ -16,8 +17,9 @@ use std::path::{Component, Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::ObeliskK8sError;
-use crate::config::repo::REPO_CONFIG_DIR;
+use crate::checkout;
 use crate::config::repo::RepoConfig;
+use crate::config::repo::{REPO_CONFIG_DIR, REPO_FILE};
 use crate::config::{check_unique, config_error, name_or_dir, read_entries};
 use crate::yaml::{self, Spanned};
 
@@ -59,6 +61,10 @@ pub struct Repo {
     pub targets: Vec<RepoTarget>,
     pub units: Vec<String>,
     pub blueprints: Vec<String>,
+    /// Its `.obelisk-k8s/` isn't checked out (a bare repo, or a checkout of a branch without it), so
+    /// it's read from git at `origin/HEAD` (else `HEAD`), and the repo is deployed through envs
+    /// (checkouts), never `template` / `apply` `--repo`.
+    pub from_git: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -230,7 +236,13 @@ fn load_repos(
                 continue;
             }
             let shown_path = tilde(&path, home);
-            let config = match RepoConfig::load(&path) {
+            let from_git = !path.join(REPO_CONFIG_DIR).is_dir();
+            let loaded = if from_git {
+                RepoConfig::load_from_git(&path).map(|(config, _)| config)
+            } else {
+                RepoConfig::load(&path)
+            };
+            let config = match loaded {
                 Ok(config) => config,
                 Err(error) => {
                     warnings.push(format!("{}: skipped: {error}", shown_path.display()));
@@ -250,6 +262,7 @@ fn load_repos(
                 targets: targets.collect(),
                 units: config.units.into_iter().map(|u| u.name).collect(),
                 blueprints: config.blueprints.into_iter().map(|b| b.name).collect(),
+                from_git,
                 path,
             });
         }
@@ -325,6 +338,12 @@ impl fmt::Display for GlobalConfig {
         for repo in &self.repos {
             writeln!(f, "  {}:  ({})", repo.name, repo.path.display())?;
             writeln!(f, "    from: {}", repo.from)?;
+            if repo.from_git {
+                writeln!(
+                    f,
+                    "    not checked out: config read from git at origin/HEAD (else HEAD); deployed through envs"
+                )?;
+            }
             let targets: Vec<String> = repo
                 .targets
                 .iter()
@@ -442,7 +461,7 @@ fn expand(
             return Ok(vec![dir]);
         }
         warnings.push(format!(
-            "{}: skipped `{raw}`: no `{REPO_CONFIG_DIR}/` in {}",
+            "{}: skipped `{raw}`: no `{REPO_CONFIG_DIR}/` in {} (nor in git at `origin/HEAD` / `HEAD`)",
             file.display(),
             tilde(&dir, home).display()
         ));
@@ -493,9 +512,19 @@ fn resolve_entry(raw: &str, root: &Path, home: Option<&Path>) -> Result<EntryTar
     })
 }
 
-/// Whether `path` is a repo (holds a `.obelisk-k8s/`).
+/// Whether `path` is a repo: it holds a `.obelisk-k8s/`, or it's a git repo with one at its config
+/// ref (a bare repo, or a checkout of a branch without it).
 fn is_repo(path: &Path) -> bool {
-    path.join(REPO_CONFIG_DIR).is_dir()
+    path.join(REPO_CONFIG_DIR).is_dir() || has_config_in_git(path)
+}
+
+/// A git repo (bare, or a checkout without `.obelisk-k8s/`, e.g. on an older branch) whose
+/// `repo.yaml` is in git at its config ref (`origin/HEAD`, else `HEAD`). Only a repo's root counts:
+/// a plain subdirectory of one isn't a repo.
+fn has_config_in_git(path: &Path) -> bool {
+    (path.join(".git").exists() || path.join("HEAD").is_file())
+        && checkout::is_git_repo(path)
+        && checkout::show(path, checkout::config_ref(path), REPO_FILE).is_ok()
 }
 
 /// The repos directly in `dir`, sorted; `None` if it can't be read.
@@ -741,7 +770,7 @@ mod tests {
         let w = &config.warnings;
         assert_eq!(
             w[0],
-            "~/.obelisk-k8s/repos.yaml: skipped `~/missing`: no `.obelisk-k8s/` in ~/missing"
+            "~/.obelisk-k8s/repos.yaml: skipped `~/missing`: no `.obelisk-k8s/` in ~/missing (nor in git at `origin/HEAD` / `HEAD`)"
         );
         assert!(w[1].starts_with("~/broken: skipped: "), "{w:?}");
         assert!(

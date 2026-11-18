@@ -295,7 +295,7 @@ pub fn add_repo(root: &Path, home: Option<&Path>, entry: &str) -> Result<Change,
     }
     if !target.wildcard && !is_repo(&target.dir) {
         return Err(usage(format!(
-            "`{entry}`: no `{REPO_CONFIG_DIR}/` in {}",
+            "`{entry}`: no `{REPO_CONFIG_DIR}/` in {} (nor in git at `origin/HEAD` / `HEAD`)",
             shown_dir.display()
         )));
     }
@@ -735,7 +735,10 @@ mod tests {
                 .unwrap_err()
                 .to_string()
         };
-        assert_eq!(error("~/nope"), "`~/nope`: no `.obelisk-k8s/` in ~/nope");
+        assert_eq!(
+            error("~/nope"),
+            "`~/nope`: no `.obelisk-k8s/` in ~/nope (nor in git at `origin/HEAD` / `HEAD`)"
+        );
         assert_eq!(error("~/nope/*"), "`~/nope/*`: can't read ~/nope");
         assert!(error("~/a/*/b").contains("`*` is only allowed as a whole last component"));
         assert_eq!(repos_yaml(&root), "repos: []\n");

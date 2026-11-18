@@ -1,4 +1,5 @@
-//! Git refs, resolved to commits; and the detached worktrees an env renders from.
+//! Git refs, resolved to commits; the detached worktrees an env renders from; and a bare repo's
+//! own config, read without one.
 //!
 //! A ref is written as a chain of candidates, `a|b|c`: the first that names a commit wins. A
 //! candidate that starts with one of the repo's remotes (`origin/feature/abc`, `origin/HEAD`) is
@@ -234,6 +235,63 @@ pub fn ensure_checkout(
     )
     .map_err(|e| ObeliskK8sError::Git(format!("repo `{repo}`: checking out {sha}: {e}")))?;
     Ok(true)
+}
+
+/// Whether `path` is a git repo (bare, or a work tree's root or anywhere in one).
+pub(crate) fn is_git_repo(path: &Path) -> bool {
+    git(path, &["rev-parse", "--git-dir"]).is_ok()
+}
+
+/// The ref a repo's own config is read at, when it isn't checked out (a bare repo, or a checkout
+/// without `.obelisk-k8s/`): `origin/HEAD` (what the remote's default branch
+/// says, as of the last fetch) if it has one, else `HEAD` (often a local branch nothing updates).
+pub(crate) fn config_ref(git_dir: &Path) -> &'static str {
+    if commit_of(git_dir, "refs/remotes/origin/HEAD").is_ok_and(|sha| sha.is_some()) {
+        "origin/HEAD"
+    } else {
+        "HEAD"
+    }
+}
+
+/// Writes `dir` (a directory in the tree) at `rev`, from the repo at `git_dir`, under `dest`
+/// (`git archive | tar -x`): no worktree, nothing registered, nothing left in the repo.
+pub(crate) fn extract(git_dir: &Path, rev: &str, dir: &str, dest: &Path) -> Result<(), String> {
+    use std::process::Stdio;
+    let mut archive = git_command(git_dir)
+        .args(["archive", "--format=tar", rev, "--", dir])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("can't run `git`: {e}"))?;
+    let tar_in = archive.stdout.take().ok_or("`git archive` has no stdout")?;
+    let tar = Command::new("tar")
+        .arg("-x")
+        .arg("-C")
+        .arg(dest)
+        .stdin(tar_in)
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| format!("can't run `tar`: {e}"))?;
+    let archived = archive
+        .wait_with_output()
+        .map_err(|e| format!("`git archive` failed: {e}"))?;
+    if !archived.status.success() {
+        let stderr = String::from_utf8_lossy(&archived.stderr);
+        return Err(format!(
+            "`git archive {rev} -- {dir}` failed: {}",
+            stderr.trim()
+        ));
+    }
+    if !tar.status.success() {
+        let stderr = String::from_utf8_lossy(&tar.stderr);
+        return Err(format!("`tar -x` failed: {}", stderr.trim()));
+    }
+    Ok(())
+}
+
+/// `path` at `rev`'s text, from the repo at `git_dir`.
+pub(crate) fn show(git_dir: &Path, rev: &str, path: &str) -> Result<String, String> {
+    git(git_dir, &["show", &format!("{rev}:{path}")])
 }
 
 fn git_command(dir: &Path) -> Command {

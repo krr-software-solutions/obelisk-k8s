@@ -8,7 +8,9 @@ use obelisk_k8s::config::apply::Takeover;
 use obelisk_k8s::config::diff::DiffOptions;
 use obelisk_k8s::config::ephemeral::{Ephemeral, EphemeralValues};
 use obelisk_k8s::config::global::edit::{self as global_edit, Change};
-use obelisk_k8s::config::global::{GLOBAL_ROOT_ENV, GlobalConfig, default_global_root, tilde};
+use obelisk_k8s::config::global::{
+    GLOBAL_ROOT_ENV, GlobalConfig, Repo, default_global_root, tilde,
+};
 use obelisk_k8s::config::pull_secret::PullSecretOptions;
 use obelisk_k8s::config::repo::RepoConfig;
 use obelisk_k8s::export::ExportFormat;
@@ -50,29 +52,59 @@ fn repo_root(
     find_repo(name, &config, home.as_deref())
 }
 
-/// Repo `name` in `config`, and where it is as the user should see it.
-fn find_repo(
-    name: &str,
-    config: &GlobalConfig,
-    home: Option<&Path>,
-) -> Result<(PathBuf, Option<PathBuf>), ObeliskK8sError> {
-    let found = config.repos.iter().find(|r| r.name == name).ok_or_else(|| {
+/// Repo `name` in `config`.
+fn registered<'a>(name: &str, config: &'a GlobalConfig) -> Result<&'a Repo, ObeliskK8sError> {
+    config.repos.iter().find(|r| r.name == name).ok_or_else(|| {
         let known: Vec<_> = config.repos.iter().map(|r| r.name.as_str()).collect();
         let known = if known.is_empty() { "none".to_owned() } else { known.join(", ") };
         ObeliskK8sError::Usage(format!(
             "no repo `{name}` in {} (repos: {known}; `config global show` lists any that didn't load)",
             config.root.join("repos.yaml").display()
         ))
-    })?;
+    })
+}
+
+/// Repo `name` in `config`, and where it is as the user should see it. A bare repo has no files to
+/// render from, so it's refused: it's deployed through an env.
+fn find_repo(
+    name: &str,
+    config: &GlobalConfig,
+    home: Option<&Path>,
+) -> Result<(PathBuf, Option<PathBuf>), ObeliskK8sError> {
+    let found = registered(name, config)?;
+    if found.from_git {
+        return Err(ObeliskK8sError::Usage(format!(
+            "repo `{name}` has no `.obelisk-k8s/` checked out at {} (a bare repo, or a checkout of another branch): deploy it through an env (`obelisk-k8s env …`), or check it out",
+            tilde(&found.path, home).display()
+        )));
+    }
     Ok((found.path.clone(), Some(tilde(&found.path, home))))
 }
 
+/// `config repo show`: the repo in the current directory, or the one named `repo` (a bare one read
+/// at its `origin/HEAD`, else `HEAD`).
 pub fn run_config_repo_show(
     repo: Option<&str>,
     global_root_arg: Option<PathBuf>,
 ) -> Result<(), ObeliskK8sError> {
-    let (repo_root, _) = repo_root(repo, global_root_arg)?;
-    print!("{}", load_repo_config(&repo_root)?);
+    let Some(name) = repo else {
+        print!("{}", load_repo_config(&cwd()?)?);
+        return Ok(());
+    };
+    let (root, home) = global_root(global_root_arg)?;
+    let global = GlobalConfig::load(&root, home.as_deref())?;
+    let found = registered(name, &global)?;
+    if found.from_git {
+        let (config, rev) = RepoConfig::load_from_git(&found.path)?;
+        warn(&config.warnings);
+        println!(
+            "(not checked out at {}: read from git at {rev})",
+            tilde(&found.path, home.as_deref()).display()
+        );
+        print!("{config}");
+    } else {
+        print!("{}", load_repo_config(&found.path)?);
+    }
     Ok(())
 }
 
